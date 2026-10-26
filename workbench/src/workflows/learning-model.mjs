@@ -23,7 +23,7 @@ export class LearningModel {
     const state = this.active.get(id);
     return !!state && !this.closed && !state.done && !state.terminal && state.submitting && state.requestId === requestId && !state.signal?.aborted;
   }
-  async createMemoryScope({ id, signal, onSession, persist = false } = {}) {
+  async createMemoryScope({ id, signal, onSession, persist = false, modelRoute } = {}) {
     if (!UUID.test(id || '')) throw fail('无效的学习记忆范围标识。');
     if (this.closed || signal?.aborted) throw fail('学习记忆准备已停止。');
     this.memoryScopes.add(id);
@@ -38,7 +38,7 @@ export class LearningModel {
     });
     result.catch(() => {});
     void (async () => { try {
-      const session = await this.app.createSession({ title: '学习 · 固定记忆快照' });
+      const session = await this.app.createSession({ title: '学习 · 固定记忆快照', ...(modelRoute ? { modelRoute } : {}) });
       if (this.closed) return;
       state.id = session.id;
       this.db.prepare('INSERT INTO learning_model_sessions(id) VALUES(?)').run(session.id);
@@ -79,7 +79,7 @@ export class LearningModel {
     this.memoryScopes.add(id);
     return { id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false, snapshot: { ...snapshot } };
   }
-  async generate(prompt, { signal, onSession, memoryScopeId, title = '学习 · 评价 / 调整 Skill' } = {}) {
+  async generate(prompt, { signal, onSession, memoryScopeId, modelRoute, title = '学习 · 评价 / 调整 Skill' } = {}) {
     if (this.closed || signal?.aborted) throw fail('学习模型调用已停止。');
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw fail('学习模型指令超过长度限制。');
     if (typeof title !== 'string' || !title.trim() || title.length > 120) throw fail('模型会话名称无效。');
@@ -96,7 +96,7 @@ export class LearningModel {
     // Attach the rejection handler before awaiting preparation or the submit ACK.
     result.catch(() => {});
     void (async () => { try {
-      const session = await this.app.createSession({ title });
+      const session = await this.app.createSession({ title, ...(modelRoute ? { modelRoute } : {}) });
       // Creation can outlive abort or close. Never touch a closed database; while
       // still open, retain ownership of even an unused late session.
       if (this.closed) return;

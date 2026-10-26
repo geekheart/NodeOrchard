@@ -86,10 +86,6 @@ const unsafePolicies = [
     name: 'disabled approvals', code: 'POLICY_APPROVAL_REQUIRED',
     env: { FAKE_APPROVAL_MODE: 'off' }, change: { approval_mode: 'off' },
   },
-  {
-    name: 'a non-subscription fallback', code: 'FALLBACK_PROVIDER_NOT_ALLOWED',
-    env: { FAKE_FALLBACK_PROVIDER: 'openai' }, change: { fallback_provider: 'openai' },
-  },
 ];
 
 for (const policy of unsafePolicies) {
@@ -123,6 +119,19 @@ for (const policy of unsafePolicies) {
     assert.deepEqual(history.messages, []);
   });
 }
+
+test('Hermes-managed fallback providers do not disable normal approval policy', async t => {
+  const { app } = await setup(t, { FAKE_FALLBACK_PROVIDER: 'fixture-local' });
+  await app.connect();
+  const calls = [], request = app.adapter.request.bind(app.adapter);
+  app.adapter.request = (method, params, ...args) => { calls.push({ method, params }); return request(method, params, ...args); };
+  const session = await app.createSession();
+  const completed = eventAfter(app, event => event.type === 'message.complete');
+  await app.submit(session.id, 'managed provider policy');
+  assert.equal((await completed).payload.status, 'complete');
+  assert(calls.some(call => call.method === 'config.get' && call.params.key === 'approvals.mode'));
+  assert(!calls.some(call => call.method === 'config.get' && call.params.key === 'full'), 'approval checks must not fetch secret-bearing full configuration');
+});
 
 test('stdio → session → streamed response → authoritative Hermes history', async t => {
   const { app } = await setup(t);
@@ -159,7 +168,7 @@ for (const boundary of ['policy', 'runtime']) {
       if (boundary === 'policy') {
         const request = app.adapter.request.bind(app.adapter);
         app.adapter.request = async (method, params, ...args) => {
-          if (method === 'config.get' && params.key === 'full') { reached(); await blocked; }
+          if (method === 'config.get' && params.key === 'approvals.mode') { reached(); await blocked; }
           return request(method, params, ...args);
         };
       } else {

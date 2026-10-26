@@ -3,7 +3,8 @@ import { mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve, join, dirname } from 'node:path';
 import { HermesAdapter, redact } from './hermes-adapter.mjs';
 import { Store } from './store.mjs';
-import { assertSubscriptionPolicy } from './route-policy.mjs';
+import { assertHermesPolicy } from './route-policy.mjs';
+import { HermesModels } from './hermes-models.mjs';
 import { validatePreferences } from './preferences.mjs';
 import { initializeWorkspace } from './workspace-layout.mjs';
 import { readSkillCatalog, readSkill, readSkillLabels, applySkillLabel } from './catalog.mjs';
@@ -28,6 +29,7 @@ export class Application extends EventEmitter {
     super();
     this.config = config;
     this.adapter = adapter;
+    this.models = new HermesModels(adapter);
     this.store = new Store(config.dataDir);
     this.requests = new Map();
     this.sessionInfo = new Map();
@@ -42,7 +44,7 @@ export class Application extends EventEmitter {
     this.historyOnlyRuntimes = new Set();
     this.resumeFrames = [];
     this.preferences = initializeWorkspace(config, this.store);
-    this.backend = { state: 'stopped', provider: config.provider, model: config.model,
+    this.backend = { state: 'stopped', provider: '', model: '',
       authenticated: null, hermesVersion: config.hermesVersion, lastError: '', cwdDefault: join(config.workspaceRoot, this.preferences.defaultWorkspace) };
     adapter.on('state', state => {
       if (this.closed) return;
@@ -112,7 +114,7 @@ export class Application extends EventEmitter {
       } catch { /* A disconnected or unsupported backend has no confirmed approval mode. */ }
     }
     return { preferences: { ...this.preferences }, runtime: {
-      provider: this.config.provider, hermesVersion: this.config.hermesVersion,
+      provider: this.backend.provider, hermesVersion: this.config.hermesVersion,
       hermesRoot: this.config.hermesRoot, hermesHome: this.config.hermesHome,
       workspaceRoot: this.config.workspaceRoot,
       availableModels: Array.isArray(this.backend.availableModels)
@@ -170,17 +172,10 @@ export class Application extends EventEmitter {
   async #connect() {
     await this.adapter.start();
     try {
-      await assertSubscriptionPolicy(this.adapter, this.config.provider);
-      const provider = await this.adapter.request('config.get', { key: 'provider' });
-      const inventory = await this.adapter.request('model.options', { include_unconfigured: false });
-      const codex = inventory.providers?.find(item => item.slug === this.config.provider);
-      const auth = provider.providers?.find(item => item.id === this.config.provider);
-      const models = codex?.models || [];
-      const savedModel = provider.provider === this.config.provider ? provider.model : '';
-      const model = this.config.model || savedModel || codex?.featured_models?.[0] || models[0] || '';
-      Object.assign(this.backend, { state: 'ready', provider: this.config.provider, model,
-        authenticated: codex?.authenticated ?? auth?.authenticated ?? null,
-        availableModels: models, lastError: '' });
+      await assertHermesPolicy(this.adapter);
+      const options = await this.models.read();
+      this.applyModelOptions(options);
+      Object.assign(this.backend, { state: 'ready', lastError: '' });
       this.publish('backend.status', null, { ...this.backend });
       return { ...this.backend };
     } catch (error) {
@@ -194,7 +189,53 @@ export class Application extends EventEmitter {
   checkReady() {
     if (this.closed) throw new Error('工作台已关闭。');
     if (this.adapter.state !== 'ready' || this.backend.state !== 'ready') throw new Error(this.backend.lastError || '请先连接 Hermes。');
-    if (!this.backend.model) throw new Error('Hermes 尚未提供订阅模型。请在 Hermes 中运行 hermes model 完成 ChatGPT 登录，或设置 WORKBENCH_HERMES_MODEL。');
+  }
+
+  applyModelOptions(options) {
+    const current = options.current || {};
+    const provider = options.providers?.find(item => item.id === current.provider);
+    Object.assign(this.backend, { provider: current.provider || '', model: current.model || '',
+      authenticated: provider?.authenticated ?? null, availableModels: provider?.models || [] });
+  }
+
+  async modelOptions() {
+    const options = await this.models.read();
+    if (this.closed) throw new Error('工作台已关闭。');
+    if (options.connected) {
+      this.applyModelOptions(options);
+      this.publish('backend.status', null, { ...this.backend });
+    }
+    return options;
+  }
+
+  async selectModel(input) {
+    this.checkReady();
+    const options = await this.models.set(input);
+    if (this.closed) throw new Error('工作台已关闭。');
+    this.applyModelOptions(options);
+    this.publish('models.updated', null, options);
+    this.publish('backend.status', null, { ...this.backend });
+    return options;
+  }
+
+  async captureModelRoute({ optional = false } = {}) {
+    if (optional && (this.closed || this.adapter.state !== 'ready' || this.backend.state !== 'ready')) return null;
+    this.checkReady();
+    const { current } = await this.modelOptions();
+    if (!current?.provider || !current?.model) {
+      if (optional) return null;
+      throw new Error('Hermes 尚未配置默认模型，请从顶部选择模型或先运行 hermes model。');
+    }
+    return Object.freeze({ provider: current.provider, model: current.model });
+  }
+
+  recoverModelRoute(sessionIds) {
+    const routes = new Map();
+    for (const id of sessionIds) {
+      const session = id && this.store.get(id);
+      if (session?.provider && session.model) routes.set(JSON.stringify([session.provider, session.model]), { provider: session.provider, model: session.model });
+    }
+    return routes.size === 1 ? [...routes.values()][0] : null;
   }
 
   workspace(cwd) {
@@ -215,9 +256,13 @@ export class Application extends EventEmitter {
     return canonical;
   }
 
-  async configureSession(snapshot) {
+  async configureSession(snapshot, expectedRoute) {
     const runtime = snapshot.session_id;
-    if (snapshot.info?.provider && snapshot.info.provider !== this.config.provider) throw new Error('Hermes 返回了非 ChatGPT 订阅路由，已停止提交。');
+    // The session's actual route is the authority; a requested pin must be
+    // confirmed before any prompt, never silently replaced by the new default.
+    if (expectedRoute && (snapshot.info?.provider !== expectedRoute.provider || snapshot.info?.model !== expectedRoute.model)) {
+      throw new Error('Hermes 未确认所选会话模型，已停止提交。');
+    }
     await this.adapter.request('config.set', { key: 'yolo', value: 'off', scope: 'session', session_id: runtime });
     if (snapshot.info?.approval_mode === 'off') throw new Error('Hermes 当前配置关闭了审批。请在 Hermes 设置中启用审批后重试；应用不会修改你的全局配置。');
     snapshot.info = infoView(snapshot.info);
@@ -225,22 +270,20 @@ export class Application extends EventEmitter {
     return snapshot;
   }
 
-  async createSession({ title = '', cwd = '' } = {}) {
+  async createSession({ title = '', cwd = '', modelRoute } = {}) {
     this.checkReady();
-    await assertSubscriptionPolicy(this.adapter, this.config.provider);
-    const model = this.preferences.defaultModel || this.backend.model;
-    if (this.preferences.defaultModel && !this.backend.availableModels?.includes(model)) {
-      throw new Error('已保存的默认模型不在当前订阅模型列表中，请在设置中重新选择或恢复默认。');
-    }
+    await assertHermesPolicy(this.adapter);
+    const route = modelRoute || await this.captureModelRoute();
+    if (typeof route.provider !== 'string' || !route.provider || typeof route.model !== 'string' || !route.model) throw new Error('无效的 Hermes 会话模型。');
     const directory = this.workspace(cwd || this.preferences.defaultWorkspace);
     const snapshot = await this.adapter.request('session.create', {
       cwd: directory, source: 'tui', title: String(title || '新任务').slice(0, 120),
-      provider: this.config.provider, model,
+      provider: route.provider, model: route.model,
     });
-    await this.configureSession(snapshot);
+    await this.configureSession(snapshot, route);
     this.checkReady();
     const session = this.store.create({ title: String(title || '新任务').slice(0, 120), cwd: directory,
-      storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model });
+      storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model: snapshot.info.model, provider: snapshot.info.provider });
     this.publish('session.updated', session.id, session);
     return session;
   }
@@ -267,15 +310,16 @@ export class Application extends EventEmitter {
         this.checkReady();
         const current = this.session(id);
         if (current.runtimeSessionId) recovery.runtimeIds.add(current.runtimeSessionId);
-        await assertSubscriptionPolicy(this.adapter, this.config.provider);
+        await assertHermesPolicy(this.adapter);
         if (this.closed) throw new Error('工作台已关闭。');
         let snapshot;
         if (current.runtimeSessionId) {
           snapshot = await this.adapter.request('session.activate', { session_id: current.runtimeSessionId });
         } else if (!current.hasPrompted && !this.store.runs(id).length) {
           // Hermes does not persist an empty session until its first prompt.
+          if (!current.provider || !current.model) throw new Error('此旧空会话未记录模型，无法安全恢复，请新建任务。');
           snapshot = await this.adapter.request('session.create', { cwd: current.cwd, source: 'tui', title: current.title,
-            provider: this.config.provider, model: current.model || this.backend.model });
+            provider: current.provider, model: current.model });
         } else {
           try {
             const managed = this.workflows.ownsSession(id) || this.learningModel.ownsSession(id);
@@ -289,19 +333,21 @@ export class Application extends EventEmitter {
             // A first submission can fail before Hermes persists the empty session.
             // Only a definitive not-found and no accepted turn permits recreating it.
             if (error.code !== 4007 || current.hasPrompted) throw error;
+            if (!current.provider || !current.model) throw new Error('此旧会话未记录模型，无法安全重建，请新建任务。');
             snapshot = await this.adapter.request('session.create', { cwd: current.cwd, source: 'tui', title: current.title,
-              provider: this.config.provider, model: current.model || this.backend.model });
+              provider: current.provider, model: current.model });
           }
         }
         recovery.runtimeIds.add(snapshot.session_id);
         if (this.closed) throw new Error('工作台已关闭。');
-        await this.configureSession(snapshot);
+        await this.configureSession(snapshot, current.provider && current.model ? current : undefined);
         if (this.closed) throw new Error('工作台已关闭。');
         if (this.adapter.state !== 'ready') throw new Error('Hermes 连接已断开，请重新连接后恢复。');
         const latestRun = this.store.runs(id).at(-1);
         const idleStatus = ['complete', 'error', 'interrupted', 'unknown'].includes(latestRun?.status)
           ? latestRun.status : 'idle';
         this.updateSession(id, { runtimeSessionId: snapshot.session_id,
+          model: snapshot.info.model || current.model, provider: snapshot.info.provider || current.provider,
           storedSessionId: snapshot.stored_session_id || current.storedSessionId,
           status: snapshot.inflight?.streaming || snapshot.running ? 'running' : idleStatus });
         for (const request of snapshot.open_requests || []) {
@@ -360,7 +406,7 @@ export class Application extends EventEmitter {
     if (this.busyMutations.has(id)) throw Object.assign(new Error('此会话正在提交，请稍候。'), { httpStatus: 409 });
     this.busyMutations.add(id);
     try {
-      await assertSubscriptionPolicy(this.adapter, this.config.provider);
+      await assertHermesPolicy(this.adapter);
       const session = await this.runtime(id);
       // Stop or shutdown can happen while policy checks/session recovery await.
       // Recheck immediately before committing and submitting the prompt.

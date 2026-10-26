@@ -63,3 +63,26 @@ body.sidebar-collapsed .personal-label { justify-content: center; padding: 14px 
   body:not(.sidebar-collapsed) .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 60; width: 218px; box-shadow: 12px 0 35px #0003; }
   body:not(.sidebar-collapsed) .main-shell { margin-left: 64px; }
 }
+
+/* The global model selector delegates provider and credential ownership to Hermes. */
+.breadcrumb{overflow:hidden;flex:1;white-space:nowrap}
+.topbar-actions{flex-shrink:1;min-width:0;max-width:100%}
+.hermes-model-button{max-width:310px;min-width:0;flex-shrink:1}
+.hermes-model-button>span:nth-child(2){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hermes-model-button .icon,.hermes-model-chevron{flex-shrink:0}
+.hermes-model-chevron{color:var(--muted);font-size:14px;line-height:1}
+.hermes-model-dialog{max-height:calc(100dvh - 32px);overflow:auto}
+.hermes-model-dialog .dialog-heading{margin-bottom:18px}
+.hermes-model-current{display:grid;gap:7px;padding:12px;border:1px solid var(--line);border-radius:7px;background:var(--bg);font-size:12px;overflow-wrap:anywhere}
+.hermes-model-current>span{color:var(--muted);font-size:11px}
+.hermes-model-current strong{font-weight:550;line-height:1.5}
+.hermes-model-dialog select{display:block;width:100%;font-size:13px}
+.hermes-model-impact{padding:12px;border-left:2px solid var(--accent);background:var(--bg);font-size:12px;line-height:1.7;color:var(--secondary);margin-top:18px;overflow-wrap:anywhere}
+#hermes-model-status{min-height:34px;margin-top:14px;line-height:1.6}
+.hermes-model-utilities{display:flex;gap:9px;flex-wrap:wrap;margin-top:10px}
+.dialog-model{flex-wrap:wrap}
+.dialog-model #new-task-model{min-width:0;flex:1;overflow-wrap:anywhere}
+.settings-actions{flex-wrap:wrap}
+@media(max-width:920px){.hermes-model-button{max-width:225px}}
+@media(max-width:720px){.hermes-model-button{max-width:180px}.topbar-actions{gap:5px}.breadcrumb{gap:6px}.hermes-model-dialog{padding:20px}.hermes-model-dialog .dialog-heading h2{font-size:19px}}
+@media(max-width:480px){.hermes-model-button{max-width:145px}.topbar{gap:8px;padding-left:12px;padding-right:12px}.hermes-model-button .icon{display:none}.hermes-model-chevron{font-size:12px}.hermes-model-dialog{width:calc(100vw - 24px);max-height:calc(100dvh - 24px);padding:18px}.hermes-model-dialog .dialog-actions .button{padding:8px 10px}}

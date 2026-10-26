@@ -470,3 +470,105 @@ test('learning waits at each human gate and validation feedback never enters opt
   assert.equal(result.bestScore, 100); assert.equal(modelCalls, 0); assert.equal(result.memoryPolicy.memoryWriteAllowed, false);
   assert.equal(JSON.stringify(result.rounds[0].cases[1].skillInputs).includes('private validation comment'), false);
 });
+
+test('an admitted main model stays pinned through human waits and nested Skill execution', async t => {
+  const { app, manager } = await setup(t);
+  const version = 'sha256:' + 'b'.repeat(64), histories = new Map(), routes = [];
+  let selected = { provider: 'first-provider', model: 'first-model' }, captures = 0;
+  app.captureModelRoute = async () => { captures++; return { ...selected }; };
+  app.skill = async name => ({ name, content: 'Return the input.', revision: version, source: 'local' });
+  app.createSession = async ({ modelRoute }) => { routes.push({ ...modelRoute }); return { id: 'pinned-' + routes.length }; };
+  app.submit = async id => { histories.set(id, [{ role: 'assistant', text: '{"ok":true}' }]); queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+  app.history = async id => ({ messages: histories.get(id) }); app.interrupt = async () => ({});
+  manager.prepareSkill = async (_app, _session, detail) => ({ skill: detail, text: '{}', cleanup: async () => {} });
+  const skill = id => node('skill', id, { inputType: 'object', outputType: 'object', skillRef: 'fixture', version });
+  const child = graph([node('input', 'child-in'), skill('child-skill'), node('output', 'child-out')], [['child-in', 'child-skill'], ['child-skill', 'child-out']]);
+  const doc = graph([node('input', 'input'), skill('first'), node('human', 'review'), node('subflow', 'nested', { document: child }), node('output', 'output')], [['input', 'first'], ['first', 'review'], ['review', 'nested'], ['nested', 'output']]);
+  const run = await manager.start({ document: doc, input: {} });
+  await until(() => manager.get(run.id).status === 'waiting_review');
+  selected = { provider: 'second-provider', model: 'second-model' };
+  await manager.approve(run.id, { nodeId: 'review', action: 'approve' });
+  const result = await until(() => ['complete', 'error'].includes(manager.get(run.id).status) && manager.get(run.id));
+  assert.equal(result.status, 'complete', result.error);
+  assert.equal(captures, 1);
+  assert.deepEqual(result.modelRoute, { provider: 'first-provider', model: 'first-model' });
+  assert.deepEqual(routes, [result.modelRoute, result.modelRoute]);
+  const next = await manager.start({ document: child, input: {} });
+  await until(() => manager.get(next.id).status === 'complete');
+  assert.deepEqual(manager.get(next.id).modelRoute, selected);
+  assert.deepEqual(routes.at(-1), selected);
+});
+
+for (const recoverable of [true, false]) {
+  test(`a legacy DAG ${recoverable ? 'recovers its original model' : 'refuses an unknown model'} after a persistent human wait`, async t => {
+    const { app, manager, db } = await setup(t);
+    const original = { provider: 'legacy-provider', model: 'legacy-model' };
+    let selected = { ...original }, captures = 0;
+    const routes = [], histories = new Map();
+    const version = 'sha256:' + 'c'.repeat(64);
+    app.captureModelRoute = async () => { captures++; return { ...selected }; };
+    app.skill = async name => ({ name, content: 'Return the input.', revision: version, source: 'local' });
+    app.createSession = async ({ modelRoute }) => { routes.push({ ...modelRoute }); return { id: 'legacy-session-' + routes.length }; };
+    app.submit = async id => { histories.set(id, [{ role: 'assistant', text: '{"preserved":"first result"}' }]); queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+    app.history = async id => ({ messages: histories.get(id) }); app.interrupt = async () => ({});
+    const prepare = async (_app, _session, detail) => ({ skill: detail, text: '{}', cleanup: async () => {} });
+    manager.prepareSkill = prepare;
+    const skill = id => node('skill', id, { inputType: 'object', outputType: 'object', skillRef: 'fixture', version });
+    const document = graph([node('input', 'input'), skill('first'), node('human', 'review'), skill('second'), node('output', 'output')],
+      [['input', 'first'], ['first', 'review'], ['review', 'second'], ['second', 'output']]);
+    const started = await manager.start({ document, input: {} });
+    await until(() => manager.get(started.id).status === 'waiting_review');
+    await manager.close();
+    const legacy = manager.get(started.id), first = legacy.nodes.first;
+    delete legacy.modelRoute;
+    db.prepare('UPDATE workflow_runs SET value=? WHERE id=?').run(JSON.stringify(legacy), started.id);
+    selected = { provider: 'new-default-provider', model: 'new-default-model' };
+    const recoveredIds = [];
+    app.recoverModelRoute = ids => { recoveredIds.push(...ids); return recoverable && ids.includes(first.sessionId) ? { ...original } : null; };
+    const replacement = new WorkflowRuns(app); app.workflows = replacement; replacement.prepareSkill = prepare;
+    assert(recoveredIds.includes(first.sessionId));
+    assert.deepEqual(replacement.get(started.id).modelRoute || null, recoverable ? original : null);
+    await replacement.approve(started.id, { nodeId: 'review', action: 'approve' });
+    const final = await until(() => ['complete', 'error'].includes(replacement.get(started.id).status) && replacement.get(started.id));
+    assert.equal(final.status, recoverable ? 'complete' : 'error', final.error);
+    assert.equal(captures, 1, 'restoring a legacy run must not read the new default');
+    assert.deepEqual(final.nodes.first.output, first.output);
+    assert.equal(final.nodes.first.attemptId, first.attemptId, 'the completed upstream Skill is not replayed');
+    if (recoverable) assert.deepEqual(routes, [original, original]);
+    else {
+      assert.match(final.nodes.second.error, /旧运行.*未记录主模型/);
+      assert.deepEqual(routes, [original], 'no additional Skill session is created without a recoverable model');
+    }
+  });
+}
+
+test('an unknown legacy parent cannot capture the new default through a nested Skill subflow', async t => {
+  const { app, manager, db } = await setup(t, async ({ input }) => ({ output: { ...input, retained: true } }));
+  let captures = 0, sessions = 0;
+  const version = 'sha256:' + 'd'.repeat(64);
+  app.captureModelRoute = async () => { captures++; return { provider: 'current-provider', model: 'current-model' }; };
+  app.skill = async name => ({ name, content: 'Return the input.', revision: version, source: 'local' });
+  app.createSession = async () => { sessions++; return { id: 'must-not-start' }; };
+  app.submit = async () => { throw Error('Unknown legacy parent must not submit a prompt'); };
+  app.history = async () => ({ messages: [] }); app.interrupt = async () => ({});
+  manager.prepareSkill = async (_app, _session, detail) => ({ skill: detail, text: '{}', cleanup: async () => {} });
+  const child = graph([node('input', 'child-input'), node('skill', 'child-skill', { inputType: 'object', outputType: 'object', skillRef: 'fixture', version }), node('output', 'child-output')],
+    [['child-input', 'child-skill'], ['child-skill', 'child-output']]);
+  const document = graph([node('input', 'input'), code('prepare'), node('human', 'review'), node('subflow', 'nested', { document: child }), node('output', 'output')],
+    [['input', 'prepare'], ['prepare', 'review'], ['review', 'nested'], ['nested', 'output']]);
+  const started = await manager.start({ document, input: { preserved: true } });
+  await until(() => manager.get(started.id).status === 'waiting_review');
+  await manager.close();
+  const legacy = manager.get(started.id); delete legacy.modelRoute;
+  db.prepare('UPDATE workflow_runs SET value=? WHERE id=?').run(JSON.stringify(legacy), started.id);
+  app.recoverModelRoute = () => null;
+  const replacement = new WorkflowRuns(app); app.workflows = replacement;
+  replacement.prepareSkill = manager.prepareSkill;
+  await replacement.approve(started.id, { nodeId: 'review', action: 'approve' });
+  const final = await until(() => ['complete', 'error'].includes(replacement.get(started.id).status) && replacement.get(started.id));
+  assert.equal(final.status, 'error');
+  assert.match(final.nodes.nested.error, /旧运行.*未记录主模型/);
+  assert.equal(captures, 1, 'child admission must inherit the unknown parent identity instead of capturing current defaults');
+  assert.equal(sessions, 0);
+  assert.deepEqual(final.nodes.prepare.output, legacy.nodes.prepare.output, 'completed artifacts remain attached to the original run');
+});

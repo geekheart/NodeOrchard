@@ -47,6 +47,8 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { ...application.bootstrap(), eventCursor: application.sequence, csrfToken });
       if (req.method === 'GET' && path === '/api/settings') return json(res, 200, await application.settings());
       if (req.method === 'POST' && path === '/api/settings') return json(res, 200, await application.saveSettings(await readJson(req)));
+      if (req.method === 'GET' && path === '/api/models') return json(res, 200, await application.modelOptions());
+      if (req.method === 'POST' && path === '/api/models') return json(res, 200, await application.selectModel(await readJson(req, 4096)));
       if (req.method === 'GET' && path === '/api/statistics') {
         const days = requestURL.searchParams.get('days') || '7';
         if (!['7', '30'].includes(days)) return json(res, 400, { error: '统计周期只支持 7 天或 30 天。' });
@@ -241,7 +243,14 @@ export function createWorkbenchServer(config, application = new Application(conf
           await readJson(req); return json(res, 200, await application.workflows.interrupt(id));
         }
       }
-      if (req.method === 'POST' && path === '/api/sessions') return json(res, 201, await application.createSession(await readJson(req)));
+      if (req.method === 'POST' && path === '/api/sessions') {
+        const input = await readJson(req);
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['title', 'cwd'].includes(key))
+          || ['title', 'cwd'].some(key => input[key] !== undefined && typeof input[key] !== 'string')) {
+          return json(res, 400, { error: '新建任务只接受名称和工作目录；模型由 Hermes 默认配置管理。' });
+        }
+        return json(res, 201, await application.createSession(input));
+      }
       const match = path.match(/^\/api\/sessions\/([^/]+)\/(resume|history|messages|interrupt|runs)$/);
       if (match) {
         const [, rawId, operation] = match;
@@ -255,6 +264,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       const reply = path.match(/^\/api\/requests\/([^/]+)\/reply$/);
       if (req.method === 'POST' && reply) return json(res, 200, application.reply(decodeURIComponent(reply[1]), (await readJson(req)).result));
       const assets = {
+        '/hermes-model-ui.js': ['hermes-model-ui.js', 'text/javascript'],
         '/': ['index.html', 'text/html'],
         '/app.js': ['app.js', 'text/javascript'],
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],

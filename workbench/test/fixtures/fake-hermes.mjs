@@ -13,6 +13,9 @@ const coldSessions = new Set(Object.keys(disk.sessions));
 const runtimes = new Map();
 const requests = new Map();
 let availableModels = ['test-model', 'test-model-alt'];
+let modelRoute = disk.modelRoute || { provider: 'openai-codex', model: 'test-model' };
+let modelSetError = '';
+const configuredProviders = new Set(['openai-codex', 'fixture-local']);
 const skillContent = new Map([
   ['fixture-report', '# Fixture report\n\nCreate a concise report from the provided fixture data.\n'],
   ['fixture-escape', '# Escaping fixture\n\n<script>globalThis.__fixtureInjected = true</script>\n<img src=x onerror="globalThis.__fixtureInjected = true">\n\nLiteral & "quoted" <tag> text.\n\n  Preserve these leading spaces.\n'],
@@ -70,7 +73,7 @@ function sessionResult(runtime) {
     messages: runtime.stored.messages.map((message) => ({ ...message })),
     info: {
       ...(runtime.lazy ? { lazy: true } : {}),
-      provider: 'openai-codex',
+      provider: runtime.stored.provider || 'openai-codex',
       model: runtime.stored.model || 'test-model',
       version: 'fake-hermes-1',
       yolo: false,
@@ -248,9 +251,8 @@ function handle(method, params = {}) {
       if (params.key === 'approvals.mode') return { value: approvalMode };
       if (params.key !== 'provider') throw rpcError(-32602, 'Unsupported config key');
       return {
-        model: 'test-model',
-        provider: 'openai-codex',
-        providers: [{ id: 'openai-codex', authenticated: true }],
+        ...modelRoute,
+        providers: [{ id: 'openai-codex', authenticated: true }, { id: 'fixture-local', authenticated: true }],
       };
     case 'config.set': {
       // Test-only control, unavailable in real Hermes. It lets a policy change
@@ -274,6 +276,18 @@ function handle(method, params = {}) {
           }
           availableModels = [...value.models];
         }
+        if (Object.hasOwn(value, 'provider') || Object.hasOwn(value, 'model')) {
+          const route = { ...modelRoute, ...(Object.hasOwn(value, 'provider') ? { provider: value.provider } : {}),
+            ...(Object.hasOwn(value, 'model') ? { model: value.model } : {}) };
+          if (!configuredProviders.has(route.provider) || typeof route.model !== 'string' || !route.model.trim()) {
+            throw rpcError(-32602, 'Invalid fixture model route');
+          }
+          modelRoute = route; disk.modelRoute = { ...route }; persist();
+        }
+        if (Object.hasOwn(value, 'model_set_error')) {
+          if (typeof value.model_set_error !== 'string') throw rpcError(-32602, 'Invalid fixture model error');
+          modelSetError = value.model_set_error;
+        }
         return { key: params.key, value: { approval_mode: approvalMode, fallback_provider: fallbackProvider } };
       }
       const supported = (params.key === 'yolo' && params.value === 'off')
@@ -293,10 +307,18 @@ function handle(method, params = {}) {
           models: [...availableModels],
           authenticated: true,
           featured_models: [...availableModels],
-        }],
-        provider: 'openai-codex',
-        model: 'test-model',
+        }, { slug: 'fixture-local', name: 'Fixture Local Provider', models: ['local-model'], authenticated: true }],
+        ...modelRoute,
       };
+    case 'workbench.model.set': {
+      if (modelSetError) throw rpcError(-32020, modelSetError);
+      if (!configuredProviders.has(params.provider) || typeof params.model !== 'string' || !params.model.trim()) {
+        throw rpcError(-32602, 'Unavailable fixture model route');
+      }
+      modelRoute = { provider: params.provider, model: params.model.trim() };
+      disk.modelRoute = { ...modelRoute }; persist();
+      return { ...modelRoute };
+    }
     case 'skills.manage':
       if (params.action !== 'list') throw rpcError(-32602, 'Only installed skills can be listed');
       return { skills: { testing: [...skillContent.keys()] } };
@@ -318,10 +340,11 @@ function handle(method, params = {}) {
       }
       return { ok: true, kind: 'skill', id: params.id, label: params.id, content: skillContent.get(params.id) };
     case 'session.create': {
-      if (params.model && !availableModels.includes(params.model)) throw rpcError(-32602, 'Unavailable fixture model');
+      const provider = params.provider || modelRoute.provider, model = params.model || modelRoute.model;
+      if (!configuredProviders.has(provider) || typeof model !== 'string' || !model.trim()) throw rpcError(-32602, 'Unavailable fixture model route');
       const stored = {
         stored_session_id: `fake-stored-${randomUUID()}`,
-        model: params.model || 'test-model',
+        provider, model,
         cwd: params.cwd,
         messages: [],
       };

@@ -1078,6 +1078,8 @@ def main():
     from tui_gateway import server
     from agent import skill_commands, tool_executor
     import model_tools
+    from hermes_models import install_model_rpc
+    install_model_rpc(server)
     WorkflowGateway(server, skill_commands, model_tools, tool_executor).install()
     from tui_gateway import entry
     entry.main()

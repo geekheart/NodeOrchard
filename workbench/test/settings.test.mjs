@@ -18,6 +18,7 @@ async function setup(t) {
     }),
     dataDir: join(directory, 'db'),
     workspaceRoot: join(directory, 'workspace'),
+    workflowRunRoot: join(directory, 'runs'),
     command: process.execPath,
     args: [fixture],
     childEnv: {
@@ -40,13 +41,14 @@ async function setup(t) {
   return { app: create(), create, config, directory };
 }
 
-test('saved preferences survive restart and govern a new session workspace and model', async t => {
+test('saved preferences and the Hermes default survive restart without a local model override', async t => {
   const { app, create, config } = await setup(t);
   const expected = {
-    theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: 'test-model-alt',
+    theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: '',
   };
   await app.connect();
   assert.deepEqual((await app.saveSettings({ preferences: expected })).preferences, expected);
+  await app.selectModel({ provider: 'fixture-local', model: 'local-model' });
   await app.close();
 
   const restarted = create();
@@ -57,7 +59,8 @@ test('saved preferences survive restart and govern a new session workspace and m
   await restarted.connect();
   const session = await restarted.createSession({ title: 'preference defaults' });
   assert.equal(session.cwd, await realpath(join(config.workspaceRoot, 'research')));
-  assert.equal((await restarted.history(session.id)).info.model, 'test-model-alt');
+  assert.equal((await restarted.history(session.id)).info.model, 'local-model');
+  assert.equal((await restarted.history(session.id)).info.provider, 'fixture-local');
   assert.equal((await restarted.settings()).approvalMode, 'manual');
 });
 
@@ -93,21 +96,35 @@ test('invalid settings are rejected atomically and cannot create paths outside t
   assert.equal(app.adapter.state, 'stopped');
 });
 
-test('choosing a default model requires a confirmed available subscription model', async t => {
+test('local default model overrides are rejected and only Hermes owns model selection', async t => {
   const { app } = await setup(t);
-  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } }), /连接/);
+  for (const model of ['test-model-alt', 'unknown-custom-model']) {
+    await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: model } }), /Hermes|模型/);
+  }
   assert.equal((await app.settings()).preferences.defaultModel, '');
+  assert.equal(app.adapter.state, 'stopped', 'rejecting an obsolete preference does not contact Hermes');
   await app.connect();
-  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'not-an-available-model' } }), /模型/);
-  assert.equal((await app.settings()).preferences.defaultModel, '');
-  await app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } });
-  await app.adapter.request('config.set', { key: 'fixture_switch', value: { models: ['test-model'] } });
-  await app.connect();
-  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } }), /模型/);
-  await assert.rejects(async () => app.createSession(), /模型/);
-  assert.equal(app.store.list().length, 0, 'a removed saved model must not silently fall back');
+  await app.selectModel({ provider: 'fixture-local', model: 'local-model' });
+  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'test-model' } }), /Hermes|模型/);
   await app.saveSettings({ preferences: { defaultModel: '' } });
   assert.equal((await app.settings()).preferences.defaultModel, '');
+  assert.deepEqual((await app.modelOptions()).current, { provider: 'fixture-local', model: 'local-model' });
+});
+
+test('a legacy defaultModel is ignored on load without replacing the Hermes default', async t => {
+  const { app, create } = await setup(t);
+  await app.connect();
+  await app.selectModel({ provider: 'fixture-local', model: 'custom/legacy-safe-model' });
+  app.store.savePreferences({ ...app.preferences, theme: 'dark', defaultModel: 'stale-subscription-model' });
+  await app.close();
+  const restarted = create();
+  assert.equal(restarted.preferences.theme, 'dark');
+  assert.equal(restarted.preferences.defaultModel, '');
+  assert.equal(restarted.adapter.state, 'stopped');
+  await restarted.connect();
+  assert.deepEqual((await restarted.modelOptions()).current, { provider: 'fixture-local', model: 'custom/legacy-safe-model' });
+  const session = await restarted.createSession();
+  assert.equal((await restarted.history(session.id)).info.model, 'custom/legacy-safe-model');
 });
 
 test('empty statistics have no success denominator or fabricated billing metrics', async t => {

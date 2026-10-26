@@ -985,3 +985,103 @@ test('model-scored JSON ties and exact text similarity retain their existing sel
     assert.equal(result.status,'exhausted');assert.equal(result.bestRound,0);assert.equal(result.bestScore,0);
   }
 });
+
+test('a learning batch pins the same main model for memory, samples and optimization after a global switch', async t => {
+  const { app, manager } = setup(t), routes = [];
+  let selected = { provider: 'before-switch', model: 'model-one' }, captures = 0;
+  app.captureModelRoute = async () => { captures++; return copy(selected); };
+  const capture = app.learningModel.createMemoryScope;
+  app.learningModel.createMemoryScope = options => { routes.push(copy(options.modelRoute)); return capture(options); };
+  const generate = app.learningModel.generate;
+  app.learningModel.generate = (prompt, options) => { routes.push(copy(options.modelRoute)); selected = { provider: 'after-switch', model: 'model-two' }; return generate(prompt, options); };
+  const start = app.workflows.start;
+  app.workflows.start = (payload, options) => { routes.push(copy(options.modelRoute)); return start(payload, options); };
+  app.outputFor = () => 'wrong';
+  const started = await manager.start({ document: graph(1, false), input: 'training', expected: 'target', maxRounds: 2 });
+  const result = await finished(app, manager, started.id);
+  assert.equal(result.status, 'exhausted', result.error);
+  assert.equal(captures, 1);
+  assert.deepEqual(result.modelRoute, { provider: 'before-switch', model: 'model-one' });
+  assert(routes.length >= 4);
+  assert(routes.every(route => JSON.stringify(route) === JSON.stringify(result.modelRoute)));
+});
+
+for (const recoverable of [true, false]) {
+  test(`a legacy learning review ${recoverable ? 'recovers its original model for remaining samples and optimization' : 'refuses an unknown model without replaying its waiting artifact'}`, async t => {
+    const { app, manager, db } = setup(t), original = { provider: 'legacy-learning-provider', model: 'legacy-learning-model' };
+    let captures = 0, held;
+    const routes = [], recoveries = [];
+    app.captureModelRoute = async () => { captures++; return copy(original); };
+    app.backend = { state: 'ready' }; app.workflows.get = id => copy(app.workflows.runs.get(id));
+    app.onCreateMemoryScope = async options => ({ id: options.id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false,
+      snapshot: { version: 1, scopeId: options.id, digest: 'sha256:' + 'e'.repeat(64) } });
+    app.learningModel.suspendMemoryScope = id => app.memoryScopes.delete(id);
+    app.learningModel.restoreMemoryScope = async ({ id, snapshot }) => {
+      const scope = { id, snapshot, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false };
+      app.memoryScopes.set(id, scope); return scope;
+    };
+    const start = app.workflows.start;
+    app.workflows.start = (payload, options) => { routes.push(copy(options.modelRoute)); return start(payload, options); };
+    const generate = app.learningModel.generate;
+    app.learningModel.generate = (prompt, options) => { routes.push(copy(options.modelRoute)); return generate(prompt, options); };
+    let document = graph(1, false); document.schemaVersion = 2; document.settings = { maxConcurrency: 4, outputDirectory: '' };
+    document.edges = document.edges.filter(edge => !(edge.sourceNode === 'skill-0' && edge.targetNode === 'output'));
+    document.nodes.push(createNode('human', { x: 700, y: 0 }, { id: 'review', config: { inputType: 'text', outputType: 'text', reviewTargetNodeId: 'skill-0' } }));
+    document = connectNodes(document, { sourceNode: 'skill-0', sourcePort: 'out', targetNode: 'review', targetPort: 'in' });
+    document = connectNodes(document, { sourceNode: 'review', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+    const completedNodes = (run, output) => ({ 'skill-0': { status: 'complete', input: run.input, output },
+      review: { status: 'complete', input: output, output }, output: { status: 'complete', input: output, output } });
+    app.onStart = run => {
+      run.memoryScopeId = run.learningId;
+      const baseline = run.document.nodes.find(node => node.id === 'skill-0').config.skillRef === 'fixture-0';
+      if (baseline && run.input === 'legacy-training') {
+        held = run; run.status = 'waiting_review';
+        run.nodes = { 'skill-0': { status: 'complete', input: run.input, output: 'retained old result' },
+          review: { status: 'waiting_review' }, output: { status: 'pending' } };
+        app.publish('workflow.run', null, copy(run)); return Promise.resolve(copy(run));
+      }
+      queueMicrotask(() => app.complete(run.id, 'target', 'complete', { nodes: completedNodes(run, 'target') }));
+      return Promise.resolve(copy(run));
+    };
+    const started = await manager.start({ document, input: 'legacy-training', expected: 'target', maxRounds: 2,
+      validationCases: [{ input: 'private-validation', expected: 'target' }] });
+    for (let index = 0; index < 100 && manager.get(started.id).phase !== 'waiting-review'; index++) await immediate();
+    assert.equal(manager.get(started.id).phase, 'waiting-review');
+    const artifact = copy(held.nodes['skill-0']);
+    await manager.close();
+    const legacy = manager.get(started.id); delete legacy.modelRoute;
+    // Old review checkpoints have no active model session. A source-bound
+    // child run may still retain the route recovered from its completed Skill.
+    legacy.modelSessionId = null;
+    if (recoverable) held.modelRoute = copy(original);
+    db.prepare('UPDATE workflow_learning SET value=? WHERE id=?').run(JSON.stringify(legacy), started.id);
+    app.recoverModelRoute = ids => { recoveries.push(copy(ids)); return null; };
+    app.captureModelRoute = async () => { captures++; return { provider: 'new-provider', model: 'new-model' }; };
+    app.memoryScopes.clear();
+    const restarted = new WorkflowLearning(app); app.learning = restarted;
+    const done = finished(app, restarted, started.id);
+    await restarted.prepareReviewResume(started.id);
+    if (recoverable) {
+      for (let index = 0; index < 100 && !restarted.active.get(started.id)?.waiter; index++) await immediate();
+      assert(restarted.active.get(started.id)?.waiter, 'the original pending sample is resumed instead of started again');
+      assert.deepEqual(restarted.get(started.id).modelRoute, original);
+      app.complete(held.id, 'retained old result', 'complete', { nodes: completedNodes(held, 'retained old result') });
+    }
+    const final = await done;
+    assert.equal(captures, 1, 'legacy recovery must not capture the changed global default');
+    if (recoverable) assert.deepEqual(recoveries, [], 'a bound child route is already authoritative');
+    else assert.equal(recoveries.length, 1);
+    assert.equal(app.memoryScopeRequests.length, 1, 'the original memory snapshot is restored, never recaptured');
+    assert.equal(app.workflows.interrupts.length, 0, 'recovery does not destroy the waiting artifact');
+    if (recoverable) {
+      assert.equal(final.status, 'complete', final.error); assert.equal(app.created.length, 1);
+      assert(routes.every(route => JSON.stringify(route) === JSON.stringify(original)));
+      assert.equal(final.rounds[0].cases[0].runId, held.id);
+    } else {
+      assert.equal(final.status, 'error'); assert.match(final.error, /旧学习批次.*未记录主模型/);
+      assert.equal(app.prompts.length, 0); assert.equal(app.created.length, 0);
+      assert.equal(app.workflows.calls.length, 1);
+      assert.equal(held.status, 'waiting_review'); assert.deepEqual(held.nodes['skill-0'], artifact);
+    }
+  });
+}

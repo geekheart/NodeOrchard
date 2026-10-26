@@ -51,6 +51,12 @@ export class HermesAdapter extends EventEmitter {
       WORKBENCH_GATEWAY_WORKSPACE_ROOT: c.workspaceRoot,
     };
     delete env.HERMES_TUI_SIDECAR_URL;
+    // Hermes config owns the model; inherited launch overrides must not shadow
+    // a model selection saved through Hermes from the top-level picker.
+    delete env.HERMES_MODEL;
+    delete env.HERMES_INFERENCE_MODEL;
+    delete env.HERMES_TUI_PROVIDER;
+    delete env.HERMES_INFERENCE_PROVIDER;
     this.proc = spawn(c.command || c.hermesPython, c.args || [join(c.appRoot, 'python/workflow_gateway.py')], {
       cwd: c.cwd || c.appRoot,
       env,

@@ -195,8 +195,8 @@ export class WorkflowRuns {
       && ['preparing', 'running'].includes(state.run.status);
   }
 
-  async start({ document, input, outputDirectory } = {}, { learningId, memoryScopeId, scheduleId, scheduledAt, scheduleName, canStart, onCreated } = {}) {
-    if (document?.schemaVersion === 2) return this.dag.start({ document, input, outputDirectory }, { learningId, memoryScopeId, scheduleId, scheduledAt, scheduleName, canStart, onCreated });
+  async start({ document, input, outputDirectory } = {}, { learningId, memoryScopeId, scheduleId, scheduledAt, scheduleName, canStart, onCreated, modelRoute } = {}) {
+    if (document?.schemaVersion === 2) return this.dag.start({ document, input, outputDirectory }, { learningId, memoryScopeId, scheduleId, scheduledAt, scheduleName, canStart, onCreated, modelRoute });
     if (this.closed) throw failure('执行管理器已关闭。', 503);
     const checkAdmission = () => {
       this.app.workflowLibrary?.assertRunnable?.(document?.id);
@@ -242,6 +242,8 @@ export class WorkflowRuns {
       checkAdmission();
       const cwd = planned.operationNodes.some(node => node.type !== 'skill')
         ? this.app.workspace(this.app.preferences?.defaultWorkspace || '.') : null;
+      modelRoute ||= await this.app.captureModelRoute?.({ optional: !planned.skillNodes.length });
+      checkAdmission();
       const now = new Date().toISOString();
       const run = {
         id: randomUUID(), workflowId, title: planned.document.title, status: 'preparing',
@@ -252,6 +254,7 @@ export class WorkflowRuns {
         }),
         input: value, output: null, outputText: '', partialText: '', error: '', sessionId: null,
         startedAt: now, completedAt: null,
+        ...(modelRoute ? { modelRoute: clone(modelRoute) } : {}),
         ...(scheduleId ? { trigger: { type: 'schedule', scheduleId, scheduledAt, scheduleName } } : {}),
         ...(learningId ? { learningId, memoryScopeId,
           memoryPolicy: { mode: 'pending', memoryWriteAllowed: null, externalMemoryAllowed: null } } : {}),
@@ -277,6 +280,7 @@ export class WorkflowRuns {
         run.currentNodeId = step.node.id;
         run.sessionId = null;
         const session = await this.app.createSession({ title: '工作流 · ' + run.title + ' · ' + (step.index + 1) + '/' + state.steps.length + ' ' + step.node.title,
+          ...(run.modelRoute ? { modelRoute: run.modelRoute } : {}),
           ...(cwd ? { cwd } : {}) });
         step.session = session;
         run.nodes[step.node.id].sessionId = session.id;

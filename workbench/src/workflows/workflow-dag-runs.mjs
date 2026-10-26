@@ -102,6 +102,9 @@ export class WorkflowDAGRuns {
     this.maxActiveRuns = 2;
     for (const row of this.db.prepare("SELECT value FROM workflow_runs WHERE json_extract(value,'$.schemaVersion')=2 AND json_extract(value,'$.status') NOT IN ('complete','error','interrupted','unknown')").all()) {
       const run = JSON.parse(row.value);
+      if (!run.modelRoute && this.app.recoverModelRoute) {
+        run.modelRoute = this.app.recoverModelRoute(Object.values(run.nodes).map(node => node.sessionId));
+      }
       if (run.delivery?.status === 'publishing' && Object.values(run.nodes).every(node => NODE_DONE.has(node.status))) {
         run.delivery.status = 'error'; run.delivery.error = '应用在保存交付副本时退出；本机原件已保留，请仅重试保存副本。';
         run.status = 'error'; run.error = run.delivery.error; run.completedAt = now(); this.save(run); continue;
@@ -177,6 +180,10 @@ export class WorkflowDAGRuns {
       outputDirectory: requestedDirectory || plan.document.settings.outputDirectory }) : null;
     if (prepared?.ok === false) throw fail('输入尚未准备好，请按清单补齐资料。', 400, prepared.errors);
     if (prepared) value = validateDAGInput(prepared.input, plan);
+    // Pin the main model once per admitted graph, including later/revised nodes
+    // and embedded subflows. Credentials and fallback remain Hermes-owned.
+    const modelRoute = options.modelRoute || (parent ? parent.run.modelRoute
+      : await this.app.captureModelRoute?.({ optional: !plan.skillNodes.length }));
     const details = {};
     for (const node of plan.skillNodes) {
       const detail = await this.app.skill(node.config.skillRef);
@@ -194,6 +201,7 @@ export class WorkflowDAGRuns {
       outputDirectory, ...(prepared?.deliveryDirectory && prepared.deliveryDirectory !== outputDirectory ? { storageVersion: 2, deliveryDirectory: prepared.deliveryDirectory } : {}),
       sourceManifest: prepared?.manifest || [], settings: plan.document.settings, skills: plan.skillNodes.map(node => ({ nodeId: node.id, name: node.config.skillRef, revision: node.config.version, source: details[node.id].source })),
       frozenSkillDetails: details, startedAt: now(), completedAt: null, sessionId: null, depth,
+      ...(modelRoute ? { modelRoute: clone(modelRoute) } : {}),
       ...(parent ? { parentRunId: parent.run.id } : {}), ...(options.scheduleId ? { trigger: { type: 'schedule', scheduleId: options.scheduleId, scheduledAt: options.scheduledAt, scheduleName: options.scheduleName } } : {}),
       ...(options.learningId ? { learningId: options.learningId, memoryScopeId: options.memoryScopeId, memoryPolicy: { mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false } } : {}),
       nodes: Object.fromEntries(plan.document.nodes.map(node => [node.id, LEARNING.has(node.type) ? { ...fresh(), status: 'skipped', reason: options.learningId ? '由学习控制器管理' : '执行模式跳过学习支路' } : fresh()])),
@@ -211,7 +219,7 @@ export class WorkflowDAGRuns {
         const state = this.active.get(id); if (!state) { this.queue.splice(this.queue.indexOf(id), 1); continue; }
         if (state.plan.skillNodes.length) {
           // The adapter publishes ready before Application finishes loading its
-          // subscription model inventory. Admit the whole graph only when the
+          // Hermes model inventory. Admit the whole graph only when the
           // same readiness check used by createSession succeeds.
           let ready = true;
           try {
@@ -416,11 +424,13 @@ export class WorkflowDAGRuns {
       const timeout = (node.config.timeoutSeconds || 120) * 1000;
       step.timer = setTimeout(() => { void this.failNode(state, step, '节点运行超时，未自动重试。', 'unknown', true); }, timeout); step.timer.unref?.();
       if (node.type === 'skill') {
+        if (this.app.recoverModelRoute && !state.run.modelRoute) throw fail('此旧运行未记录主模型，无法安全继续 Skill；请保留现有产物并新建一次运行。');
         const detail = state.run.frozenSkillDetails[node.id];
         const sessionPath = join(this.app.config.workspaceRoot, 'workflow-sessions', state.run.id, node.id, step.token);
         const sessionDirectory = this.app.workspace ? this.app.workspace(sessionPath) : sessionPath;
         await mkdir(sessionDirectory, { recursive: true }); step.sessionDirectory = sessionDirectory; record.sessionDirectory = sessionDirectory;
-        const session = await this.app.createSession({ title: '工作流 · ' + state.run.title + ' · ' + node.title + ' · ' + record.attempt, cwd: sessionDirectory });
+        const session = await this.app.createSession({ title: '工作流 · ' + state.run.title + ' · ' + node.title + ' · ' + record.attempt, cwd: sessionDirectory,
+          ...(state.run.modelRoute ? { modelRoute: state.run.modelRoute } : {}) });
         if (!current()) return; step.session = session; record.sessionId = session.id; this.sessions.set(session.id, { state, step });
         step.prepared = await this.owner.prepareSkill(this.app, session, detail, { input, skillNode: node,
           inputNode: state.plan.inputNode, outputNode: state.plan.outputNode, runId: state.run.id, stepId: step.token, attemptId: step.token, nodeId: node.id, workflowId: state.run.workflowId,

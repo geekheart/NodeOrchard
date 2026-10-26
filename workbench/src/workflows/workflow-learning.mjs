@@ -441,9 +441,12 @@ export class WorkflowLearning {
       signal.addEventListener('abort', abort, { once: true });
       if (signal.aborted) abort();
     });
-    const capture = Promise.resolve().then(() => {
+    const capture = Promise.resolve().then(async () => {
       this.ensure(state);
-      return this.model.createMemoryScope({ id: state.job.id, signal, onSession: id => {
+      state.job.modelRoute ||= await this.app.captureModelRoute?.();
+      this.ensure(state);
+      this.save(state.job);
+      return this.model.createMemoryScope({ id: state.job.id, signal, modelRoute: state.job.modelRoute, onSession: id => {
         if (!this.current(state) || state.stopping) return;
         state.job.modelSessionId = id; this.save(state.job);
       }, persist: state.plan.document.schemaVersion === 2 && state.plan.document.nodes.some(node => node.type === 'human') });
@@ -492,7 +495,7 @@ export class WorkflowLearning {
         settle(run);
       } else {
       const starting = this.app.workflows.start({ document: copy(round.document), input: copy(sample.input) }, {
-        learningId: state.job.id, memoryScopeId: state.job.memoryScopeId,
+        learningId: state.job.id, memoryScopeId: state.job.memoryScopeId, modelRoute: state.job.modelRoute,
         onCreated: run => {
           if (!this.current(state) || state.waiter !== waiter) {
             queueMicrotask(() => { void this.stopChild(run.id); });
@@ -584,7 +587,7 @@ export class WorkflowLearning {
   async generate(state, prompt) {
     this.requireMemoryScope(state);
     if (prompt.length > 190000) throw fail('学习提示过大，请缩短样本或 Skill 正文。', 413);
-    const text = await this.model.generate(prompt, { signal: state.controller.signal, memoryScopeId: state.job.memoryScopeId, onSession: id => {
+    const text = await this.model.generate(prompt, { signal: state.controller.signal, memoryScopeId: state.job.memoryScopeId, modelRoute: state.job.modelRoute, onSession: id => {
       if (!this.current(state) || state.stopping) return;
       state.job.modelSessionId = id;
       this.save(state.job);
@@ -737,6 +740,15 @@ export class WorkflowLearning {
   }
 
   async drive(state, resume = false) {
+    if (resume && !state.job.modelRoute && this.app.recoverModelRoute) {
+      const child = state.job.activeRunId ? this.app.workflows.get(state.job.activeRunId) : null;
+      const ownedChild = child?.learningId === state.job.id && child?.memoryScopeId === state.job.id ? child : null;
+      state.job.modelRoute = ownedChild?.modelRoute || this.app.recoverModelRoute([
+        state.job.modelSessionId, ...Object.values(ownedChild?.nodes || {}).map(node => node.sessionId),
+      ]);
+      if (!state.job.modelRoute) throw fail('此旧学习批次未记录主模型，无法安全续跑；原审核产物已保留，请重新发起学习。');
+      this.save(state.job);
+    }
     this.ensure(state);
     if (!resume) await this.prepareMemoryScope(state);
     this.requireMemoryScope(state);

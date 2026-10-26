@@ -35,8 +35,5 @@ export function readConfig(env = process.env) {
     hermesPython: env.WORKBENCH_HERMES_PYTHON || join(hermesRoot, 'venv/bin/python'),
     hermesHome: env.WORKBENCH_HERMES_HOME || join(homedir(), '.hermes'),
     hermesVersion,
-    model: env.WORKBENCH_HERMES_MODEL || '',
-    // Subscription route only. Never fall back to an API-key or another provider.
-    provider: 'openai-codex',
   };
 }

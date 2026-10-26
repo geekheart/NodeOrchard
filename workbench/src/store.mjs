@@ -25,6 +25,12 @@ export class Store {
     if (!this.db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'model')) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''");
     }
+    if (!this.db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'provider')) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT ''");
+      // Every session created before provider persistence was explicitly routed
+      // to this one provider. Preserve that historical identity on migration.
+      this.db.exec("UPDATE sessions SET provider='openai-codex' WHERE model<>''");
+    }
     this.db.prepare("UPDATE sessions SET runtime_session_id=NULL, status='disconnected'").run();
     this.db.prepare("UPDATE runs SET status='unknown', completed_at=?, error='应用重启；请恢复 Hermes 会话核对，未自动重试。' WHERE status IN ('running','waiting')").run(new Date().toISOString());
   }
@@ -32,24 +38,24 @@ export class Store {
   map(row) {
     return row && { id: row.id, title: row.title, cwd: row.cwd, storedSessionId: row.stored_session_id,
       runtimeSessionId: row.runtime_session_id, status: row.status, hasPrompted: Boolean(row.has_prompted),
-      model: row.model, createdAt: row.created_at, updatedAt: row.updated_at };
+      model: row.model, provider: row.provider, createdAt: row.created_at, updatedAt: row.updated_at };
   }
   list() { return this.db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all().map(row => this.map(row)); }
   get(id) { return this.map(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id)); }
   byRuntime(id) { return this.map(this.db.prepare('SELECT * FROM sessions WHERE runtime_session_id=?').get(id)); }
-  create({ title, cwd, storedSessionId, runtimeSessionId, model = '' }) {
+  create({ title, cwd, storedSessionId, runtimeSessionId, model = '', provider = '' }) {
     const id = randomUUID(); const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO sessions(id,title,cwd,stored_session_id,runtime_session_id,status,model,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
-      .run(id, title, cwd, storedSessionId, runtimeSessionId, 'idle', model, now, now);
+    this.db.prepare('INSERT INTO sessions(id,title,cwd,stored_session_id,runtime_session_id,status,model,provider,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(id, title, cwd, storedSessionId, runtimeSessionId, 'idle', model, provider, now, now);
     return this.get(id);
   }
-  update(id, { runtimeSessionId, storedSessionId, status, hasPrompted } = {}) {
+  update(id, { runtimeSessionId, storedSessionId, status, hasPrompted, model, provider } = {}) {
     const current = this.get(id);
     if (!current) throw new Error('会话不存在。');
-    this.db.prepare('UPDATE sessions SET runtime_session_id=?,stored_session_id=?,status=?,has_prompted=?,updated_at=? WHERE id=?')
+    this.db.prepare('UPDATE sessions SET runtime_session_id=?,stored_session_id=?,status=?,has_prompted=?,model=?,provider=?,updated_at=? WHERE id=?')
       .run(runtimeSessionId === undefined ? current.runtimeSessionId : runtimeSessionId,
         storedSessionId ?? current.storedSessionId, status ?? current.status,
-        Number(hasPrompted ?? current.hasPrompted), new Date().toISOString(), id);
+        Number(hasPrompted ?? current.hasPrompted), model ?? current.model, provider ?? current.provider, new Date().toISOString(), id);
     return this.get(id);
   }
   beginRun(sessionId) {

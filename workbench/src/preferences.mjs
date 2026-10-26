@@ -29,7 +29,7 @@ export function workspacePreference(value, workspaceRoot) {
   return relative(canonicalRoot, canonicalTarget).split(sep).join('/') || '.';
 }
 
-export function validatePreferences(patch, current, { workspaceRoot, availableModels = [], connected = false } = {}) {
+export function validatePreferences(patch, current, { workspaceRoot } = {}) {
   if (!record(patch)) throw new Error('preferences 必须是对象。');
   if (Object.keys(patch).some(key => !KEYS.has(key))) throw new Error('包含不支持的工作台设置。');
   const next = { ...current };
@@ -43,12 +43,8 @@ export function validatePreferences(patch, current, { workspaceRoot, availableMo
   }
   if (Object.hasOwn(patch, 'defaultWorkspace')) next.defaultWorkspace = workspacePreference(patch.defaultWorkspace, workspaceRoot);
   if (Object.hasOwn(patch, 'defaultModel')) {
-    if (typeof patch.defaultModel !== 'string' || patch.defaultModel.length > 256) throw new Error('无效的默认模型。');
-    const model = patch.defaultModel.trim();
-    if (model && (connected ? !availableModels.includes(model) : model !== current.defaultModel)) {
-      throw new Error(connected ? '默认模型不在当前 ChatGPT 订阅模型列表中。' : '请连接 Hermes 后再选择新的默认模型。');
-    }
-    next.defaultModel = model;
+    if (patch.defaultModel !== '') throw new Error('模型选择已交给 Hermes，请使用顶部的模型切换入口。');
+    next.defaultModel = '';
   }
   return next;
 }
@@ -59,10 +55,9 @@ export function loadPreferences(saved, workspaceRoot) {
   for (const key of KEYS) {
     if (!Object.hasOwn(saved, key)) continue;
     try {
-      // A previously validated model may be retained while the app is offline.
-      const current = key === 'defaultModel' && typeof saved[key] === 'string'
-        ? { ...result, defaultModel: saved[key].trim() } : result;
-      Object.assign(result, validatePreferences({ [key]: saved[key] }, current, { workspaceRoot }));
+      // Retire the local override instead of shadowing Hermes's own default.
+      if (key === 'defaultModel') continue;
+      Object.assign(result, validatePreferences({ [key]: saved[key] }, result, { workspaceRoot }));
     } catch { /* Ignore invalid persisted fields without blocking application startup. */ }
   }
   return result;
