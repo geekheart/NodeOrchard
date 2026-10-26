@@ -11,7 +11,7 @@
   <p>
     <a href="#界面预览">界面预览</a> ·
     <a href="#快速开始">快速开始</a> ·
-    <a href="#连接-hermes-与-chatgpt-订阅">连接订阅</a> ·
+    <a href="#连接-hermes-与切换模型">模型管理</a> ·
     <a href="#配置与本地数据">配置</a> ·
     <a href="#文档与示例">文档</a>
   </p>
@@ -21,9 +21,11 @@
 
 NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 AI 对话，将小型 Skill、本机工具、代码和子流程组织为可执行流程；在需要判断的地方等待人工审核，在需要改进的地方保留反馈和版本。
 
-应用负责编辑、调度、产物与审核，Hermes 负责 Agent、模型连接、Skills 和记忆。当前 AI 路由使用已有 ChatGPT 订阅的 `openai-codex` 接口。普通工具与代码流程可以独立运行，无需连接模型。
+应用负责编辑、调度、产物与审核，**Hermes 是 Agent 核心**，负责工具调用、Skills、记忆、模型连接与认证。工作台读取 Hermes 的配置，并通过顶部入口选择服务商和模型；选择由 Hermes 校验和保存。普通工具与代码流程可以独立运行，无需连接模型。
 
 > 当前定位：本机、单用户、自行部署。主应用不依赖前端构建服务或独立数据库；HDK 工程能力是可选的本机专业集成，需要另行准备依赖。
+
+> **安装前提：使用 Skill、AI 对话与学习功能前，请先安装 Hermes Agent，配置模型服务商并验证 Hermes 能正常对话。** 按[快速开始](#快速开始)准备 Hermes，再启动 NodeOrchard。
 
 ## 可以做什么
 
@@ -33,6 +35,7 @@ NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 
 | 基础节点 | 输入与校验、Skill、工具／代码、子流程、数据整理、控制、人工审核、产物输出与学习支线 |
 | 依赖调度 | DAG 独立分支并行，按依赖汇合；多个运行排队，并受资源和并发限额约束 |
 | AI 对话 | 描述流程修改、审阅并应用建议；面向指定运行、节点和产物反馈，旧问答可折叠 |
+| 模型管理 | 顶部切换 Hermes 已配置的服务商和模型；默认选择保存在 Hermes，新任务与新运行采用新设置 |
 | 人工审核 | 图片可在中途预览并阻塞下游；通过、要求修改或停止均保留对应产物版本 |
 | 运行观察 | 逐节点输入、输出、状态、日志与历史尝试；修改草稿不改写已有运行 |
 | 产物交付 | 阶段输出与最终输出；执行原件和交付副本分离，副本可单独重试保存 |
@@ -83,6 +86,12 @@ NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 
 
 ![通用演示工作流看板](docs/screenshots/board.jpg)
 
+### 顶部模型切换
+
+直接读取和切换 Hermes 的默认服务商与模型。下图来自独立协议演示后端，服务商和模型名称均为测试数据；真实使用时展示本机 Hermes 的配置。
+
+![独立演示环境的 Hermes 模型切换入口](docs/screenshots/hermes-model.jpg)
+
 ## 快速开始
 
 ### 1. 准备 Node.js
@@ -96,7 +105,27 @@ npm --version
 
 主应用使用 Node 内置模块，包括 SQLite。没有 npm 运行依赖，**无需执行 `npm install`**。
 
-### 2. 获取源码并启动
+### 2. 提前安装并配置 Hermes
+
+Hermes 是独立运行时，需要**先安装到本机**。请按 [Hermes 官方快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)完成安装。macOS／Linux／WSL2 可使用官方命令行安装脚本：
+
+```sh
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+Windows 原生安装及其它方式见上述官方指南。安装后重新打开终端，再配置模型并验证对话：
+
+```sh
+hermes --version
+hermes model
+hermes
+```
+
+在 `hermes model` 中选择你使用的服务商并完成认证，然后在 `hermes` 中发送一条测试消息，确认能正常回复。使用现有 ChatGPT 订阅时，可在 Hermes 向导选择 **ChatGPT or Codex Subscription**；也可使用 Hermes 支持并已配置的其他服务商。
+
+**当前适配验证版本为 Hermes 0.21.4**。安装后核对版本；其他版本需要确认桥接接口兼容。NodeOrchard 与 Hermes 应位于同一运行环境：例如 Hermes 安装在 WSL2 时，也在该 WSL2 环境运行 NodeOrchard。Hermes 的安装位置与 Python 环境需能由本应用访问，自定义路径见[连接说明](#连接-hermes-与切换模型)。
+
+### 3. 获取源码并启动
 
 ```sh
 git clone https://github.com/geekheart/NodeOrchard.git
@@ -108,12 +137,18 @@ npm --prefix workbench start
 
 服务在当前终端前台运行；保持终端开启，使用 `Ctrl+C` 停止。浏览器页面可以关闭，后台调度仍由该进程负责。当前没有开箱即用的系统自启动安装器。
 
-### 3. 先跑一个本地流程
+### 4. 连接 Hermes 并选择模型
+
+点击左侧 **“连接 Hermes”**，或从顶部模型入口连接。工作台会读取 Hermes 的当前服务商和模型目录。需要更换时，在顶部选择服务商、选择或输入模型 ID，点击 **“应用到 Hermes”**；在 Skills 页面确认能读取已安装技能。
+
+新增服务商、登录或更新凭据先在 Hermes 中完成，再回到工作台点击“刷新配置”。选择会更新 Hermes 的全局默认模型；已有会话和运行中的工作流保持原主模型，新任务与新发起的运行使用新设置。
+
+### 5. 先跑一个本地流程
 
 1. 从看板新建工作流，在编辑器导入 [publication-review.workflow.json](workbench/examples/publication-review.workflow.json)。此示例由软件界面搭建并导出，只使用 JavaScript。
 2. 切换到运行视图，将下面的 JSON 填入输入框，检查后运行。
 3. 工作流会清理标题、摘要和重复标签，然后停在“确认文稿与标签”。核对结果后通过审核，继续保存 `发布摘要.json`。
-4. 在运行记录中查看各节点的输入、输出和日志；需要 Skill 或 AI 对话时，再按下节连接 Hermes。
+4. 在运行记录中查看各节点的输入、输出和日志；再按需加入 Skill 节点与 AI 对话。
 
 ```json
 {"title":"  NodeOrchard 发布指南  ","summary":" 用节点编排个人 AI 工作流。 ","tags":["workflow","skills","workflow"]}
@@ -123,17 +158,11 @@ npm --prefix workbench start
 
 纯本地工具和 JavaScript 节点无需 Hermes。Python 节点需要可用的 Python 解释器，可通过 `WORKBENCH_HERMES_PYTHON` 指定；调用外部命令的代码还需要对应本机工具。
 
-## 连接 Hermes 与 ChatGPT 订阅
+## 连接 Hermes 与切换模型
 
-Hermes 是单独安装的运行时，不随仓库分发。请按 [Hermes 官方快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装，再在本机运行：
+先按[快速开始](#2-提前安装并配置-hermes)安装 Hermes、配置服务商并验证对话。Hermes 管理提供商、模型连接、凭据及回退策略；NodeOrchard 通过其原生接口使用 Agent 能力。ChatGPT 订阅的 `openai-codex` 是其中一种模型路由，使用它时 Agent 核心仍是 Hermes。模型可用性、费用和限制取决于你在 Hermes 中配置的服务商与账号。
 
-```sh
-hermes model
-```
-
-选择官方向导中的 **ChatGPT / Codex Subscription** 登录方式，完成浏览器授权，并确认 Hermes 能独立完成一次对话。订阅、模型可用性与用量限制以账号及上游服务为准。
-
-当前适配已验证 **Hermes 0.21.4**。桥接使用 Hermes 的 Agent、Skill 与记忆接口，对接口变化有显式检查；这不表示任意 Hermes 版本均兼容。升级前建议备份状态并验证连接。
+桥接使用 Hermes 的 Agent、Skill、记忆及模型选择接口，对接口变化有显式检查；这不表示任意 Hermes 版本均兼容。升级 Hermes 前建议备份状态并验证连接。
 
 NodeOrchard 默认查找：
 
@@ -153,7 +182,11 @@ npm --prefix workbench start
 
 这里的 `.venv` 只是自定义安装示例，请以实际文件为准。然后点击应用左侧 **“连接 Hermes”**，在 Skills 页面确认能读取已安装技能；在 Skill 节点属性中选择真实技能并保存内容指纹。
 
-应用固定使用 **`openai-codex` 订阅路由**，不会在连接失败时自动切换到 API Key 或其他提供商。NodeOrchard 不接管 Hermes 全局登录流程，也不将订阅凭据写入源码。
+顶部模型入口只列举 Hermes 返回的已配置服务商，并要求其认证状态已确认。模型目录提供候选，也可输入 Hermes 支持的模型 ID；应用先由 Hermes 校验、保存，再读回确认，失败时保留界面选择并显示错误。需要费用或数据策略确认的选择，按提示在 Hermes 原生界面完成后刷新。
+
+主服务商和模型按**会话、工作流运行与学习批次**固定，覆盖后续节点、审核修订和子流程；Hermes 的回退策略继续由 Hermes 管理。旧记录优先从已保存的会话和运行恢复模型身份，无法确认时保留产物并明确拒绝续跑，避免悄悄使用新的默认模型。
+
+工作台不再保存独立的默认模型覆盖；旧 `defaultModel` 偏好已停用。`WORKBENCH_HERMES_MODEL` 不再用于选择模型，模型与提供商的进程启动覆盖也不会传给本应用启动的 Hermes 子进程。请通过顶部入口或 `hermes model` 管理选择；外部修改后在顶部入口点击“刷新配置”。
 
 ## 配置与本地数据
 
@@ -183,7 +216,6 @@ macOS 的默认原件目录为 `~/Library/Application Support/PersonalAgentWorkb
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 安装内的 `venv/bin/python`，也用于 Python 代码节点 |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
-| `WORKBENCH_HERMES_MODEL` | 留空时使用已有模型配置 |
 
 例如以独立状态和工作区启动测试实例：
 
@@ -198,7 +230,7 @@ npm --prefix workbench start
 
 ### 定时运行与代码边界
 
-- 定时任务需要服务持续运行、电脑保持唤醒；含 Skill 时还需要 Hermes 已连接及订阅认证可用。
+- 定时任务需要服务持续运行、电脑保持唤醒；含 Skill 时还需要 Hermes 已连接、模型配置及对应认证可用。
 - 关闭浏览器不影响定时任务。服务离线期间错过的触发不补跑；重启也不会自动重放结果未知的在途能力。
 - 代码节点在本机独立进程运行，具备超时和停止机制，**不是操作系统沙箱**。请只运行信任的代码；停止不会撤销外部副作用。
 - 当前服务用于本机个人使用；没有多人账号、远程访问控制或完整 Docker 部署方案。
@@ -210,8 +242,10 @@ flowchart LR
     UI[浏览器：看板 / 画布 / 对话] --> App[本地 Node.js 应用]
     App --> Engine[工作流调度 / 人工审核 / 学习]
     App --> DB[(本地 SQLite)]
-    Engine --> Hermes[Hermes Agent]
-    Hermes --> Model[ChatGPT 订阅]
+    App --> Selection[顶部模型选择 / Hermes 原生持久化]
+    Selection --> Hermes[Hermes Agent 核心]
+    Engine --> Hermes
+    Hermes --> Model[Hermes 配置的模型服务]
     Engine --> Tools[本机工具 / 代码 / 子流程]
     Engine --> Files[执行原件 / 交付副本]
 ```
@@ -264,7 +298,11 @@ git diff --cached --stat
 
 **页面能打开，为什么不能运行 Skill？**
 
-先确认 Hermes 命令行能独立对话，再核对安装根、解释器与登录状态，点击“连接 Hermes”。升级后若提示接口不兼容，请检查适配版本；不要改用其他路由掩盖失败。
+先按快速开始安装 Hermes，确认命令行能独立对话，再核对安装根、解释器与服务商认证，点击“连接 Hermes”。升级后若提示接口不兼容，请检查适配版本。
+
+**为什么顶部没有我想用的服务商，或者不能应用模型？**
+
+先在 `hermes model` 中配置服务商并完成所需认证，再在工作台模型入口刷新。顶部列表沿用 Hermes 的已配置目录；自定义模型可输入 ID，但仍需 Hermes 校验通过。需要额外确认的选择在 Hermes 原生界面处理。应用后的默认值影响 Hermes 后续新会话，已有运行保持原主模型。
 
 **为什么 Python 节点报解释器不存在？**
 

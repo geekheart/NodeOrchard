@@ -10,6 +10,7 @@
 | `learning.jpg` | 学习支线与两条通用验证样例的配置，未开始训练 |
 | `learning-training.jpg` | 同一演示的三条通用训练样例，未开始训练 |
 | `board.jpg` | 仅包含这些新建演示的工作流看板 |
+| `hermes-model.jpg` | 独立协议演示后端的顶部模型切换，使用测试服务商和模型，未访问真实 Hermes 配置 |
 
 文稿流程由界面导出为 [`publication-review.workflow.json`](../../workbench/examples/publication-review.workflow.json)，并通过人工审核入口实际跑通四个节点。数据处理和学习配置分别使用 [`local-data.workflow.json`](../../workbench/examples/local-data.workflow.json) 与 [`multi-example-learning.workflow.json`](../../workbench/examples/multi-example-learning.workflow.json) 中的通用数据。
 

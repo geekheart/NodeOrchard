@@ -3,13 +3,19 @@
 ## 进程与连接
 
 1. 启动应用服务，默认监听 `127.0.0.1:4318`；此时不启动模型推理。
-2. 用户点击连接，服务使用 Hermes venv 的 Python 启动 `python/workflow_gateway.py`；该入口加载现有 Hermes gateway，并加入工作台自己的 Skill 快照 RPC，不修改 Hermes 安装。
+2. 用户先独立安装并配置 Hermes，验证正常对话后，再在工作台点击连接。服务使用配置的 Hermes Python 启动 `python/workflow_gateway.py`；该入口加载现有 Hermes gateway，并加入工作台自己的 Skill 快照和模型选择 RPC，不修改 Hermes 安装。
 3. 工作目录为本工程；`HERMES_PYTHON_SRC_ROOT` 和 `PYTHONPATH` 指向实际 Hermes 安装。协议走 stdin/stdout，诊断 stderr 单独接收。
 4. 收到 `gateway.ready` 后调用 `client.capabilities({server_requests:true})`。
-5. 读取 provider 与模型目录的受限信息。会话明确指定 `provider=openai-codex`，模型默认复用已配置值。连接、创建、提交和恢复前核对 fallback 与审批策略；非订阅备用路由会阻止运行。完整配置只在服务端瞬时检查，不返回前端或写入日志。
+5. 核对 `approvals.mode` 为 `manual` 或 `smart`，通过 `model.options(explicit_only=true,include_unconfigured=false)` 读取当前选择及已配置提供商。浏览器只获得提供商、模型标识和认证状态；端点、密钥等完整配置不返回前端或写入日志。认证、端点解析及 fallback 由 Hermes 管理，工作台不限定 `openai-codex`。
 6. 应用退出时中断仍在运行的本应用会话，关闭 stdio 并等待自己启动的进程退出。
 
 模型请求均由 Hermes 发出，工作台没有第二条模型调用链。本地内置工具与代码进程不启动模型，也不要求先连接 Hermes；Python worker 使用配置的可用 Python 解释器。后续如果引入 Pi 或其他模型运行时，应增加完整 Agent 适配器，而不是只替换一个模型 URL。
+
+顶部模型入口通过受限的 `workbench.model.set` 调用 Hermes 原生 `switch_model(is_global=true)` 和 `persist_model_selection`，更新 Hermes 全局默认选择。提供商必须由模型目录明确标记为 `authenticated=true`；模型可从建议清单选择或手动填写 ID，由 Hermes 核验。遇到费用、数据策略等选择提示时拒绝在工作台代为确认，用户须在 Hermes 原生界面处理后刷新。只有 RPC 结果及重新读取的目录均与请求的提供商、模型完全一致，工作台才确认切换成功。
+
+会话创建、工作流运行准入和学习批次准备时分别固定主提供商与模型；运行内的 Skill、修改尝试与子流程，以及学习批次内的样例、评价、诊断与改写沿用固定选择。默认模型切换不改写已有记录。固定的是主提供商与模型，Hermes 的认证及 fallback 仍由其自身配置管理。`WORKBENCH_HERMES_MODEL` 和旧本地 `defaultModel` 均不覆盖 Hermes 默认选择。
+
+当前接口已核验 Hermes 0.21.4，不代表所有 Hermes 版本均已验证。安装及独立对话验证步骤见 [使用说明](user-guide.md#启动)。
 
 ## 数据边界与身份
 
@@ -19,15 +25,19 @@
 - `storedSessionId`：Hermes 持久会话 ID，用于重启后恢复。
 - `runtimeSessionId`：当前 Hermes 子进程中的会话 ID，每次恢复可能改变。
 
-SQLite 只保存应用元数据和运行结果。对话历史通过 `session.history` 从 Hermes 读取。第一条消息前 Hermes 可能还没有持久会话；空会话在进程重启后重新创建，不伪称已恢复一段不存在的历史。
+SQLite 只保存应用元数据和运行结果。对话历史通过 `session.history` 从 Hermes 读取。第一条消息前 Hermes 可能还没有持久会话；空会话在进程重启后按已记录的主提供商与模型重新创建，不伪称已恢复一段不存在的历史。未记录模型的旧空会话拒绝重建。恢复有历史的会话时核对 Hermes 实际返回的模型与已记录选择；工作流及学习托管历史使用只读延迟恢复。
 
-工程目录和产物位于 `workspaces/`。后续项目、任务、产物模块继续由应用管理，关联到会话和运行；Hermes 保持上下文及聊天历史的唯一权威。
+旧工作流运行或学习批次缺少主模型时，仅在关联会话能够确认唯一提供商与模型的情况下补回；无法确认则拒绝继续模型步骤，保留已有产物和审核结果，不采用当前默认模型猜测恢复。
+
+默认工作目录为项目根目录 `workflow/`，相对目录 `.` 直接使用该根。执行原件放在独立本机应用数据目录，交付副本放在 `workflow/outputs/` 或指定位置。显式配置优先；旧 `workspaces/`、`.local/` 及历史路径保留可读。项目、任务与产物由应用管理并关联到会话和运行；Hermes 保持上下文及聊天历史的唯一权威。
 
 ## 最小业务接口
 
 | 应用 API | 执行关系 |
 | --- | --- |
-| `POST /api/connect` | 进程启动、能力握手、订阅路由策略检查、`config.get(provider)`、`model.options` |
+| `POST /api/connect` | 进程启动、能力握手、`config.get(approvals.mode)`、受限 `model.options` |
+| `GET /api/models` | 重新读取 Hermes 当前默认选择、已配置提供商、建议模型及认证状态 |
+| `POST /api/models` | 受限 `workbench.model.set`；Hermes 原生全局模型选择、持久化及严格读回确认 |
 | `POST /api/sessions` | `session.create` |
 | `POST /api/sessions/:id/messages` | `prompt.submit` |
 | `POST /api/sessions/:id/interrupt` | `session.interrupt` |

@@ -70,7 +70,7 @@ scope 策略统一包含 `memoryAllowed:true`、`memoryWriteAllowed:false`、`ex
 
 ### 学习工具边界与生命周期
 
-`LearningModel` 经现有 subscription session/create/submit/history 路径调用同一订阅模型。控制会话清空 Agent 工具列表，并在前置、延迟及底层 dispatch 拒绝工具调用。学习 Skill 会话保留其它执行工具与 Hermes 审批，但禁用原生 `memory`、外部 memory provider 工具，以及可能在 scope 外继续执行的 `delegate_task`、`cronjob_manage`、`message_agent` 和 `kanban_*`。这些额外限制只作用于学习 scope，不改变普通执行的工具策略。
+`LearningModel` 经 Hermes session/create/submit/history 路径调用本学习批次固定的主提供商与模型。样例执行、评价、诊断和改写沿用该选择，Hermes 默认模型切换不改写在途批次；认证、端点与 fallback 仍由 Hermes 管理。控制会话清空 Agent 工具列表，并在前置、延迟及底层 dispatch 拒绝工具调用。学习 Skill 会话保留其它执行工具与 Hermes 审批，但禁用原生 `memory`、外部 memory provider 工具，以及可能在 scope 外继续执行的 `delegate_task`、`cronjob_manage`、`message_agent` 和 `kanban_*`。这些额外限制只作用于学习 scope，不改变普通执行的工具策略。
 
 scope 内关闭 memory / Skill review，不再从可写 memory store 重新加载；停用外部 provider 的动态检索、预取、同步、压缩、session-end 和 shutdown 消息写回。外部 provider 在接收学习提示前退出。原生接口不兼容时拒绝准备，不先发送提示；Agent 重建后重新施加相同绑定与防护。控制会话归属单独持久化，仅内部一次性请求标识允许提交，任务页无法追加消息。模型结果仍须同时有成功终态和最终持久历史，JSON 结构也由宿主验证。
 

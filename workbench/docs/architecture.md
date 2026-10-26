@@ -11,7 +11,7 @@ flowchart LR
   ENGINE --> DB[("私有 SQLite")]
   ENGINE --> TOOLS["工具 / 代码 / HDK 能力"]
   ENGINE --> HERMES["Python gateway → Hermes"]
-  HERMES --> MODEL["ChatGPT 订阅"]
+  HERMES --> MODEL["Hermes 配置的模型提供商"]
   ENGINE --> ORIGINALS["本机执行原件"]
   ORIGINALS --> DELIVERY["workflow/outputs 或自定义交付副本"]
 ```
@@ -24,6 +24,7 @@ flowchart LR
 | --- | --- | --- |
 | `src/application.mjs`、`server.mjs` | 装配服务、会话、HTTP/SSE 和请求校验 | DOM、硬件决策 |
 | `src/config.mjs`、`workspace-layout.mjs` | 路径配置、工作环境初始化、一次性偏好兼容 | 搬移历史产物或改写审核 |
+| `src/hermes-models.mjs`、`python/hermes_models.py` | Hermes 受限模型目录、原生全局选择与保存、严格读回确认 | 本地模型覆盖、认证文件或独立回退配置 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
 | `shared/workflow/` | 纯模型、端口、规划、校验、数据集、时间及协议 | Node/DOM、数据库、网络或文件副作用 |
 | `public/` | 页面、画布、输入表单和交互状态 | 可信授权、伪造服务端运行状态 |
@@ -32,6 +33,16 @@ flowchart LR
 | `skills/` | 维护中的细粒度能力指令、模板和资源 | 本地训练答案、候选或运行快照 |
 
 共享模块既供 Node 导入，也以精确白名单 URL 提供给浏览器。静态服务不允许访问整个仓库。模块移动修正真实入口和 worker 路径，不保留无意义的旧转发文件。
+
+## Hermes 与模型选择
+
+聊天和 Skill 运行需要预先独立安装、配置并验证正常对话的 Hermes；工作台不会代为安装。当前核验版本为 Hermes 0.21.4，其它版本须确认 gateway 与原生模型选择接口兼容。安装入口及配置步骤见 [使用说明](user-guide.md#启动)。
+
+Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入口读取已配置的模型目录，通过 Hermes 原生 `switch_model(is_global=true)` 和 `persist_model_selection` 更新全局默认选择；提供商须明确 `authenticated=true`，手动输入的模型 ID 也必须由 Hermes 确认。需要费用或数据策略等确认的选择转到 Hermes 原生界面处理，保存结果和重新读取的目录必须完全匹配才报告成功。浏览器仅接收必要标识和认证状态，不接收凭据、端点等配置。
+
+主提供商与模型按会话、工作流运行和学习批次固定，运行内后续节点、修改尝试、子流程及学习控制调用沿用该选择；切换默认值只影响后续创建。`WORKBENCH_HERMES_MODEL` 和旧本地 `defaultModel` 不再覆盖 Hermes。工作台保留 `manual` / `smart` 审批要求，认证及 fallback 由 Hermes 自身配置决定。
+
+旧运行或学习批次缺少主模型时，可从关联会话确认唯一选择后补回；无法确认则停止继续模型步骤并保留产物与审核，不套用当前默认模型。未记录模型的旧空会话拒绝重建。
 
 ## 工作环境与数据所有权
 

@@ -11,7 +11,7 @@
 - **工作流编辑器**：从看板打开某条工作流，进入 `#/workflows/:id`，手动编排 Skill / 工具 / 代码 / 子流程的并行依赖图；保留执行、学习、定时任务、导入导出与历史运行记录。旧schema1仍按原线性语义运行。
 - **Skills**：从已连接的 Hermes 读取技能清单和原文详情，支持查找；当前为只读页面。
 - **统计**：应用内最近 7 / 30 个 UTC 自然日的执行量与结果，读取本地 SQLite。未采集 Token、费用或订阅账户额度。
-- **设置**：持久保存主题、列表密度、新任务默认模型和默认工作目录；展示模型连接及执行环境信息。偏好只写入工作台本地数据，现有任务和 Hermes 全局配置保持各自状态。
+- **设置**：持久保存主题、列表密度和默认工作目录，展示模型连接及执行环境信息。顶部模型入口读取 Hermes 已配置的提供商与模型，并通过 Hermes 原生接口保存其全局默认选择；工作台不再保存本地模型覆盖。
 
 核心业务功能将继续在这套页面框架上逐步定义。没有连接或没有数据时显示对应的空状态，不填充示例任务或虚构统计。
 
@@ -59,7 +59,7 @@
 
 任务保存在工作台 SQLite，支持查看下次时间、暂停、恢复、编辑及删除。单次触发后自动结束，需修改为未来时间才可再次启用；每日任务计算下一次本地时间，夏令时缺失的时刻跳过，重复的时刻只执行第一次。最近触发状态可区分执行完成、离线、忙碌、错过或失败，“查看运行结果”沿用逐节点输入 / 输出与状态面板，运行记录标明定时来源。
 
-工作台服务必须运行，电脑须保持唤醒；关闭浏览器页面不影响调度。正常轮询延迟在 1 分钟内允许启动；迟到超过 1 分钟或服务重启时已经到期的任务记为错过，不补跑。含 Skill 的任务到点需 Hermes 已连接、ChatGPT 订阅认证可用；离线不自动连接，审批仍需按原有机制处理。同一工作流执行 / 学习忙碌时跳过该次触发并记录原因，不自动重试。暂停或删除取消后续触发及尚未创建运行的准备过程，已开始的运行和历史保留，需在运行面板另行停止。学习模式只允许查看管理既有任务，不创建或恢复调度；最多保存 100 个任务。
+工作台服务必须运行，电脑须保持唤醒；关闭浏览器页面不影响调度。正常轮询延迟在 1 分钟内允许启动；迟到超过 1 分钟或服务重启时已经到期的任务记为错过，不补跑。含 Skill 的任务到点需 Hermes 已连接，所选提供商与模型在 Hermes 中配置可用；离线不自动连接，审批仍需按原有机制处理。每次触发创建运行时固定当时的主提供商与模型。同一工作流执行 / 学习忙碌时跳过该次触发并记录原因，不自动重试。暂停或删除取消后续触发及尚未创建运行的准备过程，已开始的运行和历史保留，需在运行面板另行停止。学习模式只允许查看管理既有任务，不创建或恢复调度；最多保存 100 个任务。
 
 内置工具来自共享的固定白名单：
 
@@ -77,11 +77,13 @@
 
 代码模式填写函数体，`input` 是上一步的真实结果，`return` 是本步输出。JavaScript 在 async 函数体中执行，可使用 `await`；Python 填写同步 `def main(input)` 的函数体，不再包一层函数定义。例如，两种语言均可用 `return input` 原样传递数据。`console.log` / `print` 等标准输出与错误输出分别记入节点的 `stdout` / `stderr`，每路最多 32 KiB，截断会显示标记；日志不作为返回结果。
 
-代码运行在本机独立进程，使用配置的工作区、最小继承环境，并支持超时及停止时终止进程。这适合可信本地代码，不是 OS 沙箱；用户代码调用外部工具产生的副作用由该代码承担，停止不会撤销它们。纯本地工具 / 代码链无需 Hermes 连接或 ChatGPT 订阅；只有 Skill 节点走 Hermes 的订阅路由。
+代码运行在本机独立进程，使用配置的工作区、最小继承环境，并支持超时及停止时终止进程。这适合可信本地代码，不是 OS 沙箱；用户代码调用外部工具产生的副作用由该代码承担，停止不会撤销它们。纯本地工具 / 代码链无需 Hermes 连接或模型认证；Skill 节点经 Hermes 执行。
 
 节点准备与输入绑定分开：后续 Skill 可先用空占位完成快照准备，轮到该节点时，再从同一个固定副本绑定上一步结果。它不会在执行到第二步时重新读取当前 Skill 来替换本次版本。
 
-每个 Skill 节点通过现有 `openai-codex` ChatGPT 订阅路由执行。运行面板显示各节点自己的输入、输出、流式预览、状态、时间、执行信息和日志；有 Hermes 会话的节点提供关联任务链接，本地工具 / 代码节点不伪造会话。Skill 必须收到 Hermes 成功终态、读回持久历史中的最终助手结果，并通过完整性校验；本地节点必须完成工具调用或代码进程并验证返回值，才将结果传给下一步。只有全部能力节点成功才确认最终输出。下游失败或停止时，保留上游已完成结果，未执行节点标为“已跳过”。
+每次工作流运行固定一次 Hermes 主提供商与模型，所有 Skill 节点、后续修改尝试和子流程沿用该选择。模型认证、端点及回退配置由 Hermes 管理。运行面板显示各节点自己的输入、输出、流式预览、状态、时间、执行信息和日志；有 Hermes 会话的节点提供关联任务链接，本地工具 / 代码节点不伪造会话。Skill 必须收到 Hermes 成功终态、读回持久历史中的最终助手结果，并通过完整性校验；本地节点必须完成工具调用或代码进程并验证返回值，才将结果传给下一步。只有全部能力节点成功才确认最终输出。下游失败或停止时，保留上游已完成结果，未执行节点标为“已跳过”。
+
+切换 Hermes 默认模型只影响之后创建的会话、工作流运行和学习批次，不改写已有会话或在途运行。恢复旧记录时优先使用已保存的主提供商与模型；旧工作流运行或学习批次可从关联会话确认唯一选择时补回，否则拒绝继续模型步骤并保留现有产物。未记录模型的旧空会话无法安全重建，需要新建任务。
 
 Skill 的审批 / 澄清会汇总到看板的待处理区域，可进入关联任务处理；节点的“查看关联任务”也保留。停止等待后端确认；本地代码停止记为已停止、超时记为失败，Skill 中断未获确认或断线保留待核对状态。纯本地链不受 Hermes 断线影响。重启不重放在途能力；schema2可恢复纯人工等待和排队，含Skill的队列等待完整模型就绪。旧schema1同流程单运行；schema2允许多个运行排队并按全局准入限额推进。
 
@@ -125,7 +127,7 @@ JSON 支持 `{ "trainingCases": [{ "input": "输入", "expected": "答案" }], "
 
 学习记录的 `memoryPolicy` 区分准备中的 `pending`、已确认的 `batch-snapshot` 和旧记录的 `legacy`；只保存策略与 scope ID。旧批次未实现整批记忆隔离，不能因页面升级将其视为已隔离。学习 scope 未知或已释放时直接拒绝，不回退实时记忆。停止、结束或关闭会释放 scope，迟到返回也会清理；重启不会重建快照或重放学习。
 
-候选只改 `SKILL.md` 指令正文，保留原 frontmatter 元配置与其它资源。工作台在本地 SQLite 保存独立的 `wb-learn-…` 引用和正文指纹；Hermes 运行时仍从原 Skill 复制完整资源包，再仅替换本次固定副本的正文，分别审计源包与候选副本。原 Hermes Skill 文件不被覆盖。评价、诊断与改写通过现有订阅模型的独立无工具会话完成，也使用同批记忆快照。
+候选只改 `SKILL.md` 指令正文，保留原 frontmatter 元配置与其它资源。工作台在本地 SQLite 保存独立的 `wb-learn-…` 引用和正文指纹；Hermes 运行时仍从原 Skill 复制完整资源包，再仅替换本次固定副本的正文，分别审计源包与候选副本。原 Hermes Skill 文件不被覆盖。学习批次在准备记忆快照前固定主提供商与模型，样例执行、评价、诊断和改写沿用该选择；控制调用使用独立无工具会话，并使用同批记忆快照。
 
 学习 scope 的 Skill 会话禁用原生 memory 工具、外部记忆 provider，以及可能脱离 scope 的 `delegate_task`、`cronjob_manage`、`message_agent` 和 `kanban_*` 工具；普通执行模式不增加这些限制。学习 Skill 的其它文件 / 终端工具仍使用 Hermes 审批，本地代码仍在可信宿主执行。这份记忆策略不构成 OS 沙箱，也不隔离任意文件、网络或代码副作用；快照中的既有记忆可能已包含相关事实。验证集仍参与版本选择，严格独立评估需要另留最终测试集。
 
@@ -139,16 +141,24 @@ JSON 支持 `{ "trainingCases": [{ "input": "输入", "expected": "答案" }], "
 
 ## 启动
 
-需要 Node.js 22.13 或更高版本，无需安装 npm 依赖。本地内置工具与 JavaScript 代码可直接运行；Python 代码需要可用的 Python 解释器，当前使用 `WORKBENCH_HERMES_PYTHON` 配置。使用 Skill 或聊天任务时，还需要已经可用并登录 ChatGPT 的 Hermes。
+需要 Node.js 22.13 或更高版本，无需安装 npm 依赖。本地内置工具与 JavaScript 代码可直接运行；Python 代码需要可用的 Python 解释器，当前使用 `WORKBENCH_HERMES_PYTHON` 配置。
+
+使用 Skill 或聊天任务前，必须先独立安装、配置并验证 Hermes。本应用不会安装 Hermes。请按 [Hermes 官方安装文档](https://hermes-agent.nousresearch.com/docs/getting-started/installation/)完成安装；macOS / Linux / WSL2 的官方源码安装入口为：
+
+```sh
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+重新加载终端环境后，先运行 `hermes model` 选择提供商与模型，并在 Hermes 内完成所需认证，再运行 `hermes` 验证一次正常对话。使用 ChatGPT 订阅时可选择 **ChatGPT or Codex Subscription**；也可使用 Hermes 支持的其它已配置提供商。完整配置步骤见 [官方快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)。不要把令牌、密码或 API key 填入工作台诊断页。
+
+当前已核验 Hermes 0.21.4 的 gateway 与模型选择接口；这不代表所有版本均已验证。工作台默认读取 `~/.hermes/hermes-agent` 的源码及其中 `venv/bin/python`。自定义安装、Hermes Desktop 打包运行时或其它布局须按实际路径设置下方的 `WORKBENCH_HERMES_ROOT`、`WORKBENCH_HERMES_PYTHON` 和 `WORKBENCH_HERMES_HOME`，并确认所需接口兼容。随后启动工作台：
 
 ```sh
 cd workbench
 npm start
 ```
 
-打开 <http://127.0.0.1:4318>，默认进入工作流看板。纯本地流程可直接执行；需要 Skill 或聊天任务时点击“连接后端”。认证由 Hermes 管理；模型请求固定选择 `openai-codex` 订阅路由，不会退回按量付费 API 或其他提供商。
-
-若 Hermes 尚未登录，在 Hermes 自己的终端界面运行 `hermes model`，选择 **ChatGPT or Codex Subscription**。完成后回到本应用重新连接。不要把令牌、密码或 API key 填入诊断页。
+打开 <http://127.0.0.1:4318>，默认进入工作流看板。纯本地流程可直接执行；需要 Skill 或聊天任务时点击“连接后端”。顶部模型入口会读取 Hermes 当前选择和已配置提供商，仅允许 Hermes 明确确认已认证的提供商提交切换。可选择建议模型或输入模型 ID；最终必须由 Hermes 原生选择接口确认、保存并严格读回后才显示成功。涉及费用或数据策略等选择提示时，需要先在 Hermes 原生界面完成确认，再回工作台刷新。Hermes 审批模式必须为 `manual` 或 `smart`。
 
 ## 验证
 
@@ -159,9 +169,9 @@ npm test
 python3 -B -m unittest discover -s test -p 'workflow_gateway_test.py'
 ```
 
-自动化测试使用隔离数据、合成 fixture 和真实本地 worker，不调用真实订阅模型；实际结果以当前测试输出为准。个人验收日志和截图保存在忽略目录，不随源码发布。
+自动化测试使用隔离数据、合成 fixture 和真实本地 worker，不调用真实模型；实际结果以当前测试输出为准。个人验收日志和截图保存在忽略目录，不随源码发布。
 
-明确授权后的真实验收会消耗订阅额度，并在测试工作区写入一个随机标记文件。先启动应用，再运行：
+明确授权后的真实验收会消耗所选模型的额度或产生费用，并在测试工作区写入一个随机标记文件。当前 `smoke` 脚本仍限定 `openai-codex` 订阅路由；这只是该专项脚本的限制。先在 Hermes 中配置相应路由并启动应用，再运行：
 
 ```sh
 WORKBENCH_RUN_REAL_SMOKE=1 npm run smoke
@@ -169,7 +179,7 @@ WORKBENCH_RUN_REAL_SMOKE=1 npm run smoke
 
 真实验收报告保存到 `.local/smoke-report.json`，生成文件位于 `workflow/artifacts/architecture-smoke.txt`。只有收到最终成功事件、读回内容一致且 Hermes 历史可查，验收才通过。
 
-多 Skill 专项验收使用两次真实订阅调用，验证 `humanizer → meeting-action-items` 的确切数据交接、串行时间、独立会话和 Hermes 最终历史。显式运行 `WORKBENCH_RUN_REAL_SMOKE=1 node scripts/workflow-chain-smoke.mjs`；报告保存到 `.local/workflow-chain-smoke-report.json`。脚本不会自动批准工具请求或重试失败运行。
+多 Skill 专项验收使用真实 Hermes 模型调用，验证 `humanizer → meeting-action-items` 的确切数据交接、串行时间、独立会话和 Hermes 最终历史。显式运行 `WORKBENCH_RUN_REAL_SMOKE=1 node scripts/workflow-chain-smoke.mjs`；报告保存到 `.local/workflow-chain-smoke-report.json`。脚本不会自动批准工具请求或重试失败运行。
 
 ## 配置
 
@@ -181,12 +191,13 @@ WORKBENCH_RUN_REAL_SMOKE=1 npm run smoke
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 自己的 `venv/bin/python` |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
-| `WORKBENCH_HERMES_MODEL` | Hermes 已配置的订阅模型；否则使用其订阅模型列表 |
 | `WORKBENCH_DATA_DIR` | `.local/` |
 | `WORKBENCH_WORKSPACE_ROOT` | 项目根目录 `workflow/` |
 | `WORKBENCH_RUN_ROOT` | 本机应用数据目录中的 `PersonalAgentWorkbench/runs/`；显式设置数据目录时为其 `workflow-runs/`，只设置工作区时为其 `.workbench-runs/` |
 
 会话和代码的工作目录必须位于配置的工作区内。该目录检查用于管理工程位置，不是操作系统沙箱；Hermes 工具服从其运行环境及审批配置，本地代码以工作台进程用户的权限运行。
+
+模型配置由 Hermes 统一管理。`WORKBENCH_HERMES_MODEL` 不再读取；旧偏好中的 `defaultModel` 也不会覆盖 Hermes 默认选择。gateway 启动时会移除继承的 `HERMES_MODEL`、`HERMES_INFERENCE_MODEL`、`HERMES_TUI_PROVIDER` 和 `HERMES_INFERENCE_PROVIDER`，避免环境覆盖已保存的选择。
 
 ## 工程入口
 
@@ -195,6 +206,7 @@ WORKBENCH_RUN_REAL_SMOKE=1 npm run smoke
 - `src/server.mjs`：本地 HTTP/SSE 和客户端校验。
 - `src/application.mjs`：应用会话、运行状态、双向请求与恢复。
 - `src/hermes-adapter.mjs`：Hermes stdio JSON-RPC、子进程与退出处理。
+- `src/hermes-models.mjs`、`python/hermes_models.py`：受限模型目录、Hermes 原生全局选择与保存、严格读回确认。
 - `src/workflows/workflow-library.mjs`：多工作流 SQLite 文档库、版本冲突检查、首次历史导入及看板状态摘要。
 - `public/workflow-board.js`、`public/workflow-library-client.js`：独立看板、按文档同步与浏览器草稿迁移。
 - `shared/workflow/workflow-plan.mjs`：前后端共享的 schema1／DAG 计划校验与排序。

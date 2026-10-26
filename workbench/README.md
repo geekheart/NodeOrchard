@@ -2,15 +2,17 @@
 
 项目介绍、界面截图与完整首次部署流程见 [项目首页](../README.md)。本页保留详细目录与配置说明。
 
-本机单用户应用，连接 Hermes 与现有 ChatGPT 订阅。支持工作流看板、节点编排、AI 对话修改、并行调度、人工审核、定时运行及多样例 Skill 学习。
+本机单用户应用，以 Hermes 为 Agent 核心，由 Hermes 管理模型连接、认证、Skills 和记忆。支持工作流看板、节点编排、AI 对话修改、并行调度、人工审核、定时运行及多样例 Skill 学习。
 
 ## 运行与工作环境
 
-需要 Node.js ≥ 22.13。主应用使用 Node 内置模块，无需安装前端框架或独立数据库服务。
+需要 Node.js ≥ 22.13。主应用使用 Node 内置模块，无需安装前端框架或独立数据库服务。**使用 AI 功能前，先按 [Hermes 官方指南](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装 Hermes Agent**，运行 `hermes model` 配置提供商和模型，再用 `hermes` 验证一次对话。当前适配已验证 Hermes 0.21.4。
 
 从项目根目录运行 `npm --prefix workbench start`，或在本目录运行 `npm start`，打开 http://127.0.0.1:4318 。
 
-默认查找 Hermes 安装 `~/.hermes/hermes-agent`，需要已完成订阅登录后在界面连接。仅使用 `openai-codex` 订阅路由，不自动改用 API Key。纯本地工具／代码流程可离线运行；工程转换和编译需要相应本机依赖，缺失时明确报告。
+默认查找 Hermes 安装 `~/.hermes/hermes-agent`，在界面点击“连接 Hermes”后读取当前模型与已配置目录。顶部可切换服务商和模型，选择由 Hermes 原生接口校验并持久化；新增提供商和认证先在 Hermes 完成，再刷新目录。支持 Hermes 已配置且认证已确认的提供商，ChatGPT 订阅是其中一种选择。纯本地工具／代码流程可离线运行；工程转换和编译需要相应本机依赖，缺失时明确报告。
+
+主模型按会话、工作流运行和学习批次固定；顶层切换只影响新建任务和新发起运行，已有会话、后续节点和子流程保留原主模型，回退策略仍由 Hermes 管理。工作台不再使用本机 `defaultModel` 或 `WORKBENCH_HERMES_MODEL` 覆盖；需要原生策略确认的模型按界面提示到 Hermes 处理。
 
 | 位置 | 用途 | Git |
 | --- | --- | --- |
@@ -71,7 +73,6 @@ npm run check:git
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 安装内 `venv/bin/python` |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
-| `WORKBENCH_HERMES_MODEL` | 留空采用已有配置 |
 | `WORKBENCH_HDK_SOURCE_ROOT` | 旧工程能力的本机资料根；可显式指定 |
 | `WORKBENCH_HDK_PROCESS_TEMPLATE` | 本机工艺模板文件；不会打包到源码 |
 | `WORKBENCH_HDK_PINOUT_REFERENCE` | 本机 Pinout 学习参考图 |
