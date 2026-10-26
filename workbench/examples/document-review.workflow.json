@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-6e0dcdae-9f9a-49e2-a435-af3eefd62741",
+  "title": "文档整理 · 手动编辑示例",
+  "mode": "execute",
+  "nodes": [
+    {
+      "id": "sample-input",
+      "type": "input",
+      "title": "输入资料",
+      "x": 40,
+      "y": 180,
+      "config": {
+        "outputType": "fileRef",
+        "fieldName": "document",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "sample-skill",
+      "type": "skill",
+      "title": "提取关键信息",
+      "x": 350,
+      "y": 180,
+      "config": {
+        "inputType": "fileRef",
+        "outputType": "object",
+        "skillRef": "document-extract",
+        "version": "v1.2",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "sample-check",
+      "type": "condition",
+      "title": "资料是否完整",
+      "x": 660,
+      "y": 180,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "expression": "input.complete === true"
+      }
+    },
+    {
+      "id": "sample-output",
+      "type": "output",
+      "title": "输出整理结果",
+      "x": 970,
+      "y": 80,
+      "config": {
+        "inputType": "any",
+        "fileName": "summary.json"
+      }
+    },
+    {
+      "id": "sample-human",
+      "type": "human",
+      "title": "补充缺失信息",
+      "x": 660,
+      "y": 430,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "prompt": "请核对并补充缺失字段。"
+      }
+    },
+    {
+      "id": "sample-reviewed",
+      "type": "output",
+      "title": "输出补充结果",
+      "x": 970,
+      "y": 430,
+      "config": {
+        "inputType": "any",
+        "fileName": "reviewed.json"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-12478d5f-bfae-404a-a774-0b5290991c42",
+      "sourceNode": "sample-input",
+      "sourcePort": "out",
+      "targetNode": "sample-skill",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-b357e67e-0b79-4b7a-9f93-6fc90db310de",
+      "sourceNode": "sample-skill",
+      "sourcePort": "out",
+      "targetNode": "sample-check",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-3e77c5b2-e17b-4301-8813-9077fb92a8de",
+      "sourceNode": "sample-check",
+      "sourcePort": "yes",
+      "targetNode": "sample-output",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-ea188942-dc4c-4b61-bf4e-b82d5a394121",
+      "sourceNode": "sample-check",
+      "sourcePort": "no",
+      "targetNode": "sample-human",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-76bb4a7f-e614-4c11-ae3f-1b27384c5b0c",
+      "sourceNode": "sample-human",
+      "sourcePort": "out",
+      "targetNode": "sample-reviewed",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "comparison": "exact",
+  "rubric": "从“待处理文本：”后提取英文字母短语，转换为全小写，仅返回该短语；不翻译，不加标点，不解释。该规则应适用于不同短语，不硬编码任何示例。",
+  "targetScore": 100,
+  "maxRounds": 3,
+  "trainableNodeIds": [
+    "learn-skill"
+  ],
+  "validationCases": [
+    {
+      "id": "validation-morning",
+      "name": "验证 · 早晨",
+      "input": "待处理文本：GOOD MORNING",
+      "expected": "good morning"
+    },
+    {
+      "id": "validation-editor",
+      "name": "验证 · 编辑器",
+      "input": "待处理文本：NODE EDITOR",
+      "expected": "node editor"
+    }
+  ],
+  "trainingCases": [
+    {
+      "id": "train-greeting",
+      "name": "训练 · 问候",
+      "input": "待处理文本：HELLO WORLD",
+      "expected": "hello world"
+    },
+    {
+      "id": "train-workbench",
+      "name": "训练 · 工作台",
+      "input": "待处理文本：AI WORKBENCH",
+      "expected": "ai workbench"
+    },
+    {
+      "id": "train-source",
+      "name": "训练 · 开源",
+      "input": "待处理文本：OPEN SOURCE",
+      "expected": "open source"
+    }
+  ]
+}

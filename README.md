@@ -1,0 +1,308 @@
+<div align="center">
+  <img src="docs/assets/nodeorchard-logo.svg" width="88" height="88" alt="NodeOrchard logo" />
+  <h1>NodeOrchard</h1>
+  <p><strong>让能力成为节点，让工作流持续生长。</strong></p>
+  <p>Local-first AI workflows with Skills, parallel execution, and human review.</p>
+  <p>
+    <a href="https://nodejs.org/en/download"><img src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-43853D?logo=nodedotjs&amp;logoColor=white" alt="Node.js 22.13 or later" /></a>
+    <img src="https://img.shields.io/badge/Local--first-single--user-153D32" alt="Local-first, single-user" />
+    <a href="https://github.com/NousResearch/hermes-agent"><img src="https://img.shields.io/badge/Agent-Hermes-C4A66A" alt="Hermes agent backend" /></a>
+  </p>
+  <p>
+    <a href="#界面预览">界面预览</a> ·
+    <a href="#快速开始">快速开始</a> ·
+    <a href="#连接-hermes-与-chatgpt-订阅">连接订阅</a> ·
+    <a href="#配置与本地数据">配置</a> ·
+    <a href="#文档与示例">文档</a>
+  </p>
+</div>
+
+![NodeOrchard：本地 AI 工作流、并行能力节点与人工审核](docs/assets/nodeorchard-banner.svg)
+
+NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 AI 对话，将小型 Skill、本机工具、代码和子流程组织为可执行流程；在需要判断的地方等待人工审核，在需要改进的地方保留反馈和版本。
+
+应用负责编辑、调度、产物与审核，Hermes 负责 Agent、模型连接、Skills 和记忆。当前 AI 路由使用已有 ChatGPT 订阅的 `openai-codex` 接口。普通工具与代码流程可以独立运行，无需连接模型。
+
+> 当前定位：本机、单用户、自行部署。主应用不依赖前端构建服务或独立数据库；HDK 工程能力是可选的本机专业集成，需要另行准备依赖。
+
+## 可以做什么
+
+| 能力 | 当前行为 |
+| --- | --- |
+| 节点编排 | 拖拽、具名端口连线、属性配置、撤销／重做、导入／导出，支持深浅主题 |
+| 基础节点 | 输入与校验、Skill、工具／代码、子流程、数据整理、控制、人工审核、产物输出与学习支线 |
+| 依赖调度 | DAG 独立分支并行，按依赖汇合；多个运行排队，并受资源和并发限额约束 |
+| AI 对话 | 描述流程修改、审阅并应用建议；面向指定运行、节点和产物反馈，旧问答可折叠 |
+| 人工审核 | 图片可在中途预览并阻塞下游；通过、要求修改或停止均保留对应产物版本 |
+| 运行观察 | 逐节点输入、输出、状态、日志与历史尝试；修改草稿不改写已有运行 |
+| 产物交付 | 阶段输出与最终输出；执行原件和交付副本分离，副本可单独重试保存 |
+| 执行与学习 | 执行固定 Skill 版本；学习基于训练／验证样例与反馈提出候选，记录逐例结果和正文差异 |
+| 定时任务 | 指定时间运行一次，或按时区每日运行；与手动执行共用输入预检 |
+| 工作流管理 | 看板、搜索、另存新版、归档与回收站；永久删除须先进入回收站 |
+
+学习不是自动获得通用能力的保证。训练集与验证集用于评估和候选选择，仍需独立样例及人工复评；执行允许 Hermes 更新长期记忆，学习批次使用固定的只读记忆快照，避免本批样例写回共享记忆。
+
+## 界面预览
+
+以下均为在隔离环境中新建的通用演示工作流，通过软件界面操作并截图；不包含私人工作流、业务输入、私人训练答案或业务验收记录。
+
+### 节点编辑器
+
+节点库、分类配色、画布与属性栏共用一套界面；关键产物和审核节点可显示预览。
+
+![通用演示工作流的节点画布和配置界面](docs/screenshots/editor.jpg)
+
+### 执行过程
+
+六节点本地流程真实运行完成，展示节点状态、示例输入和交付位置；各节点实际输入／输出可在运行详情中展开。此示例不调用模型。
+
+![六节点本地工作流完成后的运行视图](docs/screenshots/execution.jpg)
+
+### 人工审核
+
+整理文稿后等待人工决定，相关下游保持阻塞；对话框中的修改意见为尚未发送的演示草稿。
+
+![新建文稿流程等待人工审核和定向对话反馈](docs/screenshots/human-review.jpg)
+
+### 多样例学习配置
+
+配置训练集、验证集、评价标准与可训练 Skill。演示包含 3 条训练样例和 2 条验证样例；截图仅展示配置，未发起模型训练，不代表已有学习成绩。
+
+![多样例学习的训练集与验证集配置](docs/screenshots/learning.jpg)
+
+<details>
+<summary>查看训练样例编辑区</summary>
+
+![通用短语规范化示例的训练样例](docs/screenshots/learning-training.jpg)
+
+</details>
+
+### 独立工作流看板
+
+按配置和真实运行状态组织流程，并集中呈现需要处理的事项。
+
+![通用演示工作流看板](docs/screenshots/board.jpg)
+
+## 快速开始
+
+### 1. 准备 Node.js
+
+需要 **Node.js ≥ 22.13**，推荐 Node.js 24。请从 [Node.js 官方下载页](https://nodejs.org/en/download)安装，并确认当前终端使用的版本：
+
+```sh
+node --version
+npm --version
+```
+
+主应用使用 Node 内置模块，包括 SQLite。没有 npm 运行依赖，**无需执行 `npm install`**。
+
+### 2. 获取源码并启动
+
+```sh
+git clone https://github.com/geekheart/NodeOrchard.git
+cd NodeOrchard
+npm --prefix workbench start
+```
+
+打开 **[http://127.0.0.1:4318](http://127.0.0.1:4318)**。首次启动会自动创建根目录下的 `workflow/` 与本地状态目录。默认只监听 `127.0.0.1`。
+
+服务在当前终端前台运行；保持终端开启，使用 `Ctrl+C` 停止。浏览器页面可以关闭，后台调度仍由该进程负责。当前没有开箱即用的系统自启动安装器。
+
+### 3. 先跑一个本地流程
+
+1. 从看板新建工作流，在编辑器导入 [publication-review.workflow.json](workbench/examples/publication-review.workflow.json)。此示例由软件界面搭建并导出，只使用 JavaScript。
+2. 切换到运行视图，将下面的 JSON 填入输入框，检查后运行。
+3. 工作流会清理标题、摘要和重复标签，然后停在“确认文稿与标签”。核对结果后通过审核，继续保存 `发布摘要.json`。
+4. 在运行记录中查看各节点的输入、输出和日志；需要 Skill 或 AI 对话时，再按下节连接 Hermes。
+
+```json
+{"title":"  NodeOrchard 发布指南  ","summary":" 用节点编排个人 AI 工作流。 ","tags":["workflow","skills","workflow"]}
+```
+
+想尝试 Python 节点，可导入 [local-data.workflow.json](workbench/examples/local-data.workflow.json)，输入 `{"items":["Draft","Review","Publish"],"active":false,"retries":0}`；先按下文设置可用的 Python 解释器。
+
+纯本地工具和 JavaScript 节点无需 Hermes。Python 节点需要可用的 Python 解释器，可通过 `WORKBENCH_HERMES_PYTHON` 指定；调用外部命令的代码还需要对应本机工具。
+
+## 连接 Hermes 与 ChatGPT 订阅
+
+Hermes 是单独安装的运行时，不随仓库分发。请按 [Hermes 官方快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装，再在本机运行：
+
+```sh
+hermes model
+```
+
+选择官方向导中的 **ChatGPT / Codex Subscription** 登录方式，完成浏览器授权，并确认 Hermes 能独立完成一次对话。订阅、模型可用性与用量限制以账号及上游服务为准。
+
+当前适配已验证 **Hermes 0.21.4**。桥接使用 Hermes 的 Agent、Skill 与记忆接口，对接口变化有显式检查；这不表示任意 Hermes 版本均兼容。升级前建议备份状态并验证连接。
+
+NodeOrchard 默认查找：
+
+```text
+Hermes 源码：~/.hermes/hermes-agent
+Python：    ~/.hermes/hermes-agent/venv/bin/python
+Hermes 状态：~/.hermes
+```
+
+若官方安装位置或虚拟环境名称不同，启动前显式设置实际路径。例如在 macOS／Linux 的 shell 中：
+
+```sh
+export WORKBENCH_HERMES_ROOT="$HOME/path/to/hermes-agent"
+export WORKBENCH_HERMES_PYTHON="$WORKBENCH_HERMES_ROOT/.venv/bin/python"
+npm --prefix workbench start
+```
+
+这里的 `.venv` 只是自定义安装示例，请以实际文件为准。然后点击应用左侧 **“连接 Hermes”**，在 Skills 页面确认能读取已安装技能；在 Skill 节点属性中选择真实技能并保存内容指纹。
+
+应用固定使用 **`openai-codex` 订阅路由**，不会在连接失败时自动切换到 API Key 或其他提供商。NodeOrchard 不接管 Hermes 全局登录流程，也不将订阅凭据写入源码。
+
+## 配置与本地数据
+
+默认工作环境位于仓库根目录的 **`workflow/`**，不存在时自动创建。新任务相对工作目录 `.` 直接表示这个根；用户显式设置的目录优先。
+
+| 位置 | 用途 |
+| --- | --- |
+| `workflow/artifacts/` | 普通会话产物 |
+| `workflow/outputs/` | 工作流交付副本，也可在流程中自定义输出位置 |
+| `workflow/config/` | 本机资源位置与专业工具配置，按需创建 |
+| `workflow/workflow-sessions/` | Skill 节点会话与本次冻结的能力副本 |
+| `workbench/.local/` | SQLite、偏好、Skill 快照、缓存与本机依赖 |
+| 本机应用数据目录中的 `runs/` | 权威执行原件、回执与节点历史版本 |
+
+macOS 的默认原件目录为 `~/Library/Application Support/PersonalAgentWorkbench/runs/`；Windows 使用 Local AppData，Linux 使用 XDG state。保留 `PersonalAgentWorkbench` 名称是为了兼容已有本地数据。
+
+预览、审核与节点交接绑定执行原件。交付只复制输出节点明确声明的成果；副本保存失败可单独重试，副本被删改可检查补齐，无需重新调用模型或重复人工审核。
+
+### 环境变量
+
+| 变量 | 默认值／说明 |
+| --- | --- |
+| `WORKBENCH_PORT` | `4318`；监听地址固定为本机回环地址 |
+| `WORKBENCH_WORKSPACE_ROOT` | 项目根目录 `workflow/` |
+| `WORKBENCH_DATA_DIR` | `workbench/.local/` |
+| `WORKBENCH_RUN_ROOT` | 本机应用数据目录中的执行原件根 |
+| `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
+| `WORKBENCH_HERMES_PYTHON` | Hermes 安装内的 `venv/bin/python`，也用于 Python 代码节点 |
+| `WORKBENCH_HERMES_HOME` | `~/.hermes` |
+| `WORKBENCH_HERMES_MODEL` | 留空时使用已有模型配置 |
+
+例如以独立状态和工作区启动测试实例：
+
+```sh
+WORKBENCH_PORT=4320 \
+WORKBENCH_DATA_DIR="$PWD/workflow/demo-state" \
+WORKBENCH_WORKSPACE_ROOT="$PWD/workflow/demo-workspace" \
+npm --prefix workbench start
+```
+
+显式指定数据目录或工作区时，默认运行根也在该隔离环境内派生；如需单独指定原件位置，设置 `WORKBENCH_RUN_ROOT`。环境变量须在服务启动前设置，应用不会自动加载 `.env` 文件。
+
+### 定时运行与代码边界
+
+- 定时任务需要服务持续运行、电脑保持唤醒；含 Skill 时还需要 Hermes 已连接及订阅认证可用。
+- 关闭浏览器不影响定时任务。服务离线期间错过的触发不补跑；重启也不会自动重放结果未知的在途能力。
+- 代码节点在本机独立进程运行，具备超时和停止机制，**不是操作系统沙箱**。请只运行信任的代码；停止不会撤销外部副作用。
+- 当前服务用于本机个人使用；没有多人账号、远程访问控制或完整 Docker 部署方案。
+
+## 架构与目录
+
+```mermaid
+flowchart LR
+    UI[浏览器：看板 / 画布 / 对话] --> App[本地 Node.js 应用]
+    App --> Engine[工作流调度 / 人工审核 / 学习]
+    App --> DB[(本地 SQLite)]
+    Engine --> Hermes[Hermes Agent]
+    Hermes --> Model[ChatGPT 订阅]
+    Engine --> Tools[本机工具 / 代码 / 子流程]
+    Engine --> Files[执行原件 / 交付副本]
+```
+
+```text
+NodeOrchard/
+├── workbench/
+│   ├── src/                  应用装配、HTTP、配置、持久化与 Hermes 适配
+│   │   └── workflows/        工作流调度、审核、对话、学习与文件管理
+│   ├── shared/workflow/      前后端共用的纯模型、端口与协议
+│   ├── public/               浏览器页面、画布与主题
+│   ├── python/               Hermes 桥接与 Python 执行器
+│   ├── skills/               人工维护的 Skill、源码模板与 schema
+│   ├── hdk/                  可选工程能力、转换器适配与强校验
+│   ├── examples/             可分享的通用流程与数据集
+│   ├── test/                 自动化测试与脱敏 fixture
+│   ├── scripts/              开发检查及工具
+│   └── docs/                 完整操作与架构说明
+├── docs/                     公开品牌资产与通用演示截图
+├── workflow/                 本地工作环境，Git 忽略
+├── AGENTS.md                 协作与模块边界
+└── THIRD_PARTY_NOTICES.md     第三方代码及外部集成说明
+```
+
+依赖方向为界面／后端到共享模型。`shared/workflow/` 不依赖 DOM、文件系统、HTTP 或数据库；浏览器只通过静态资源白名单读取共享模块。详细设计见[整体架构](workbench/docs/architecture.md)。
+
+### 可选 HDK 工程能力
+
+仓库包含原生 EDA 导出、实拍 Pinout、接口标注、双语指南、工艺要求、固件编译和测试说明等集成。它们依赖本机资料与外部工具，**不属于基础启动流程**。
+
+当前工程集成在 macOS 本机环境验证，涉及嘉立创 EDA 专业版、Chrome／Playwright、draw.io、外部转换器、Python 包及指定 SDK／编译器；部分渲染与文档脚本还存在 Codex runtime 和应用安装路径约束。不能直接视为跨平台的一键工程导出工具。
+
+开始前阅读 [HDK 能力边界](workbench/hdk/ARCHITECTURE.md)、[四文件流程](workbench/docs/four-files-workflow.md)与[应用配置](workbench/README.md#配置)，准备自己的工程、照片、模板和资源覆盖配置。缺依赖时应补齐环境；固件编译成功仍不代表实板测试通过。
+
+## 开发、测试与发布边界
+
+```sh
+npm --prefix workbench test
+npm --prefix workbench run check:git
+git diff --cached --stat
+```
+
+测试固定使用 `test/*.test.mjs`，Python 测试由包装器调用；不要用裸 `node --test` 自动发现，以免启动常驻 fixture。部分外部工具测试在依赖缺失时明确跳过，真实模型与硬件验收需单独执行。
+
+`check:git` 检查已跟踪文件及未忽略的候选文件，包括个人主目录字面量和私有目录边界；它不修改暂存区、不上传文件。提交前仍需审阅实际暂存内容。
+
+本地工作流、业务输入、训练答案、候选 Skill、学习记忆、运行快照和实际验证截图均不进入 Git。公开截图仅使用新建的通用演示；`shared/workflow/`、通用 `examples/` 和人工维护的 `skills/` 是源码，正常版本管理。旧 `.local/`、`workspaces/` 与历史路径保留，不因源码整理删除。
+
+## 常见问题
+
+**页面能打开，为什么不能运行 Skill？**
+
+先确认 Hermes 命令行能独立对话，再核对安装根、解释器与登录状态，点击“连接 Hermes”。升级后若提示接口不兼容，请检查适配版本；不要改用其他路由掩盖失败。
+
+**为什么 Python 节点报解释器不存在？**
+
+默认路径指向 Hermes 的 `venv/bin/python`。自定义安装或只使用 Python 节点时，设置 `WORKBENCH_HERMES_PYTHON` 为实际解释器路径后重启服务。
+
+**为什么导入示例后仍要选择 Skill？**
+
+Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人已学习 Skill；请在属性中选择实际技能。输入资料预检失败时，先按提示准备文件和配置。
+
+**运行卡在人工审核，是不是失败了？**
+
+这是预期的阻塞状态。检查产物，回复“通过”继续，或填写具体修改意见；仅相关后继等待。图片预览和自动校验不能替代人的批准。
+
+**交付副本丢失或保存失败，需要重跑吗？**
+
+先查看执行原件。使用“重试保存交付副本”或“检查并补齐交付副本”；这些操作复用已完成产物，不重做业务节点与审核。
+
+**升级、迁移前需要备份什么？**
+
+保留 `workbench/.local/`、`workflow/`、执行原件根及 Hermes 状态；工作流 JSON 导出可作为定义备份，但不包含完整运行、审核和记忆。不要只复制源码就删除旧数据。
+
+## 文档与示例
+
+| 文档 | 内容 |
+| --- | --- |
+| [完整操作指南](workbench/docs/user-guide.md) | 页面、编辑、运行、定时、学习与结果反馈 |
+| [节点体系](workbench/docs/workflow-node-system.md) | 基础节点、预设、组合与当前限制 |
+| [工作流对话](workbench/docs/workflow-conversation.md) | AI 修改、产物反馈与回复对象 |
+| [输入与恢复](workbench/docs/workflow-inputs-and-recovery.md) | 输入预检、原件、审核与重启恢复 |
+| [版本与生命周期](workbench/docs/workflow-versioning.md) / [归档与回收站](workbench/docs/workflow-lifecycle.md) | 另存新版、归档、恢复与删除 |
+| [学习协议](workbench/docs/learning-protocol.md) | 多样例评估、候选版本与记忆隔离 |
+| [Hermes 协议](workbench/docs/hermes-protocol.md) | 原生 stdio 网关与适配边界 |
+| [架构](workbench/docs/architecture.md) / [协作规则](AGENTS.md) | 模块职责、代码边界与验证规范 |
+
+从无需 Hermes 的[文稿审核与交付](workbench/examples/publication-review.workflow.json)开始；继续参考[本地数据处理](workbench/examples/local-data.workflow.json)、[混合能力](workbench/examples/mixed-capabilities.workflow.json)、[文档审核](workbench/examples/document-review.workflow.json)与[多样例学习](workbench/examples/multi-example-learning.workflow.json)。旧版示例可在编辑器升级为并行工作流；学习时需连接“业务产物 → 产物对比 → Skill 改进”并勾选目标 Skill。完整列表见 [examples/](workbench/examples/)。
+
+## 致谢与许可状态
+
+感谢 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供 Agent、Skills 和记忆运行时；[Multica](https://github.com/multica-ai/multica) 为应用导航与工作流列表设计提供参考。可选转换器及内含第三方代码的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+**NodeOrchard 原创代码的项目许可证尚未选定。** 仓库公开不代表已经授予开源许可证；各第三方组件继续遵循其自身条款。

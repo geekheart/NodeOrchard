@@ -1,0 +1,69 @@
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+
+export const DEFAULT_PREFERENCES = Object.freeze({
+  theme: 'system', density: 'comfortable', defaultModel: '', defaultWorkspace: '.',
+});
+
+const KEYS = new Set(Object.keys(DEFAULT_PREFERENCES));
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const inside = path => path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+
+export function workspacePreference(value, workspaceRoot) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 4096 || value.includes('\0')) {
+    throw new Error('默认工作目录必须是工作区内的有效路径。');
+  }
+  const configuredRoot = resolve(workspaceRoot);
+  const canonicalRoot = realpathSync(configuredRoot);
+  const target = resolve(isAbsolute(value) ? value : join(configuredRoot, value));
+  if (!inside(relative(configuredRoot, target)) && !inside(relative(canonicalRoot, target))) {
+    throw new Error('默认工作目录必须位于已配置的工作区内。');
+  }
+  let ancestor = target;
+  while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+  const canonicalAncestor = realpathSync(ancestor);
+  if (!statSync(canonicalAncestor).isDirectory() || !inside(relative(canonicalRoot, canonicalAncestor))) {
+    throw new Error('默认工作目录不能通过符号链接越过工作区。');
+  }
+  const canonicalTarget = resolve(canonicalAncestor, relative(ancestor, target));
+  return relative(canonicalRoot, canonicalTarget).split(sep).join('/') || '.';
+}
+
+export function validatePreferences(patch, current, { workspaceRoot, availableModels = [], connected = false } = {}) {
+  if (!record(patch)) throw new Error('preferences 必须是对象。');
+  if (Object.keys(patch).some(key => !KEYS.has(key))) throw new Error('包含不支持的工作台设置。');
+  const next = { ...current };
+  if (Object.hasOwn(patch, 'theme')) {
+    if (!['system', 'light', 'dark'].includes(patch.theme)) throw new Error('无效的主题。');
+    next.theme = patch.theme;
+  }
+  if (Object.hasOwn(patch, 'density')) {
+    if (!['comfortable', 'compact'].includes(patch.density)) throw new Error('无效的显示密度。');
+    next.density = patch.density;
+  }
+  if (Object.hasOwn(patch, 'defaultWorkspace')) next.defaultWorkspace = workspacePreference(patch.defaultWorkspace, workspaceRoot);
+  if (Object.hasOwn(patch, 'defaultModel')) {
+    if (typeof patch.defaultModel !== 'string' || patch.defaultModel.length > 256) throw new Error('无效的默认模型。');
+    const model = patch.defaultModel.trim();
+    if (model && (connected ? !availableModels.includes(model) : model !== current.defaultModel)) {
+      throw new Error(connected ? '默认模型不在当前 ChatGPT 订阅模型列表中。' : '请连接 Hermes 后再选择新的默认模型。');
+    }
+    next.defaultModel = model;
+  }
+  return next;
+}
+
+export function loadPreferences(saved, workspaceRoot) {
+  const result = { ...DEFAULT_PREFERENCES };
+  if (!record(saved)) return result;
+  for (const key of KEYS) {
+    if (!Object.hasOwn(saved, key)) continue;
+    try {
+      // A previously validated model may be retained while the app is offline.
+      const current = key === 'defaultModel' && typeof saved[key] === 'string'
+        ? { ...result, defaultModel: saved[key].trim() } : result;
+      Object.assign(result, validatePreferences({ [key]: saved[key] }, current, { workspaceRoot }));
+    } catch { /* Ignore invalid persisted fields without blocking application startup. */ }
+  }
+  return result;
+}

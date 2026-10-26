@@ -1,0 +1,184 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { access, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Application } from '../src/application.mjs';
+import { readConfig } from '../src/config.mjs';
+
+const fixture = fileURLToPath(new URL('./fixtures/fake-hermes.mjs', import.meta.url));
+
+async function setup(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'workbench-preferences-test-'));
+  const config = {
+    ...readConfig({
+      WORKBENCH_HERMES_ROOT: join(directory, 'fake-install'),
+      WORKBENCH_HERMES_HOME: join(directory, 'fake-home'),
+    }),
+    dataDir: join(directory, 'db'),
+    workspaceRoot: join(directory, 'workspace'),
+    command: process.execPath,
+    args: [fixture],
+    childEnv: {
+      FAKE_HERMES_STATE_PATH: join(directory, 'hermes.json'),
+      FAKE_APPROVAL_MODE: 'manual',
+      FAKE_FALLBACK_PROVIDER: '',
+      FAKE_RESUME_RACE: '',
+    },
+  };
+  const applications = new Set();
+  const create = () => {
+    const app = new Application(config);
+    applications.add(app);
+    return app;
+  };
+  t.after(async () => {
+    for (const app of applications) if (!app.closed) await app.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  return { app: create(), create, config, directory };
+}
+
+test('saved preferences survive restart and govern a new session workspace and model', async t => {
+  const { app, create, config } = await setup(t);
+  const expected = {
+    theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: 'test-model-alt',
+  };
+  await app.connect();
+  assert.deepEqual((await app.saveSettings({ preferences: expected })).preferences, expected);
+  await app.close();
+
+  const restarted = create();
+  const loaded = await restarted.settings();
+  assert.deepEqual(loaded.preferences, expected);
+  assert.equal(loaded.approvalMode, null, 'an offline app cannot confirm the backend approval mode');
+  assert.equal(restarted.adapter.state, 'stopped', 'loading preferences does not start Hermes');
+  await restarted.connect();
+  const session = await restarted.createSession({ title: 'preference defaults' });
+  assert.equal(session.cwd, await realpath(join(config.workspaceRoot, 'research')));
+  assert.equal((await restarted.history(session.id)).info.model, 'test-model-alt');
+  assert.equal((await restarted.settings()).approvalMode, 'manual');
+});
+
+test('a new installation starts sessions directly in its workspace root', async t => {
+  const { app, config } = await setup(t);
+  assert.equal(app.preferences.defaultWorkspace, '.');
+  await app.connect();
+  const session = await app.createSession({ title: 'root workspace default' });
+  assert.equal(session.cwd, await realpath(config.workspaceRoot));
+  assert.equal(app.store.get(session.id).cwd, session.cwd);
+});
+
+test('invalid settings are rejected atomically and cannot create paths outside the workspace', async t => {
+  const { app, directory, config } = await setup(t);
+  const initial = (await app.settings()).preferences;
+  const outside = join(directory, 'outside');
+  await mkdir(outside);
+  await symlink(outside, join(config.workspaceRoot, 'escape'));
+  const invalid = [
+    { preferences: { theme: 'neon' } },
+    { preferences: { density: 1 } },
+    { preferences: { theme: 'dark', unexpected: true } },
+    { preferences: { theme: 'dark' }, hermesHome: outside },
+    { preferences: { defaultWorkspace: '../must-not-exist' } },
+    { preferences: { defaultWorkspace: 'escape/must-not-exist' } },
+  ];
+  for (const input of invalid) {
+    await assert.rejects(async () => app.saveSettings(input));
+    assert.deepEqual((await app.settings()).preferences, initial, 'a rejected patch must not partly save');
+  }
+  await assert.rejects(access(join(directory, 'must-not-exist')), { code: 'ENOENT' });
+  await assert.rejects(access(join(outside, 'must-not-exist')), { code: 'ENOENT' });
+  assert.equal(app.adapter.state, 'stopped');
+});
+
+test('choosing a default model requires a confirmed available subscription model', async t => {
+  const { app } = await setup(t);
+  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } }), /连接/);
+  assert.equal((await app.settings()).preferences.defaultModel, '');
+  await app.connect();
+  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'not-an-available-model' } }), /模型/);
+  assert.equal((await app.settings()).preferences.defaultModel, '');
+  await app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } });
+  await app.adapter.request('config.set', { key: 'fixture_switch', value: { models: ['test-model'] } });
+  await app.connect();
+  await assert.rejects(async () => app.saveSettings({ preferences: { defaultModel: 'test-model-alt' } }), /模型/);
+  await assert.rejects(async () => app.createSession(), /模型/);
+  assert.equal(app.store.list().length, 0, 'a removed saved model must not silently fall back');
+  await app.saveSettings({ preferences: { defaultModel: '' } });
+  assert.equal((await app.settings()).preferences.defaultModel, '');
+});
+
+test('empty statistics have no success denominator or fabricated billing metrics', async t => {
+  const { app } = await setup(t);
+  const result = await app.statistics(7);
+  assert.equal(result.days, 7);
+  assert.equal(result.totals.runs, 0);
+  assert.equal(result.totals.successRate, null);
+  assert.equal(result.daily.length, 7);
+  assert.deepEqual(result.recentRuns, []);
+  for (const object of [result, result.totals]) {
+    assert(!Object.hasOwn(object, 'tokens'));
+    assert(!Object.hasOwn(object, 'cost'));
+  }
+  assert.equal(app.adapter.state, 'stopped');
+  assert.throws(() => app.statistics(14), /7|30/);
+});
+
+test('statistics include UTC boundary dates and use all terminal outcomes as the denominator', async t => {
+  const { app, config } = await setup(t);
+  const store = app.store;
+  const session = store.create({
+    title: 'known outcomes', cwd: config.workspaceRoot, storedSessionId: 'known-outcomes', runtimeSessionId: null,
+  });
+  const waiting = store.create({
+    title: 'older waiting session', cwd: config.workspaceRoot, storedSessionId: 'older-waiting', runtimeSessionId: null,
+  });
+  store.update(waiting.id, { status: 'waiting' });
+  store.create({ title: 'unused session', cwd: config.workspaceRoot, storedSessionId: 'unused', runtimeSessionId: null });
+  store.db.prepare('UPDATE sessions SET created_at=?').run('2025-01-01T00:00:00.000Z');
+  const outcomes = [
+    ['complete', '2026-10-24T00:00:00.000Z'],
+    ['complete', '2026-10-18T00:00:00.000Z'], // First included day of the 7-day window.
+    ['error', '2026-10-24T03:00:00.000Z'],
+    ['interrupted', '2026-10-23T15:00:00.000Z'],
+    ['unknown', '2026-10-19T12:00:00.000Z'],
+    ['failed', '2026-10-17T23:59:59.999Z'], // Outside 7 days, inside 30.
+    ['interrupted', '2026-09-25T00:00:00.000Z'], // First included day of the 30-day window.
+    ['complete', '2026-09-24T23:59:59.999Z'], // Outside 30 days.
+    ['complete', '2026-10-25T00:00:00.000Z'], // Tomorrow is outside both windows.
+    ['running', '2026-10-24T04:00:00.000Z'], // Included in runs, excluded from the success denominator.
+  ];
+  for (const [status, startedAt] of outcomes) {
+    const id = store.beginRun(session.id);
+    if (status !== 'running') store.finishRun(session.id, status);
+    store.db.prepare('UPDATE runs SET started_at=?, completed_at=? WHERE id=?')
+      .run(startedAt, status === 'running' ? null : startedAt, id);
+  }
+  const now = new Date('2026-10-24T10:30:00.000Z');
+  const weekly = store.statistics(7, now);
+  assert.deepEqual(weekly.totals, {
+    sessions: 3, active: 2, runs: 6, completed: 2, failed: 1, interrupted: 1, unknown: 1, successRate: 0.4,
+  });
+  assert.equal(weekly.daily[0].date, '2026-10-18');
+  assert.equal(weekly.daily.at(-1).date, '2026-10-24');
+  assert.equal(weekly.daily[0].completed, 1);
+  assert.equal(weekly.daily.at(-1).runs, 3);
+  assert.equal(weekly.daily.reduce((sum, day) => sum + day.runs, 0), 6);
+  assert(!weekly.recentRuns.some(run => run.startedAt.startsWith('2026-10-17') || run.startedAt.startsWith('2026-10-25')));
+
+  const monthly = store.statistics(30, now);
+  assert.equal(monthly.totals.sessions, 3);
+  assert.equal(monthly.totals.active, 2);
+  assert.equal(monthly.totals.runs, 8);
+  assert.equal(monthly.totals.completed, 2);
+  assert.equal(monthly.totals.failed, 2);
+  assert.equal(monthly.totals.interrupted, 2);
+  assert.equal(monthly.totals.unknown, 1);
+  assert.equal(monthly.totals.successRate, 2 / 7);
+  assert.equal(monthly.daily.length, 30);
+  assert.equal(monthly.daily[0].date, '2026-09-25');
+  assert.equal(monthly.daily.at(-1).date, '2026-10-24');
+  assert.equal(monthly.daily[0].interrupted, 1);
+});

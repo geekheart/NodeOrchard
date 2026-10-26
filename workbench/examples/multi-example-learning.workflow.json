@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-multi-example-learning",
+  "title": "多样例学习 · 英文短语规范化",
+  "mode": "learn",
+  "nodes": [
+    {
+      "id": "learn-input",
+      "type": "input",
+      "title": "输入内容",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "learn-skill",
+      "type": "skill",
+      "title": "待优化 Skill",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "skillRef": "humanizer",
+        "version": "sha256:887d5e3467a682da9b166e5293007f8bbbc299f8a6718ae00f26161b7d062b04",
+        "timeoutSeconds": 180,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "learn-output",
+      "type": "output",
+      "title": "输出结果",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": ""
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "learn-edge-1",
+      "sourceNode": "learn-input",
+      "sourcePort": "out",
+      "targetNode": "learn-skill",
+      "targetPort": "in"
+    },
+    {
+      "id": "learn-edge-2",
+      "sourceNode": "learn-skill",
+      "sourcePort": "out",
+      "targetNode": "learn-output",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 21.38888888888889,
+    "y": 29.56684027777777,
+    "zoom": 0.7152777777777778
+  }
+}

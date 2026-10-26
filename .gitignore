@@ -1,0 +1,54 @@
+# Local work environment and reference checkout. Anchor these rules so that
+# workbench/shared/workflow/ remains publishable product source.
+/workflow/
+/multica/
+/design/
+/workbench/workflow/
+/workbench/workspaces/
+/workbench/.local/
+
+# Board-specific workflows, inputs, profiles, training answers and learned output.
+/workbench/hdk/*.json
+/workbench/hdk/learning/*
+!/workbench/hdk/learning/*.schema.json
+!/workbench/hdk/learning/README.md
+/workbench/skills/labels.json
+
+# Local visual evidence and experiment history are not application source.
+/workbench/docs/refactor-evidence/
+/workbench/docs/*.png
+/workbench/docs/*.jpg
+/workbench/docs/*.jpeg
+/workbench/docs/*.webp
+/workbench/docs/*.json
+/workbench/docs/workflow-refactor-log.md
+/workbench/docs/verification.md
+/workbench/docs/pinout-learning-result.md
+/workbench/docs/pinout-learning-evaluation.md
+/workbench/docs/user-guide-reference-audit.md
+
+# Skill bundles, learning memory and runtime snapshots, including custom cwd.
+**/.workbench-skills/
+**/.workbench-learning-memory/
+**/.workbench-runs/
+**/workflow-snapshots/
+
+# Dependencies, build caches, private state and credentials.
+node_modules/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example
+!.env.template
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+coverage/
+.coverage
+.pytest_cache/

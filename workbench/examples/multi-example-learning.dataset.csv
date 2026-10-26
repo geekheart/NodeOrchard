@@ -1,0 +1,6 @@
+id,name,split,input,expected,input_format,expected_format
+"train-greeting","训练 · 问候","train","待处理文本：HELLO WORLD","hello world","text","text"
+"train-workbench","训练 · 工作台","train","待处理文本：AI WORKBENCH","ai workbench","text","text"
+"train-source","训练 · 开源","train","待处理文本：OPEN SOURCE","open source","text","text"
+"validation-morning","验证 · 早晨","validation","待处理文本：GOOD MORNING","good morning","text","text"
+"validation-editor","验证 · 编辑器","validation","待处理文本：NODE EDITOR","node editor","text","text"

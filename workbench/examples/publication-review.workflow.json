@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "id": "workflow-432474ae-3c0a-4c4e-b9ee-31697a862ba5",
+  "title": "文稿发布审核 · 演示",
+  "mode": "execute",
+  "settings": {
+    "maxConcurrency": 4,
+    "outputDirectory": ""
+  },
+  "nodes": [
+    {
+      "id": "node-9e6a0147-487d-4761-86f5-73f4d64ecb37",
+      "type": "input",
+      "title": "准备发布资料",
+      "x": 64,
+      "y": 80,
+      "config": {
+        "outputType": "object",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "node-f35bb7e6-1d8d-44af-9808-d943d358aeef",
+      "type": "tool",
+      "title": "整理发布摘要",
+      "x": 404,
+      "y": 80,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "return { title: input.title.trim(), summary: input.summary.trim(), tags: [...new Set(input.tags)], ready: true };",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "node-42e1a660-68f3-44c9-ab8b-c0565aa93a2a",
+      "type": "human",
+      "title": "确认文稿与标签",
+      "x": 744,
+      "y": 80,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "prompt": "请检查标题、摘要和标签。确认后再交付；也可以直接提出修改意见。所有内容均为文档演示数据。"
+      }
+    },
+    {
+      "id": "node-55cfcaa5-956a-44d0-b3b4-fa15fe7c4deb",
+      "type": "output",
+      "title": "保存发布结果",
+      "x": 1084,
+      "y": 80,
+      "config": {
+        "inputType": "any",
+        "fileName": "发布摘要.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-9bcb4b05-581b-45f5-9b74-27bb348823b7",
+      "sourceNode": "node-9e6a0147-487d-4761-86f5-73f4d64ecb37",
+      "sourcePort": "out",
+      "targetNode": "node-f35bb7e6-1d8d-44af-9808-d943d358aeef",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-1054a667-8a9b-4be9-9fb2-2ef598199636",
+      "sourceNode": "node-f35bb7e6-1d8d-44af-9808-d943d358aeef",
+      "sourcePort": "out",
+      "targetNode": "node-42e1a660-68f3-44c9-ab8b-c0565aa93a2a",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-b0fd3b19-3797-4f26-a2d3-dbaa37e1ce7a",
+      "sourceNode": "node-42e1a660-68f3-44c9-ab8b-c0565aa93a2a",
+      "sourcePort": "out",
+      "targetNode": "node-55cfcaa5-956a-44d0-b3b4-fa15fe7c4deb",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": -66.65116417293473,
+    "y": -23.648792552700655,
+    "zoom": 0.6976744402021052
+  }
+}

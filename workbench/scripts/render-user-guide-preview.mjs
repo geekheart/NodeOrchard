@@ -1,0 +1,15 @@
+import { readFile, writeFile } from 'node:fs/promises';
+import { resolve, dirname, basename, join } from 'node:path';
+import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+const runtime = join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/marked/lib/marked.esm.js');
+const { marked } = await import(pathToFileURL(runtime).href);
+const input=resolve(process.argv[2]), output=resolve(process.argv[3]);
+if(dirname(input)!==dirname(output))throw Error('Preview and Markdown must be in the same bundle');
+const source=await readFile(input,'utf8');
+const english=basename(input).endsWith('_en.md');
+const title=source.match(/^#\s+(.+)$/m)?.[1]||'User Guide';
+const esc=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const css=`:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#172b29;background:#edf2f0}*{box-sizing:border-box}body{margin:0}.guide{max-width:1080px;margin:28px auto;padding:52px 64px;background:white;box-shadow:0 12px 48px #193b2912;border:1px solid #dfe8e3;border-radius:16px;line-height:1.78;font-size:15px}h1,h2,h3{line-height:1.35;scroll-margin-top:24px}h1{font-size:30px;margin:58px 0 22px;border-bottom:2px solid #c9dfd4;padding-bottom:16px;color:#145a48}h1:first-child{margin-top:0;font-size:34px}h2{font-size:22px;margin-top:34px}h3{font-size:18px;margin-top:28px}a{color:#08785e;text-decoration-thickness:1px;text-underline-offset:3px}img{display:block;max-width:100%;max-height:860px;width:auto;height:auto;object-fit:contain;margin:28px auto}p{margin:16px 0}table{display:block;width:100%;overflow-x:auto;border-collapse:collapse;font-size:13px;line-height:1.6;margin:22px 0}th,td{padding:11px 14px;border:1px solid #dce6e0;text-align:left;vertical-align:top;min-width:60px}th{background:#eaf4ef;color:#1c5c4d}tr:nth-child(even){background:#f8faf9}pre{padding:20px;background:#142e27;color:#edf6f1;border-radius:10px;overflow-x:auto;font:13px/1.65 ui-monospace,monospace}code{font:0.9em ui-monospace,monospace;background:#eef4f1;padding:2px 5px;border-radius:4px}pre code{background:none;padding:0}li{margin:9px 0}blockquote{border-left:3px solid #2a8a6e;padding:4px 20px;margin-left:0;background:#f0f7f3}@media(max-width:700px){.guide{margin:0;border-radius:0;padding:28px 20px}h1:first-child{font-size:27px}}@media print{body{background:white}.guide{box-shadow:none;border:0;padding:0;margin:0}h1,h2,h3{break-after:avoid}img,tr,pre{break-inside:avoid}a{color:inherit}}`;
+await writeFile(output,`<!doctype html><html lang="${english?'en':'zh-CN'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"><title>${esc(title)}</title><style>${css}</style></head><body><main class="guide">${marked.parse(source,{gfm:true})}</main></body></html>\n`);
+console.log(JSON.stringify({path:output,source:input}));

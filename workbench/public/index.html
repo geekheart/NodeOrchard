@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="light dark" /><title>个人工作台</title><link rel="stylesheet" href="/style.css" /><link rel="stylesheet" href="/workflow-editor.css" /><link rel="stylesheet" href="/workflow-board.css" /><link rel="stylesheet" href="/workflow-runtime-ui.css" /><link rel="stylesheet" href="/workflow-feedback-ui.css" /><link rel="stylesheet" href="/workflow-learning-ui.css" /><link rel="stylesheet" href="/workflow-schedules-ui.css" /><link rel="stylesheet" href="/workflow-studio-ui.css" /><link rel="stylesheet" href="/workflow-conversation-ui.css" /><script type="module" src="/app.js"></script></head>
+<body>
+<div class="app-shell">
+  <aside id="app-navigation" class="sidebar" aria-label="主导航">
+    <div class="sidebar-header"><a class="brand" aria-label="工作流看板首页" href="#/board"><span class="brand-symbol" aria-hidden="true">w</span><span>个人工作台<span class="brand-caption">PERSONAL WORKSPACE</span></span></a><button id="sidebar-toggle" class="icon-button sidebar-toggle" type="button" aria-label="收起主边栏" title="收起主边栏" aria-controls="app-navigation" aria-expanded="true"><span data-icon="sidebar-collapse"></span></button></div>
+    <p class="nav-label">工作空间</p>
+    <nav class="primary-nav">
+      <a href="#/board" data-nav="board" aria-label="工作流看板"><span data-icon="home"></span><span>工作流看板</span><span id="nav-pending-count" class="nav-count" hidden></span></a>
+      <a href="#/workflows" data-nav="workflows" aria-label="节点编辑器" title="节点编辑器"><span data-icon="workflow"></span><span>节点编辑器</span></a>
+      <a href="#/projects" data-nav="projects" aria-label="项目"><span data-icon="folder"></span><span>项目</span><span id="nav-project-count" class="nav-count"></span></a>
+      <a href="#/skills" data-nav="skills" aria-label="Skills"><span data-icon="sparkles"></span><span>Skills</span></a>
+      <a href="#/statistics" data-nav="statistics" aria-label="统计"><span data-icon="chart"></span><span>统计</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <nav class="primary-nav"><a href="#/settings" data-nav="settings" aria-label="设置"><span data-icon="settings"></span><span>设置</span></a></nav>
+      <div class="connection-card"><div class="connection-line"><span id="connection-dot" class="dot"></span><span id="connection-label">读取连接状态</span></div><p id="connection-meta">本地运行 · Hermes</p><button id="sidebar-connect" class="connection-action" type="button">连接 Hermes<span data-icon="arrow-right"></span></button></div>
+      <div class="personal-label"><span class="avatar">我</span><div>个人空间<span>本地工作台</span></div><span class="local-tag">LOCAL</span></div>
+    </div>
+  </aside>
+  <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="收起主边栏" tabindex="-1" hidden></button>
+  <div id="main-shell" class="main-shell">
+    <header class="topbar"><div id="breadcrumb" class="breadcrumb"></div><div class="topbar-actions"><button id="details-button" class="button quiet" type="button" hidden><span data-icon="panel"></span>执行详情</button><button id="new-task-button" class="button primary" type="button"><span data-icon="plus"></span>新建任务</button></div></header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="main-body">
+      <main id="main-content" class="main-content">
+        <section id="page-workflows" class="workflow-page" data-page="workflows" hidden><div id="workflow-root"></div><div id="workflow-load-status" class="workflow-load-status" role="status" hidden></div></section>
+        <section id="page-board" class="workflow-board-page" data-page="board" hidden><div id="workflow-board-root"></div></section>
+        <section id="page-projects" class="page" data-page="projects" hidden><div class="page-heading"><div><p class="eyebrow">工作空间</p><h1 id="projects-title">项目</h1><p id="projects-description" class="page-description">按照任务实际使用的工作目录整理。</p></div><span id="project-page-count" class="subtle-label"></span></div><div id="projects-content"></div></section>
+        <section id="page-skills" class="page" data-page="skills" hidden><div class="page-heading"><div><p class="eyebrow">能力与流程</p><h1>Skills</h1><p class="page-description">查看 Hermes 中真实可用的技能与使用说明。</p></div><button id="refresh-skills" class="button quiet" type="button"><span data-icon="refresh"></span>刷新列表</button></div><div class="skills-toolbar"><label class="search-field"><span data-icon="search"></span><input id="skill-search" type="search" placeholder="搜索技能名称或说明" aria-label="搜索 Skills" /></label><span id="skills-count" class="subtle-label"></span></div><div id="skills-content" class="skills-layout"><div id="skill-list" class="skill-list"></div><article id="skill-detail" class="skill-detail"></article></div></section>
+        <section id="page-statistics" class="page" data-page="statistics" hidden><div class="page-heading"><div><p class="eyebrow">执行记录</p><h1>统计</h1><p class="page-description">查看工作台内的任务运行情况。</p></div><label class="period-picker"><span>时间范围</span><select id="statistics-period" aria-label="统计时间范围"><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></label></div><p class="scope-note">按 UTC 自然日统计应用内记录，含今天；这里不代表 ChatGPT 账号用量。</p><div id="statistics-content"></div></section>
+        <section id="page-settings" class="page settings-page" data-page="settings" hidden>
+          <div class="page-heading"><div><p class="eyebrow">个人偏好</p><h1>设置</h1><p class="page-description">管理工作台外观、任务默认值与后端连接。</p></div></div>
+          <section class="settings-section"><div class="settings-section-heading"><h2>工作台偏好</h2><p>只保存到本工作台，不修改 Hermes 全局配置。</p></div><form id="preferences-form" class="settings-form">
+            <label class="setting-row"><span>外观<span>选择浅色、暗色或跟随系统。</span></span><select id="setting-theme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">暗色</option></select></label>
+            <label class="setting-row"><span>界面密度<span>调整任务列表与控件的间距。</span></span><select id="setting-density"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label>
+            <label class="setting-row"><span>新任务默认模型<span>从后端返回的订阅模型中选择。</span></span><select id="setting-model"><option value="">使用 Hermes 当前模型</option></select></label>
+            <label class="setting-row"><span>默认工作目录<span>相对于工作区根目录的新任务目录；“.” 使用根目录。</span></span><input id="setting-workspace" autocomplete="off" placeholder="." /></label>
+            <div class="settings-save"><span id="preferences-status" role="status" class="helper"></span><button id="save-preferences" type="submit" class="button primary">保存偏好</button></div>
+          </form></section>
+          <section class="settings-section"><div class="settings-section-heading"><h2>Hermes 连接</h2><p>继续使用由 Hermes 管理的认证信息。</p></div><div id="runtime-facts" class="fact-list"></div><p id="backend-error" class="error-text" hidden></p><div class="settings-actions"><button id="connect-button" class="button" type="button"><span data-icon="plug"></span>连接后端</button><button id="refresh-button" class="button quiet" type="button"><span data-icon="refresh"></span>刷新状态</button></div><details class="path-details"><summary>本地运行路径</summary><div id="runtime-paths" class="fact-list"></div></details></section>
+          <section class="settings-section"><div class="settings-section-heading"><h2>诊断</h2><p id="transport-status">读取事件连接状态…</p></div><details class="diagnostics"><summary>诊断事件摘要 <span id="settings-event-count" class="count">0 / 200</span></summary><div class="event-toolbar"><span class="helper">最多 200 条、共 2 MiB 诊断摘要；展开单条最多 32 KiB，凭据已脱敏，完整运行记录不受影响。</span><button id="clear-events-button" class="button quiet small" type="button">清空显示</button></div><div id="settings-event-list" class="event-list"></div></details></section>
+        </section>
+        <section id="page-task" class="task-page" data-page="task" hidden>
+          <div class="task-header"><div class="task-identity"><span id="task-status" class="status-badge"></span><h1 id="task-title">加载任务…</h1><p id="task-project" class="task-project"></p></div><button id="resume-button" class="button quiet small" type="button">恢复会话</button></div>
+          <div id="task-tabs" class="task-tabs" role="tablist" aria-label="任务详情"><a href="#" data-tab="workspace" role="tab">工作区</a><a href="#" data-tab="runs" role="tab">执行记录</a><a href="#" data-tab="info" role="tab">任务信息</a></div>
+          <div id="task-missing" class="empty-state" hidden></div>
+          <div id="task-workspace" class="task-workspace" role="tabpanel"><div id="messages" class="messages" aria-label="任务对话" tabindex="0"></div><div id="task-request-list" class="task-request-list"></div><div class="composer-area"><div class="turn-status" role="status" aria-live="polite"><span id="turn-indicator" class="dot"></span><span id="turn-status">等待后端连接</span></div><form id="message-form" class="composer"><label class="visually-hidden" for="message-input">消息</label><textarea id="message-input" rows="3" placeholder="描述要继续完成的工作…" disabled></textarea><div class="composer-footer"><span class="helper">Ctrl / ⌘ + Enter 发送</span><div class="button-group"><button id="interrupt-button" class="button quiet small" type="button" disabled><span data-icon="stop"></span>停止</button><button id="send-button" class="button primary small" type="submit" disabled><span data-icon="arrow-up"></span>发送</button></div></div></form></div></div>
+          <div id="task-runs" class="task-subpage" role="tabpanel" hidden></div><div id="task-info" class="task-subpage" role="tabpanel" hidden></div>
+        </section>
+      </main>
+      <aside id="inspector" class="inspector" aria-label="执行详情" hidden><div class="inspector-heading"><h2>任务详情</h2><button id="close-inspector" class="icon-button" type="button" aria-label="关闭详情"><span data-icon="close"></span></button></div><div id="inspector-tabs" class="inspector-tabs"><button type="button" data-inspector="execution" class="selected">执行详情</button><button type="button" data-inspector="related">关联信息</button></div><div id="inspector-content" class="inspector-content"></div></aside>
+    </div>
+  </div>
+</div>
+<dialog id="new-task-dialog" class="new-task-dialog"><div class="dialog-heading"><div><p class="eyebrow">开始一项工作</p><h2>新建任务</h2></div><button id="close-new-task" class="icon-button" type="button" aria-label="关闭新建任务"><span data-icon="close"></span></button></div><form id="session-form"><label for="session-title">任务名称</label><input id="session-title" autocomplete="off" placeholder="这次想完成什么？" maxlength="120" required /><label for="session-cwd">工作目录</label><input id="session-cwd" autocomplete="off" placeholder="使用默认工作目录" /><p class="helper">目录必须位于工作台已配置的工作区内。</p><div class="dialog-model"><span data-icon="model"></span><span>默认模型</span><span id="new-task-model">使用 Hermes 当前模型</span><a id="new-task-settings" href="#/settings">设置</a></div><p id="new-task-connection" class="helper"></p><button id="new-task-connect" class="button quiet small" type="button" hidden>连接 Hermes</button><div class="dialog-actions"><button id="cancel-new-task" class="button quiet" type="button">取消</button><button id="create-session-button" class="button primary" type="submit" disabled>创建任务</button></div></form></dialog>
+</body>
+</html>

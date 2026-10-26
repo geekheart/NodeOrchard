@@ -1,0 +1,36 @@
+{
+  "trainingCases": [
+    {
+      "id": "train-greeting",
+      "name": "训练 · 问候",
+      "input": "待处理文本：HELLO WORLD",
+      "expected": "hello world"
+    },
+    {
+      "id": "train-workbench",
+      "name": "训练 · 工作台",
+      "input": "待处理文本：AI WORKBENCH",
+      "expected": "ai workbench"
+    },
+    {
+      "id": "train-source",
+      "name": "训练 · 开源",
+      "input": "待处理文本：OPEN SOURCE",
+      "expected": "open source"
+    }
+  ],
+  "validationCases": [
+    {
+      "id": "validation-morning",
+      "name": "验证 · 早晨",
+      "input": "待处理文本：GOOD MORNING",
+      "expected": "good morning"
+    },
+    {
+      "id": "validation-editor",
+      "name": "验证 · 编辑器",
+      "input": "待处理文本：NODE EDITOR",
+      "expected": "node editor"
+    }
+  ]
+}

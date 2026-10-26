@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-6a152b33-8c8e-48c4-bcdc-e9d9b2b57235",
+  "title": "混合能力 · 会议记录到待办",
+  "mode": "execute",
+  "nodes": [
+    {
+      "id": "mixed-input",
+      "type": "input",
+      "title": "输入内容",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "mixed-trim",
+      "type": "tool",
+      "title": "清理首尾空白",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "executionMode": "tool",
+        "toolName": "text.trim",
+        "language": "javascript",
+        "code": "",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-humanizer",
+      "type": "skill",
+      "title": "润色文本",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "skillRef": "humanizer",
+        "version": "sha256:887d5e3467a682da9b166e5293007f8bbbc299f8a6718ae00f26161b7d062b04",
+        "timeoutSeconds": 180,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-js",
+      "type": "tool",
+      "title": "JavaScript · 统计字符",
+      "x": 1000,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "object",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "const charCount = Array.from(input).length;\nconsole.log('已接收 Skill 输出，字符数', charCount);\nreturn { text: input, charCount, verified: true };",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-json",
+      "type": "tool",
+      "title": "转换为 JSON 文本",
+      "x": 1320,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "outputType": "text",
+        "executionMode": "tool",
+        "toolName": "json.stringify",
+        "language": "javascript",
+        "code": "",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-python",
+      "type": "tool",
+      "title": "Python · 还原文本",
+      "x": 1640,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "python",
+        "code": "import json\ndata = json.loads(input)\nprint(\"JSON 已还原为文本\")\nreturn data[\"text\"]",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-actions",
+      "type": "skill",
+      "title": "提取待办",
+      "x": 1960,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "skillRef": "meeting-action-items",
+        "version": "sha256:1902f782551da96ee1f9b34d6f13af627f06150a498d874b0cc2a75d06d35aa8",
+        "timeoutSeconds": 180,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "mixed-output",
+      "type": "output",
+      "title": "输出结果",
+      "x": 2280,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": ""
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-0",
+      "sourceNode": "mixed-input",
+      "sourcePort": "out",
+      "targetNode": "mixed-trim",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-1",
+      "sourceNode": "mixed-trim",
+      "sourcePort": "out",
+      "targetNode": "mixed-humanizer",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-2",
+      "sourceNode": "mixed-humanizer",
+      "sourcePort": "out",
+      "targetNode": "mixed-js",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-3",
+      "sourceNode": "mixed-js",
+      "sourcePort": "out",
+      "targetNode": "mixed-json",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-4",
+      "sourceNode": "mixed-json",
+      "sourcePort": "out",
+      "targetNode": "mixed-python",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-5",
+      "sourceNode": "mixed-python",
+      "sourcePort": "out",
+      "targetNode": "mixed-actions",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-6",
+      "sourceNode": "mixed-actions",
+      "sourcePort": "out",
+      "targetNode": "mixed-output",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 12,
+    "y": 18,
+    "zoom": 0.5
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-e56a75d8-371a-497d-aa20-f0aca2790d24",
+  "title": "本地数据 · 工具与代码",
+  "mode": "execute",
+  "nodes": [
+    {
+      "id": "local-input",
+      "type": "input",
+      "title": "输入 JSON 文本",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "local-trim",
+      "type": "tool",
+      "title": "清理首尾空白",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "executionMode": "tool",
+        "toolName": "text.trim",
+        "language": "javascript",
+        "code": "",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "local-parse",
+      "type": "tool",
+      "title": "解析 JSON",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "any",
+        "executionMode": "tool",
+        "toolName": "json.parse",
+        "language": "javascript",
+        "code": "",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "local-js",
+      "type": "tool",
+      "title": "JavaScript · 统计条目",
+      "x": 1000,
+      "y": 100,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "console.log('收到条目', input.items.length);\nreturn { ...input, itemCount: input.items.length };",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "local-python",
+      "type": "tool",
+      "title": "Python · 完成校验",
+      "x": 1320,
+      "y": 100,
+      "config": {
+        "inputType": "object",
+        "outputType": "object",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "python",
+        "code": "print(\"保留 false、0 和空数组\")\nreturn {**input, \"checked\": True}",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "local-output",
+      "type": "output",
+      "title": "输出结果",
+      "x": 1640,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": ""
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-0",
+      "sourceNode": "local-input",
+      "sourcePort": "out",
+      "targetNode": "local-trim",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-1",
+      "sourceNode": "local-trim",
+      "sourcePort": "out",
+      "targetNode": "local-parse",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-2",
+      "sourceNode": "local-parse",
+      "sourcePort": "out",
+      "targetNode": "local-js",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-3",
+      "sourceNode": "local-js",
+      "sourcePort": "out",
+      "targetNode": "local-python",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-4",
+      "sourceNode": "local-python",
+      "sourcePort": "out",
+      "targetNode": "local-output",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 12,
+    "y": 18,
+    "zoom": 0.5
+  }
+}

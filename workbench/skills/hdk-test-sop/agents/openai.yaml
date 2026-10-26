@@ -1,0 +1,3 @@
+interface:
+  display_name: "测试 SOP 编写"
+  short_description: "由当前硬件和真实固件接口编写可操作、引用完整的测试说明。"

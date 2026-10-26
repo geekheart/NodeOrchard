@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-f4c60d98-d34b-43b7-80e4-4d1738990f40",
+  "title": "我的 Skill 工作流",
+  "mode": "execute",
+  "nodes": [
+    {
+      "id": "node-c580b4f7-c2b0-4129-bacf-cdd9b0ee2ed6",
+      "type": "input",
+      "title": "输入内容",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai"
+      }
+    },
+    {
+      "id": "node-6c327399-0acc-4060-92ff-3a94f192b92b",
+      "type": "skill",
+      "title": "润色文本",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "skillRef": "humanizer",
+        "version": "sha256:887d5e3467a682da9b166e5293007f8bbbc299f8a6718ae00f26161b7d062b04",
+        "timeoutSeconds": 180,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "node-133d1a3a-aa21-4269-a718-4785b06f4a75",
+      "type": "output",
+      "title": "输出结果",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": ""
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-12fbd7ee-7adf-4f04-92ad-9eb35a0f9339",
+      "sourceNode": "node-c580b4f7-c2b0-4129-bacf-cdd9b0ee2ed6",
+      "sourcePort": "out",
+      "targetNode": "node-6c327399-0acc-4060-92ff-3a94f192b92b",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-cceee41f-a621-4d25-9bc0-bc87f3663df6",
+      "sourceNode": "node-6c327399-0acc-4060-92ff-3a94f192b92b",
+      "sourcePort": "out",
+      "targetNode": "node-133d1a3a-aa21-4269-a718-4785b06f4a75",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 21.38888888888889,
+    "y": 29.56684027777777,
+    "zoom": 0.7152777777777778
+  }
+}
