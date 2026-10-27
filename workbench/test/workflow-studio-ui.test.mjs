@@ -479,7 +479,7 @@ test('historical inspector shows that attempt IO, logs, original-size images and
   studio.editor = { properties: parent }; studio.runtime = { currentRun: () => run, storeRun() {}, render() {} }; studio.api = async (path, options) => { submitted = { path, body: options.body }; return { run }; };
   studio.renderInspectorData('gate'); const picker = parent.children.at(-1).children.find(item => item.className === 'wf-studio-version-picker').children[1]; picker.value = 'history-0'; picker.listeners.change();
   const section = parent.children.at(-1), descendants = item => [item, ...(item.children || []).flatMap(descendants)], all = descendants(section), messages = all.map(item => item.textContent || '').join('\n');
-  assert.match(messages, /历史版本，仅供查看/); for (const text of ['old input', 'old output', 'old stdout', 'old stderr']) assert.match(messages, new RegExp(text));
+  assert.match(messages, /历史版本 · 只读/); for (const text of ['old input', 'old output', 'old stdout', 'old stderr']) assert.match(messages, new RegExp(text));
   assert.ok(all.some(item => item.tag === 'a' && item.href === '/old-png-original-size')); assert.ok(all.some(item => item.tag === 'a' && item.href === '/old-png-download' && item.textContent === '下载'));
   const latestReview = section.children.at(-1); assert.equal(latestReview.className, 'wf-studio-review is-compact'); assert.ok(descendants(latestReview).some(item => item.tag === 'img' && item.src === '/generated-png')); assert.equal(descendants(latestReview).some(item => item.tag === 'img' && item.src === '/old-png-original-size'), false);
   await latestReview.children.at(-1).children[0].listeners.click(); assert.deepEqual(submitted, { path: '/api/workflow-runs/run/review', body: { nodeId: 'gate', action: 'approve', feedback: '' } }); assert.equal(run.nodes.gate.artifacts[1], png); assert.equal(run.nodes.gate.attempt, 3);
@@ -505,7 +505,7 @@ test('fixed raw inputs ignore empty browser drafts, preserve explicit overrides 
   const create = (id, value) => ({ ...createDocument({ schemaVersion: 2 }), id, nodes: [createNode('input', {}, { id: 'requirements', config: { outputType: 'text', defaultValue: value } })] });
   const first = create('fixed-first', '固定任务 A'), second = create('fixed-second', '固定任务 B'); saved.set('workbench.workflow-raw-input.v2:' + first.id, '  ');
   studio.editor.doc = first; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, '固定任务 A'); assert.equal(studio.runtime.input.value, '固定任务 A');
-  assert.ok(descendants(studio.inputs).some(item => /已配置固定任务说明/.test(item.textContent || '')));
+  assert.ok(descendants(studio.inputs).some(item => /已配置默认输入/.test(item.textContent || '')));
   studio.rawPreparationInput.value = '本次覆盖'; studio.rawPreparationInput.listeners.input(); studio.renderInputs(); assert.equal(studio.rawPreparationInput.value, '本次覆盖');
   first.nodes[0].config.defaultValue = '修改后的固定任务 A'; studio.renderInputs(); assert.equal(studio.rawPreparationInput.value, '本次覆盖');
   studio.editor.doc = second; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, '固定任务 B');

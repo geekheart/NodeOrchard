@@ -36,7 +36,7 @@ test('directory activation reads existing conversations and prefers a recent top
   assert.deepEqual(calls, [['/api/conversation-hub']]); assert.deepEqual(f.opened, ['supervisor-new']); assert.deepEqual(f.counts, [4]);
   const hrefs = flatten(f.root).map(item => item.href).filter(Boolean);
   assert(hrefs.includes('#/workflows/workflow-a')); assert(hrefs.includes('#/workflows/workflow-b'));
-  assert.match(contents(f.root), /原错误证据保留/); assert.match(contents(f.root), /旧全局记录 · 完整保留/);
+  assert.match(contents(f.root), /原错误证据保留/); assert.match(contents(f.root), /旧全局记录/);
   assert.equal(f.ui.data.workflows.length, 2);
 });
 

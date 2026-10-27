@@ -194,13 +194,12 @@ export class WorkflowStudioUI {
     return this.view === 'run' ? this.runPanelSettings ||= { libraryClosed: true, propertiesClosed: true } : this.editor.settings;
   }
   upgradeDocument() {
-    try { const doc = validateDocument({ ...this.editor.doc, schemaVersion: 2, settings: { maxConcurrency: 4, outputDirectory: '' } }); this.editor.commit(doc, '升级为并行工作流'); this.editor.toast('已升级。旧节点和连线已保留，可添加具名端口与输入字段。'); }
+    try { const doc = validateDocument({ ...this.editor.doc, schemaVersion: 2, settings: { maxConcurrency: 4, outputDirectory: '' } }); this.editor.commit(doc, '升级为并行工作流'); this.editor.toast('已升级。'); }
     catch (error) { this.editor.toast(error.message, true); }
   }
   renderInputs() {
     const doc = this.editor.doc; this.inputs.replaceChildren(); const rows = inputEntries(doc); this.inputSignature = this.inputDefinitionSignature(doc);
-    this.inputs.append(element('h3', '', '运行前准备'), element('p', 'wf-field-help', '选择文件与参数，检查后提交。已启动运行使用固定输入；此处编辑用于下一次运行。定时任务可采用相同资料。'));
-    if (!isV2(doc)) this.inputs.append(element('p', 'wf-field-help', '旧流程继续使用运行面板的原始输入。升级后可配置文件选择表单。'));
+    this.inputs.append(element('h3', '', '运行前准备'));
     if (isV2(doc) && !rows.length) {
       const entry = doc.nodes.find(node => node.type === 'input'), type = entry?.config.outputType || 'any';
       const fixed = rawDefault(doc);
@@ -208,9 +207,8 @@ export class WorkflowStudioUI {
       else if (this.rawInputHasDraft === false) { this.rawInputValue = fixed; if (this.runtime?.input) this.runtime.input.value = fixed; }
       const row = element('div', 'wf-studio-input-row'), label = element('label', '', fixed ? '本次覆盖输入（可选）' : entry?.config.fieldName || '运行输入'), control = element('textarea', 'wf-studio-raw-input'); control.id = 'wf-studio-raw-input'; label.htmlFor = control.id; control.setAttribute('aria-label', '本次运行输入'); control.rows = 8; control.spellcheck = false; control.value = this.runtime?.input?.value ?? this.rawInputValue ?? ''; control.placeholder = fixed ? '留空使用固定任务说明 / 默认输入' : type === 'text' ? '填写本次要处理的文本' : ['object', 'array', 'number', 'boolean'].includes(type) ? '填写符合入口类型的 JSON' : '填写文本、JSON 或文件路径'; control.disabled = Boolean(this.editor.nodeLibrary?.nested); this.rawPreparationInput = control;
       control.addEventListener('input', () => { this.rawInputValue = control.value; this.rawInputHasDraft = Boolean(control.value.trim()); this.invalidatePreflight(); if (this.runtime?.input) { this.runtime.input.value = control.value; this.runtime.input.dispatchEvent?.(new Event('input', { bubbles: true })); } try { localStorage.setItem(RAW_INPUT_STORAGE_PREFIX + doc.id, control.value); } catch { /* Keep the value in memory when browser storage is unavailable. */ } });
-      if (fixed) this.inputs.append(element('p', 'wf-fixed-input-notice', '已配置固定任务说明 / 默认输入，可直接运行；需要本次调整时再编辑下方内容。'));
+      if (fixed) this.inputs.append(element('p', 'wf-fixed-input-notice', '已配置默认输入'));
       const formats = { text: '文本', object: 'JSON 对象', array: 'JSON 数组', number: 'JSON 数字', boolean: 'true / false', any: '文本或 JSON' }; row.append(label, control, element('small', 'wf-field-help', `输入格式：${formats[type] || type}，跟随输入节点类型${entry?.config.required ? ' · 必填' : ''}。`)); this.inputs.append(row);
-      this.inputs.append(element('p', 'wf-field-help', '也可在输入节点属性中添加文件、图片或参数字段，生成资料准备表单。'));
     } else this.rawPreparationInput = null;
     const preparedValues = rows.length ? valuesFromInput(doc, structuredInput(doc, this.values || {})) : {};
     for (const { node, field } of rows) {
@@ -334,7 +332,7 @@ export class WorkflowStudioUI {
         content.append(previews, element('small', 'wf-studio-node-run-source', `所选运行 ${run.id.slice(0, 8)} · ${STUDIO_STATUS[state?.status] || state?.status || '已记录'}${pictures.length > 4 && node.type === 'output' ? ` · 预览 4 / ${pictures.length} 张` : ''}`));
       } else if (node.type === 'output' && nodeShowsCanvasPreview(node)) {
         const placeholder = element('div', 'wf-studio-node-preview-empty'); placeholder.setAttribute('aria-label', `${node.title} · 图片预览占位`);
-        placeholder.append(element('strong', '', '图片预览'), element('span', '', !run ? '尚未运行，运行后在此预览产物' : !state || state.status !== 'complete' ? '等待本节点产物，可先查看运行进度' : '本次输出暂无可预览图片，请查看产物文件'));
+        placeholder.append(element('strong', '', '图片预览'), element('span', '', !run ? '尚未运行' : !state || state.status !== 'complete' ? '等待产物' : '暂无可预览图片'));
         content.append(placeholder);
       }
       if (node.type === 'output' || pictures.length) {
@@ -438,7 +436,7 @@ export class WorkflowStudioUI {
     select.id = `wf-inspect-version-${id}`; label.htmlFor = select.id; select.setAttribute('aria-label', '查看节点版本');
     for (const version of versions) { const option = element('option', '', version.label); option.value = version.key; select.append(option); }
     select.value = selected.key; select.addEventListener('change', () => { this.inspectionVersions.set(key, select.value); this.renderInspectorData(id); }); picker.append(label, select); section.append(picker);
-    section.append(element('p', selected.historical ? 'wf-studio-history-notice' : 'wf-field-help', selected.historical ? '历史版本，仅供查看。下方展示这一版本的输入、输出、日志和产物；审核卡始终针对当前最新版本。' : '以下来自所选运行的固定快照；编辑用于下一次运行。'));
+    section.append(element('p', selected.historical ? 'wf-studio-history-notice' : 'wf-field-help', selected.historical ? '历史版本 · 只读' : '运行快照'));
     if (!selected.historical && canRerunNode(run, id)) {
       this.rerunDrafts ||= new Map(); const controls = element('div', 'wf-studio-rerun');
       const feedback = element('textarea'); feedback.value = this.rerunDrafts.get(key) || ''; feedback.maxLength = 8000; feedback.placeholder = '可选：说明这次重跑需要满足的要求'; feedback.setAttribute('aria-label', '本次重跑补充要求'); feedback.addEventListener('input', () => this.rerunDrafts.set(key, feedback.value));
@@ -461,7 +459,7 @@ export class WorkflowStudioUI {
   subflowHistory(parent, nodeId, state, depth = 0) {
     const section = element('section', 'wf-studio-subflow-history'), ids = subflowRunIds(state), definition = parent.document.nodes.find(node => node.id === nodeId);
     section.append(element('h4', '', '内部执行记录'));
-    if (!ids.length) { section.append(element('p', 'wf-field-help', '此历史记录尚未保留内部运行索引；查看操作不会自动重跑。')); return section; }
+    if (!ids.length) { section.append(element('p', 'wf-field-help', '没有内部运行记录')); return section; }
     if (depth >= 8) { section.append(element('p', 'wf-field-help', '已达到内部记录展示层级上限。')); return section; }
     this.subflowInspectionRuns ||= new Map();
     ids.forEach((childId, index) => {
@@ -482,7 +480,7 @@ export class WorkflowStudioUI {
   }
   childRunTree(run, depth = 1) {
     const tree = element('section', 'wf-studio-child-run'); tree.setAttribute('aria-label', '子流程只读执行记录');
-    tree.append(element('h4', '', `${run.document?.title || '子流程'} · ${STUDIO_STATUS[run.status] || run.status}`), element('p', 'wf-field-help', '固定执行记录，仅供查看。不会改变当前画布或重新执行。'));
+    tree.append(element('h4', '', `${run.document?.title || '子流程'} · ${STUDIO_STATUS[run.status] || run.status}`));
     const progress = runProgress(run); tree.append(element('p', 'wf-field-help', `${progress.completed} / ${progress.total} 个内部节点完成`));
     for (const [label, value] of [['子流程输入', run.input], ['子流程输出', run.output]]) { const details = element('details', 'wf-studio-child-values'); details.append(element('summary', '', label), element('pre', '', display(value))); tree.append(details); }
     for (const [id, state] of orderedNodeStates(run)) {
@@ -619,7 +617,7 @@ export class WorkflowStudioUI {
     if (focused?.matches?.('.wf-studio-review textarea,.wf-studio-rerun textarea') && this.editor.root.contains(focused)) { if (!this.runtimeRenderDeferred) { this.runtimeRenderDeferred = true; focused.addEventListener('blur', event => { this.runtimeRenderDeferred = false; if (!event.relatedTarget?.closest('.wf-studio-review,.wf-studio-rerun')) this.renderRuntime(); }, { once: true }); } return; }
     const run = this.runtime.currentRun(); this.runSurface.replaceChildren();
     const heading = element('div', 'wf-studio-run-heading'); heading.append(element('h2', '', run ? STUDIO_STATUS[run.status] || run.status : '准备运行')); const actions = element('div', 'wf-studio-inline-actions'); actions.append(button('查看节点画布', () => this.setView('edit'))); if (run && active(run.status)) actions.append(button(run.status === 'queued' ? '取消排队' : '停止本次运行', () => void this.runtime.interrupt())); if (run?.status === 'complete') actions.append(button('在对话中反馈', () => this.editor.conversation ? this.editor.conversation.focusContext({ runId: run.id }, { intent: 'auto' }) : this.runtime.openFeedback())); heading.append(actions); this.runSurface.append(heading);
-    if (!run) this.runSurface.append(element('p', 'wf-field-help', '在左侧选择输入资料，检查通过后点击运行。'));
+    if (!run) this.runSurface.append(element('p', 'wf-field-help', '尚未运行'));
     else { this.runSurface.append(this.renderRunLocations(run)); const states = orderedNodeStates(run), { completed, total, running, skippedLearning } = runProgress(run); this.runSurface.append(element('p', 'wf-field-help', `${completed} / ${total} ${run.document?.mode === 'learn' ? '节点' : '业务节点'}完成 · ${running} 项同时运行${skippedLearning ? ` · ${skippedLearning} 个学习节点已跳过` : ''}${run.queuePosition ? ` · 队列位置 ${run.queuePosition}` : ''}`)); const progress = element('progress'); progress.max = Math.max(1, total); progress.value = completed; this.runSurface.append(progress);
       const steps = element('div', 'wf-studio-run-steps'); for (const [id, state] of states) { const item = button(`${run.document.nodes.find(node => node.id === id)?.title || id} · ${STUDIO_STATUS[state.status] || state.status}`, () => { this.editor.selectNode(id); this.renderInspectorData(id); }, 'wf-studio-run-step'); item.dataset.status = state.status; steps.append(item); } this.runSurface.append(steps);
       const deliveries = this.renderDeliveries(run); if (deliveries) this.runSurface.append(deliveries);

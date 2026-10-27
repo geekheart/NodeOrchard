@@ -100,7 +100,7 @@ export function workflowRunAttemptAdvanced(previous, next) {
   });
 }
 export function runtimeResultPreview(run) {
-  if (!run) return { kind: 'empty', label: '最终结果', text: '运行完成后在这里查看整条流程的最终结果。', hasValue: false };
+  if (!run) return { kind: 'empty', label: '最终结果', text: '暂无结果', hasValue: false };
   if (run.status === 'complete') {
     const hasValue = own(run, 'output') || typeof run.outputText === 'string';
     return { kind: 'complete', label: '最终结果', hasValue, text: typeof run.outputText === 'string' && run.outputText !== '' ? run.outputText : own(run, 'output') ? display(run.output) : run.outputText || '' };
@@ -108,7 +108,7 @@ export function runtimeResultPreview(run) {
   const current = run.nodes?.[run.currentNodeId], partial = current && ['pending', 'skipped'].includes(current.status) ? '' : typeof current?.partialText === 'string' ? current.partialText : run.partialText;
   const title = run.document?.nodes?.find(item => item.id === run.currentNodeId)?.title;
   if (typeof partial === 'string' && partial !== '') return { kind: 'partial', label: title ? `当前步骤预览 · ${title}（未完成）` : '当前步骤预览（未完成）', hasValue: false, text: partial };
-  return { kind: 'pending', label: '最终结果', hasValue: false, text: ACTIVE.has(run.status) ? '正在等待整条流程完成；可在下方查看各节点。' : '整条流程未确认成功；已完成节点的数据仍可在下方查看。' };
+  return { kind: 'pending', label: '最终结果', hasValue: false, text: ACTIVE.has(run.status) ? '等待流程完成' : '流程未确认成功' };
 }
 export function workflowNeedsHermes(document) { return Boolean(document?.nodes?.some(item => item.type === 'skill')); }
 export function runtimeCapabilityMetadata(detail) {
@@ -182,12 +182,11 @@ export class WorkflowRuntimeUI {
     this.runInfo = node('p', 'wf-runtime-run-info');
     this.error = node('p', 'wf-runtime-error'); this.error.setAttribute('role', 'status');
     this.approval = node('div', 'wf-runtime-approval');
-    this.output = node('pre', 'wf-runtime-output-text', '运行完成后在这里查看结果。'); this.output.tabIndex = 0; this.output.setAttribute('aria-label', '所选运行的结果');
+    this.output = node('pre', 'wf-runtime-output-text', '暂无结果'); this.output.tabIndex = 0; this.output.setAttribute('aria-label', '所选运行的结果');
     const inputSnapshot = node('details', 'wf-runtime-input-snapshot'); inputSnapshot.append(node('summary', '', '查看本次实际输入'));
     this.inputSnapshot = node('pre'); inputSnapshot.append(this.inputSnapshot); this.inputSnapshotDetails = inputSnapshot;
-    this.snapshotNote = node('p', 'wf-runtime-hint', '每次运行使用开始时的流程快照；后续编辑用于下一次运行。');
-    outputSection.append(outputHeading, this.runInfo, this.error, this.approval, this.output, inputSnapshot, this.snapshotNote);
-    this.draftNotice = node('p', 'wf-runtime-draft-notice', '草稿已变化。下方展示本次运行快照，旧运行角标已从画布隐藏；草稿编辑用于下一次运行。'); this.draftNotice.hidden = true;
+    outputSection.append(outputHeading, this.runInfo, this.error, this.approval, this.output, inputSnapshot);
+    this.draftNotice = node('p', 'wf-runtime-draft-notice', '草稿与当前运行快照不同。'); this.draftNotice.hidden = true;
     this.nodeInspection = node('details', 'wf-runtime-node-inspection'); this.nodeInspection.open = true; this.nodeInspection.append(node('summary', '', '节点执行轨迹与数据'));
     const nodeLayout = node('div', 'wf-runtime-node-layout'); this.trace = node('ol', 'wf-runtime-trace'); this.trace.setAttribute('aria-label', '本次运行的有序节点');
     const detail = node('section', 'wf-runtime-node-detail'); detail.setAttribute('aria-label', '所选节点运行详情');
@@ -270,7 +269,7 @@ export class WorkflowRuntimeUI {
     const label = learning ? '请打开学习面板' : this.starting ? '正在提交…' : this.loading ? '正在同步运行记录…' : this.submissionUncertain ? '请先刷新运行记录' : activeLearning ? '学习进行中 · 切换学习查看' : this.activeRun() ? v2 ? '加入运行队列' : stepLabel(this.activeRun()) : pendingSkill ? '正在读取 Skill…' : '运行当前流程';
     for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) {
       control.textContent = label; control.disabled = learning || busy; control.setAttribute('aria-label', label);
-      control.title = learning ? '请在学习面板配置样例、答案和可训练 Skill。' : this.getBackend()?.state === 'ready' || !workflowNeedsHermes(this.currentDocument()) ? '运行 Input → Skill / 工具 / 代码 → Output' : '打开运行面板并连接 Hermes';
+      control.title = learning ? '学习模式' : this.getBackend()?.state === 'ready' || !workflowNeedsHermes(this.currentDocument()) ? '运行当前流程' : '未连接 Hermes';
     }
     const entry = this.currentDocument()?.nodes?.find(item => item.type === 'input');
     this.inputLabel.textContent = text(entry?.config?.fieldName ? `下次运行输入 · ${entry.config.fieldName}` : '下次运行输入');
@@ -292,7 +291,7 @@ export class WorkflowRuntimeUI {
 
   async connectBackend() {
     if (this.connecting) return; this.connecting = true; this.refreshBackend(); this.showNotice('正在连接 Hermes…');
-    try { await this.connect(); this.refreshBackend(); this.showNotice('Hermes 已连接，可以选择 Skill 并运行。'); await this.loadSkills(); }
+    try { await this.connect(); this.refreshBackend(); this.showNotice('Hermes 已连接'); await this.loadSkills(); }
     catch (error) { this.showNotice(`连接失败：${error.message}`, true); }
     finally { this.connecting = false; this.refreshBackend(); }
   }
@@ -504,11 +503,11 @@ export class WorkflowRuntimeUI {
     this.editor.studio?.renderInspectorData(id);
   }
   async insertSkill() {
-    try { const added = await this.editor.insertSkillAfterSelected(); this.refreshBackend(); this.showNotice(`已添加${added?.title ? `「${added.title}」` : ' Skill'}。请在属性中选择技能；此修改用于下一次运行。`); this.setExpanded(); }
+    try { const added = await this.editor.insertSkillAfterSelected(); this.refreshBackend(); this.showNotice(`已添加${added?.title ? `「${added.title}」` : ' Skill'}。`); this.setExpanded(); }
     catch (error) { this.showNotice(error.message, true); this.setExpanded(); }
   }
   async insertTool() {
-    try { const added = await this.editor.insertToolAfterSelected(); this.refreshBackend(); this.showNotice(`已添加${added?.title ? `「${added.title}」` : '工具 / 代码'}。默认原样返回输入，请在属性中配置；此修改用于下一次运行。`); this.setExpanded(); }
+    try { const added = await this.editor.insertToolAfterSelected(); this.refreshBackend(); this.showNotice(`已添加${added?.title ? `「${added.title}」` : '工具 / 代码'}。`); this.setExpanded(); }
     catch (error) { this.showNotice(error.message, true); this.setExpanded(); }
   }
   async copyOutput() {

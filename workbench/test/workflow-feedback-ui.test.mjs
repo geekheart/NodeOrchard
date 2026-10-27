@@ -42,7 +42,7 @@ test('only terminal ordinary runs and completed versioned targets are eligible f
   assert.match(feedbackRunReason(terminalRun('a', { status: 'running' })), /尚未结束/);
   assert.match(feedbackRunReason(terminalRun('a', { document: { mode: 'learn' } })), /学习运行/);
   const { ui } = setup(t, async () => response(null, { targets: [{ ...targets[0], status: 'skipped' }, { ...targets[1], version: '' }, targets[2]] })); await open(ui);
-  assert.deepEqual(ui.eligibleTargets(ui.currentState()).map(item => item.nodeId), ['firmware']); assert.equal(ui.targetsHint.textContent, '本次已完成的 Skill：测试固件'); assert.match(ui.guidance.textContent, /允许改进的范围沿用画布中“Skill 改进”节点/);
+  assert.deepEqual(ui.eligibleTargets(ui.currentState()).map(item => item.nodeId), ['firmware']); assert.equal(ui.targetsHint.textContent, '本次已完成的 Skill：测试固件');
 });
 
 test('form has exactly one empty textarea and no score, category fields or checkboxes', async t => {
@@ -85,7 +85,7 @@ test('save plus learning uses only expectedRevision and comment, then saved revi
   await open(ui); ui.comment.input('USB 检查需增加失败原因，测试说明增加接线照片');
   const first = ui.submit(true); await ui.submit(true); assert.equal(calls.length, 1); assert.equal(ui.comment.disabled, true); resolveSave(); await first;
   assert.equal(calls.length, 2); assert.deepEqual(calls[0].body, { expectedRevision: 2, comment: 'USB 检查需增加失败原因，测试说明增加接线照片' });
-  assert.deepEqual(calls[1].body, { feedbackRevision: 3 }); assert.equal(jobs[0].id, 'learning-a'); assert.equal(ui.currentState().dirty, false); assert.match(ui.notice.textContent, /候选版本/);
+  assert.deepEqual(calls[1].body, { feedbackRevision: 3 }); assert.equal(jobs[0].id, 'learning-a'); assert.equal(ui.currentState().dirty, false); assert.match(ui.notice.textContent, /已启动/);
 });
 
 test('save failures retain editable comprehensive drafts and manual retry preserves the exact text', async t => {

@@ -73,7 +73,7 @@ export class WorkflowSchedulesUI {
     const listSection = element('section', 'wf-schedules-list-section'); listSection.setAttribute('aria-label', '当前工作流定时任务');
     const listHeading = element('div', 'wf-schedules-section-heading'); this.count = element('h3', '', '已保存的任务');
     this.refreshButton = button('刷新', () => void this.loadRecent(), 'wf-button'); listHeading.append(this.count, this.refreshButton);
-    this.list = element('div', 'wf-schedules-list'); this.empty = element('p', 'wf-schedules-empty', '暂无定时任务。新建并保存后，才会按指定时间执行。'); listSection.append(listHeading, this.empty, this.list);
+    this.list = element('div', 'wf-schedules-list'); this.empty = element('p', 'wf-schedules-empty', '暂无定时任务。'); listSection.append(listHeading, this.empty, this.list);
     this.form = element('form', 'wf-schedules-form'); const formHeading = element('div', 'wf-schedules-section-heading'); this.formTitle = element('h3', '', '新建定时任务');
     this.newButton = button('新建任务', () => this.resetForm(), 'wf-button'); formHeading.append(this.formTitle, this.newButton);
     this.snapshotNote = element('p', 'wf-schedules-snapshot-note');
@@ -141,9 +141,9 @@ export class WorkflowSchedulesUI {
     this.workflowLabel.textContent = clean(`当前工作流：${this.editor.doc?.title || '未命名流程'}`); this.modeNotice.textContent = reason; this.modeNotice.hidden = !reason;
     const needsHermes = [this.editor.doc, ...this.schedules().map(item => item.document)].some(document => document?.nodes?.some(item => item.type === 'skill'));
     const backend = this.runtime.getBackend?.() || {}; this.backendHint.hidden = !needsHermes || backend.state === 'ready' && backend.authenticated !== false;
-    this.backendHint.textContent = '含 Skill 的任务到点需要 Hermes 已连接且订阅认证可用。当前连接尚未就绪；离线时会记录未启动，不会自动连接或补跑。';
+    this.backendHint.textContent = 'Hermes 未就绪，含 Skill 的定时任务无法启动。';
     this.formTitle.textContent = this.editingId ? '编辑定时任务' : '新建定时任务';
-    this.snapshotNote.textContent = clean(this.editingId ? `保存更新会采用当前草稿替换此任务的固定流程快照与输入。${record && snapshotSignature(record.document) !== snapshotSignature(this.editor.doc) ? '已保存快照与当前草稿不同。' : ''}` : '保存时固定当前草稿与输入；之后编辑画布不会自动更新此任务。入口的定时配置仅作建议，保存任务后才会启用。');
+    this.snapshotNote.textContent = clean(this.editingId ? `保存更新会采用当前草稿替换此任务的固定流程快照与输入。${record && snapshotSignature(record.document) !== snapshotSignature(this.editor.doc) ? '已保存快照与当前草稿不同。' : ''}` : '保存后启用，使用当前草稿与输入的固定快照。');
     this.once.parentElement.hidden = this.kind.value !== 'once'; this.daily.parentElement.hidden = this.kind.value !== 'daily';
     const structured = isV2(this.editor.doc) && inputEntries(this.editor.doc).length > 0;
     if (this.structured) { this.structured.hidden = !structured; this.format.parentElement.hidden = Boolean(structured); this.input.parentElement.hidden = Boolean(structured); this.structuredSummary.textContent = this.input.value || '尚未准备资料。请回到左侧选择文件。'; }
@@ -171,7 +171,7 @@ export class WorkflowSchedulesUI {
   }
   renderList() {
     const records = this.schedules(), ids = new Set(records.map(item => item.id));
-    this.count.textContent = `已保存的任务（${records.length}）`; this.empty.hidden = records.length > 0; this.empty.textContent = this.loading ? '正在读取定时任务…' : '暂无定时任务。新建并保存后，才会按指定时间执行。';
+    this.count.textContent = `已保存的任务（${records.length}）`; this.empty.hidden = records.length > 0; this.empty.textContent = this.loading ? '正在读取定时任务…' : '暂无定时任务。';
     for (const [id, row] of this.rows) if (!ids.has(id)) { row.card.remove(); this.rows.delete(id); }
     for (const record of records) {
       let row = this.rows.get(record.id); if (!row) { row = this.createRow(record.id); this.rows.set(record.id, row); this.list.append(row.card); }
@@ -230,7 +230,7 @@ export class WorkflowSchedulesUI {
       if (!value?.id || value.workflowId !== workflowId) throw new Error('服务未返回匹配的定时任务，请刷新确认。');
       if ((this.revisions.get(value.id) || 0) <= revision) this.storeSchedule(value);
       if (this.workflowId !== workflowId && this.records.has(value.id) && JSON.stringify(this.drafts.get(workflowId)) === JSON.stringify(submittedForm)) this.drafts.set(workflowId, { ...submittedForm, editingId: value.id });
-      if (this.workflowId === workflowId && this.formRevision === formRevision) { this.editingId = this.records.has(value.id) ? value.id : null; this.showNotice(this.records.has(value.id) ? '定时任务已保存；后续编辑画布不会自动改变这份快照。' : '任务已有较新变更，请以列表状态为准。'); }
+      if (this.workflowId === workflowId && this.formRevision === formRevision) { this.editingId = this.records.has(value.id) ? value.id : null; this.showNotice(this.records.has(value.id) ? '定时任务已保存。' : '任务已有较新变更，请以列表状态为准。'); }
     } catch (error) { if (this.workflowId === workflowId) { this.uncertain = true; this.showNotice(`保存未确认：${error.message}。不会自动重试，请先刷新列表，避免重复创建。`, true); } }
     finally { this.saving = false; this.renderFormState(); this.renderList(); }
   }

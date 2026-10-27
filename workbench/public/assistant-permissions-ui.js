@@ -1,16 +1,16 @@
 const COMMON = [
-  ['workflowRead', '读取工作流与运行日志', '读取获准范围内的节点、运行与会话证据。'],
-  ['workflowEdit', '修改工作流与节点', '生成可审阅的业务修改；应用与运行仍分别进行。'],
-  ['customNodes', '派生自定义节点', '通过现有节点接口生成业务代码候选。'],
-  ['workspaceRead', '读取工作文件夹资料', '只读取服务端绑定的工作文件夹内资料。'],
-  ['capture', '截图与短录制', '读取受控隔离页面，辅助复现界面问题。'],
+  ['workflowRead', '读取工作流与运行日志', '节点、运行与会话'],
+  ['workflowEdit', '修改工作流与节点', '业务修改候选'],
+  ['customNodes', '派生自定义节点', '业务代码候选'],
+  ['workspaceRead', '读取工作文件夹资料', '当前工作文件夹'],
+  ['capture', '截图与短录制', '隔离页面'],
 ];
 const GROUPS = [
-  ['workflow', '独立工作流助手', '仅当前工作流与当前工作文件夹。', COMMON],
-  ['supervisor', '总控助手', '管理跨工作流问题；每项能力可单独收回。', [...COMMON,
-    ['crossWorkflowRead', '跨工作流读取', '读取任意工作流的状态、运行与日志。'],
-    ['manageWorkflows', '管理工作流', '复制、新增测试工作流、移入可恢复的回收站，或委派独立助手只读诊断。'],
-    ['appLogs', '读取软件日志', '读取脱敏的软件诊断日志。'],
+  ['workflow', '独立工作流助手', '范围：当前工作流与工作文件夹', COMMON],
+  ['supervisor', '总控助手', '范围：跨工作流', [...COMMON,
+    ['crossWorkflowRead', '跨工作流读取', '任意工作流的状态与日志'],
+    ['manageWorkflows', '管理工作流', '复制、测试草稿、回收站、只读诊断委派'],
+    ['appLogs', '读取软件日志', '脱敏诊断日志'],
   ]],
 ];
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -67,8 +67,8 @@ export class AssistantPermissionsUI {
     if (this.readOnly || this.loading || this.saving || !this.context().csrfToken || !this.dirty()) return;
     const body = { expectedRevision: this.data.revision, ...Object.fromEntries(GROUPS.map(([role]) => [role, clone(this.draft[role])])) };
     this.saving = true; this.error = ''; this.message = ''; this.render();
-    try { const data = configuration(await this.api('/api/assistant-permissions', { method: 'PUT', body })); this.data = data; this.draft = clone(data); this.message = '权限已保存；后续工具调用按新权限校验。'; }
-    catch (error) { this.error = `保存失败：${error.message}。选择“重新读取”可载入当前配置。`; }
+    try { const data = configuration(await this.api('/api/assistant-permissions', { method: 'PUT', body })); this.data = data; this.draft = clone(data); this.message = '权限已保存'; }
+    catch (error) { this.error = `保存失败：${error.message}`; }
     finally { this.saving = false; this.render(); }
   }
   render() {
@@ -77,7 +77,7 @@ export class AssistantPermissionsUI {
     for (const [key, input] of this.inputs) { const [role, flag] = key.split('.'); input.checked = this.draft?.[role]?.[flag] === true; input.disabled = disabled; }
     this.nodes.save.disabled = disabled || !this.dirty(); this.nodes.save.textContent = this.saving ? '保存中…' : '保存助手权限';
     this.nodes.refresh.disabled = this.loading || this.saving; this.nodes.refresh.textContent = this.loading ? '读取中…' : '重新读取';
-    this.nodes.status.textContent = this.error || this.message || (this.readOnly ? '诊断页面只读。' : this.loading ? '正在读取权限…' : this.dirty() ? '有未保存的权限更改' : this.data ? `权限版本 ${this.data.revision} · 仅可由你在设置中修改` : '权限尚未读取。');
+    this.nodes.status.textContent = this.error || this.message || (this.readOnly ? '只读' : this.loading ? '正在读取权限…' : this.dirty() ? '有未保存的权限更改' : this.data ? `权限版本 ${this.data.revision}` : '权限尚未读取。');
     this.nodes.status.className = this.error ? 'error-text' : 'helper'; this.nodes.status.setAttribute('role', this.error ? 'alert' : 'status');
   }
 }

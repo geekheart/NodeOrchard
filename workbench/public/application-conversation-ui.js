@@ -31,19 +31,17 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
   }
   describeContext() { return [this.editor.doc.title || '总控主题']; }
   getContext() { return {}; }
-  renderComposerHelp() { if (this.help) { this.help.textContent = '本主题上下文独立。总控可按需查看工作流会话，明确委派独立助手进行只读诊断。说“这个问题解决了”或“不用处理了”结束本主题的事项。'; this.input.placeholder = '例如：检查某个工作流的会话和最近一次错误…'; } }
+  renderComposerHelp() { this.input.placeholder = '输入消息'; }
   onEvent(event) {
     if (event.type !== 'application.conversation') return;
     const id = event.payload?.conversation?.workflowId;
     if (!this.states.has(id)) return;
     try { this.accept(event.payload, id); } catch {}
   }
-  async startRun() { this.state().error = '请说明要运行的工作流，或从看板打开它后直接说“运行”。'; this.renderNotice(); return false; }
+  async startRun() { this.state().error = '请先打开要运行的工作流。'; this.renderNotice(); return false; }
   render() {
     super.render(); if (!this.panel) return;
     this.runButton.hidden = true;
-    const empty = this.messages.querySelector('.wf-conversation-empty');
-    if (empty) { empty.querySelector('h3').textContent = '直接描述你遇到的问题'; empty.querySelector('p').textContent = 'AI 可以读取应用状态、运行错误和工具记录，必要时截图或录制复现。'; const suggestion = empty.querySelector('button'); suggestion.textContent = '检查最近一次失败的原因'; suggestion.onclick = null; suggestion.replaceWith(Object.assign(document.createElement('span'), { textContent: '例如：最近一次运行为什么超时？', className: 'wf-conversation-message-scope' })); }
   }
   proposalView(turn) {
     const conversationId = this.workflowId;

@@ -54,7 +54,7 @@ test('applies explicit provider/model only, without credentials or a local prefe
   await ui.apply();
   assert.deepEqual(requests.at(-1), { path: '/api/models', options: { method: 'POST', body: { provider: 'local', model: 'custom/local-model' } } });
   assert.equal(ui.nodes.label.textContent, 'local / custom/local-model');
-  assert.match(ui.nodes.status.textContent, /已更新 Hermes 默认模型/);
+  assert.match(ui.nodes.status.textContent, /默认模型已更新/);
   assert.equal(ui.nodes.apply.disabled, true);
   assert.deepEqual(changes.at(-1)[1], { applied: true });
 });
@@ -101,9 +101,9 @@ test('mutation controls wait for configuration and prevent duplicate application
 test('unconfigured providers, unknown authentication and a missing CSRF token cannot apply', async t => {
   const { ui, context } = fixture(t, async () => catalog()); await ui.refresh();
   ui.nodes.provider.change('unconfigured'); assert.equal(ui.nodes.apply.disabled, true); assert.equal(ui.nodes.model.disabled, true);
-  assert.match(ui.nodes.authentication.textContent, /在 Hermes 中完成认证/);
+  assert.match(ui.nodes.authentication.textContent, /未认证.*Hermes/);
   ui.nodes.provider.change('unknown'); assert.equal(ui.nodes.apply.disabled, true); assert.equal(ui.nodes.model.disabled, true);
-  assert.match(ui.nodes.authentication.textContent, /尚未确认/);
+  assert.match(ui.nodes.authentication.textContent, /状态未知/);
   ui.nodes.provider.change('local'); assert.equal(ui.nodes.apply.disabled, false);
   context.csrfToken = ''; ui.render(); assert.equal(ui.nodes.apply.disabled, true);
 });

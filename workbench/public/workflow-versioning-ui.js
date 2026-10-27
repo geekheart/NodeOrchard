@@ -56,7 +56,7 @@ export class WorkflowVersioningUI {
     const id = this.editor.doc?.id;
     if (id !== this.lastDocumentId) { this.lastDocumentId = id; this.scopeGeneration++; }
     let reason = ''; try { assertWorkflowVersionSource(this.editor); } catch (error) { reason = error.message; }
-    if (this.openButton) { this.openButton.disabled = Boolean(this.session?.busy || reason); this.openButton.title = reason || '创建独立新版，原工作流和历史记录保留。'; }
+    if (this.openButton) { this.openButton.disabled = Boolean(this.session?.busy || reason); this.openButton.title = reason || '另存为新版'; }
     if (this.session && this.dialog?.open && !this.current(this.session)) {
       this.session.stale = true;
       if (!this.session.busy) this.showStatus(this.session, '当前工作流或编辑内容已变化。请关闭此窗口，保存后重新另存。', true);
@@ -88,15 +88,15 @@ export class WorkflowVersioningUI {
     const form = el('form', 'wf-component-form'); this.form = form;
     const titleLabel = el('label', 'wf-field'); titleLabel.append(el('span', '', '新版名称'));
     this.titleInput = el('input'); this.titleInput.value = session.title; this.titleInput.name = 'versionTitle'; this.titleInput.required = true; this.titleInput.maxLength = 120; this.titleInput.setAttribute('aria-label', '新版名称'); titleLabel.append(this.titleInput); form.append(titleLabel);
-    form.append(el('p', 'wf-field-help', `原版：${session.sourceTitle}。仅创建新的节点和连线，不修改原版。`));
+    form.append(el('p', 'wf-field-help', `原版：${session.sourceTitle}`));
     this.options = {};
     for (const [key, caption] of [['upgradeNodes', '登记工具预设来源'], ['addValidation', '增加输入校验'], ['addStageOutputs', '保存审核后阶段成果'], ['copyInputs', '保留已填写输入资料，但需重新预检']]) {
       const label = el('label', 'wf-field wf-versioning-option'), input = el('input'); input.type = 'checkbox'; input.name = key; input.checked = session.options[key]; input.setAttribute('aria-label', caption); label.append(input, el('span', '', caption)); form.append(label); this.options[key] = input;
       input.addEventListener('change', () => { session.options[key] = input.checked; this.updatePreview(session); });
     }
-    form.append(el('p', 'wf-field-help', '阶段成果保存已审核的成果清单，不重复导出图片。仅复制输入资料的填写内容，文件和目录仍需在新版中重新预检。'));
+    form.append(el('p', 'wf-field-help', '文件与目录需重新预检。'));
     this.preview = el('section', 'wf-property-section wf-versioning-preview'); this.preview.setAttribute('aria-label', '新版重构预览'); form.append(this.preview);
-    form.append(el('p', 'wf-field-help', '保留固定版本 Skill、学习目标和直接审核连线。运行记录、聊天历史、审核决定、定时任务及预检结果不复制；原版不会自动归档。'));
+    form.append(el('p', 'wf-field-help', '新版不含运行、聊天、审核或定时记录。'));
     this.notice = el('p', 'wf-field-feedback'); this.notice.setAttribute('role', 'status');
     const actions = el('div', 'wf-dialog-actions'); this.cancelButton = button('取消', () => this.close()); this.submitButton = el('button', 'wf-button primary', '创建新版'); this.submitButton.type = 'submit'; actions.append(this.cancelButton, this.submitButton); form.append(this.notice, actions); this.dialog.append(form);
     this.titleInput.addEventListener('input', () => { session.title = this.titleInput.value; this.updatePreview(session); });
@@ -143,7 +143,7 @@ export class WorkflowVersioningUI {
       session.preview = prepareWorkflowVersion(session.source.document, { title: session.title.trim(),
         upgradeNodes: session.options.upgradeNodes, addValidation: session.options.addValidation,
         addStageOutputs: session.options.addStageOutputs, idFactory: prefix => session.ids.next(prefix) });
-      this.showStatus(session, '新版仅在点击“创建新版”后保存。');
+      this.showStatus(session, '待创建');
     } catch (error) { session.preview = null; this.showStatus(session, error.message, true); }
     this.renderPreview(session); this.renderControls(session);
   }
@@ -154,7 +154,6 @@ export class WorkflowVersioningUI {
     const { document, report } = session.preview, list = el('dl', 'wf-node-origin-list');
     for (const [label, value] of [['新版节点', document.nodes.length], ['新版连线', document.edges.length], ['登记工具预设', report.toolPresets], ['新增输入校验', report.validationNodes], ['新增阶段成果', report.stageOutputs], ['保留固定 Skill', report.skillCount], ['保留学习目标', report.learningTargetCount ?? report.learningTargets?.length ?? 0]]) list.append(el('dt', '', label), el('dd', '', value ?? 0));
     this.preview.append(list);
-    for (const note of report.notes || []) this.preview.append(el('p', 'wf-field-help', note));
   }
   async confirmSource(session) {
     this.assertCurrent(session);

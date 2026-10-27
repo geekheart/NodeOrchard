@@ -38,13 +38,13 @@ export class ConversationHubUI {
     this.filterInput.addEventListener('change', () => { this.filter = this.filterInput.value; this.renderLists(); });
     this.refreshButton = button('刷新目录', () => void this.refresh()); this.toolbar.append(search, this.filterInput, this.refreshButton);
     this.status = node('p', 'helper'); this.status.setAttribute('role', 'status'); this.status.setAttribute('aria-live', 'polite');
-    this.supervisorSection = node('section', 'conversation-hub-section'); const supervisorHeading = node('div', 'section-heading'); supervisorHeading.append(node('h2', '', '总控会话'), node('span', 'helper', '按问题分开上下文'));
-    this.createForm = node('form', 'conversation-hub-create'); this.titleInput = node('input'); this.titleInput.maxLength = 120; this.titleInput.placeholder = '新主题，例如：检查本周失败原因'; this.titleInput.setAttribute('aria-label', '总控会话主题'); this.titleInput.required = true;
+    this.supervisorSection = node('section', 'conversation-hub-section'); const supervisorHeading = node('div', 'section-heading'); supervisorHeading.append(node('h2', '', '总控会话'));
+    this.createForm = node('form', 'conversation-hub-create'); this.titleInput = node('input'); this.titleInput.maxLength = 120; this.titleInput.placeholder = '会话主题'; this.titleInput.setAttribute('aria-label', '总控会话主题'); this.titleInput.required = true;
     this.createButton = node('button', 'button primary', '新建总控会话'); this.createButton.type = 'submit'; this.createForm.append(this.titleInput, this.createButton); this.createForm.addEventListener('submit', event => { event.preventDefault(); void this.create(); });
     this.supervisorList = node('div', 'conversation-hub-list'); this.supervisorList.setAttribute('aria-label', '总控会话列表'); this.supervisorSection.append(supervisorHeading, this.createForm, this.supervisorList);
-    this.workflowSection = node('section', 'conversation-hub-section'); const workflowHeading = node('div', 'section-heading'); workflowHeading.append(node('h2', '', '工作流独立会话'), node('span', 'helper', '每个工作流一条会话，历史保持独立'));
+    this.workflowSection = node('section', 'conversation-hub-section'); const workflowHeading = node('div', 'section-heading'); workflowHeading.append(node('h2', '', '工作流独立会话'));
     this.workflowList = node('div', 'conversation-hub-list'); this.workflowList.setAttribute('aria-label', '工作流独立会话列表'); this.workflowSection.append(workflowHeading, this.workflowList);
-    this.history = node('details', 'conversation-hub-history'); this.historySummary = node('summary', '', '历史任务'); this.historyList = node('div', 'conversation-hub-history-list'); this.history.append(this.historySummary, node('p', 'helper', '原来的普通任务仍保留在这里，不会并入工作流或总控会话。'), this.historyList);
+    this.history = node('details', 'conversation-hub-history'); this.historySummary = node('summary', '', '历史任务'); this.historyList = node('div', 'conversation-hub-history-list'); this.history.append(this.historySummary, this.historyList);
     this.root.replaceChildren(this.toolbar, this.status, this.supervisorSection, this.workflowSection, this.history);
   }
   async activate(route = {}) { this.active = true; this.selected = route.id || null; this.render(); await this.refresh({ chooseDefault: !route.id }); }
@@ -74,7 +74,7 @@ export class ConversationHubUI {
       this.titleInput.value = ''; this.createRequest = null; this.selected = id;
       if (this.active) this.openSupervisor(id);
       await this.refresh();
-    } catch (error) { this.error = `会话创建未确认：${error.message}。保留主题重试会复用同一请求。`; }
+    } catch (error) { this.error = `会话创建未确认：${error.message}`; }
     finally { this.creating = false; this.render(); }
   }
   onEvent(event) {
@@ -90,17 +90,17 @@ export class ConversationHubUI {
     heading.append(title);
     const state = item.active ? '正在回复' : count(item.pendingCount) ? `${count(item.pendingCount)} 项待处理` : count(item.turnCount) ? STATUS[item.status] || '已记录' : '尚未开始';
     heading.append(node('span', `status-badge${item.active ? ' running' : count(item.pendingCount) ? ' error' : ''}`, state));
-    const meta = node('p', 'conversation-hub-meta', `${workflow ? '独立助手' : row.legacy ? '旧全局记录 · 完整保留' : '总控助手'} · ${count(item.turnCount)} 条交流${date(item.updatedAt) ? ' · ' + date(item.updatedAt) : ''}${row.lifecycle && row.lifecycle !== 'active' ? ' · ' + (row.lifecycle === 'trashed' ? '回收站' : '已归档') : ''}`);
+    const meta = node('p', 'conversation-hub-meta', `${workflow ? '独立助手' : row.legacy ? '旧全局记录' : '总控助手'} · ${count(item.turnCount)} 条交流${date(item.updatedAt) ? ' · ' + date(item.updatedAt) : ''}${row.lifecycle && row.lifecycle !== 'active' ? ' · ' + (row.lifecycle === 'trashed' ? '回收站' : '已归档') : ''}`);
     card.append(heading, meta);
-    card.append(node('p', 'conversation-hub-excerpt', excerpt(item.lastMessage) || (workflow ? '进入工作流后继续原来的独立对话。' : row.legacy ? '原全局聊天保留在此，新问题建议新建主题。' : '这个主题的消息和诊断进度单独保存。')));
+    const message = excerpt(item.lastMessage); if (message) card.append(node('p', 'conversation-hub-excerpt', message));
     if (workflow) card.append(link(`#/workflows/${encodeURIComponent(row.workflowId)}`, '进入独立会话 →', 'conversation-hub-open'));
     return card;
   }
   renderLists() {
     const data = this.data || { workflows: [], supervisors: [] }, options = { query: this.query, filter: this.filter };
     const supervisors = filterHubConversations(data.supervisors, options), workflows = filterHubConversations(data.workflows, options);
-    this.supervisorList.replaceChildren(...(supervisors.length ? supervisors.map(row => this.card(row)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的总控会话。' : '先新建一个主题，让总控助手集中处理这次问题。' : '正在读取总控会话…')]));
-    this.workflowList.replaceChildren(...(workflows.length ? workflows.map(row => this.card(row, true)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的工作流会话。' : '创建工作流后，它的独立会话会出现在这里。' : '正在读取工作流会话…')]));
+    this.supervisorList.replaceChildren(...(supervisors.length ? supervisors.map(row => this.card(row)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的总控会话。' : '暂无总控会话。' : '正在读取总控会话…')]));
+    this.workflowList.replaceChildren(...(workflows.length ? workflows.map(row => this.card(row, true)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的工作流会话。' : '暂无工作流会话。' : '正在读取工作流会话…')]));
     this.renderHistory();
   }
   renderHistory() {

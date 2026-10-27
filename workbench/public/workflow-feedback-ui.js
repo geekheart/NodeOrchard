@@ -42,11 +42,10 @@ export class WorkflowFeedbackUI {
     this.refreshButton = button('刷新反馈', () => { const state = this.currentState(); if (state) void this.load(state.runId, true); }, 'wf-button wf-runtime-small');
     heading.append(this.badge, this.refreshButton);
     this.scope = element('p', 'wf-feedback-scope');
-    this.guidance = element('p', 'wf-feedback-guidance', '直接描述产物的问题和期望，学习模式会据此改进对应的 Skill。具体允许改进的范围沿用画布中“Skill 改进”节点的设置。原 Skill 和本次运行记录保留；候选需要验证后再使用。');
     this.notice = element('p', 'wf-feedback-notice'); this.notice.setAttribute('role', 'status'); this.notice.setAttribute('aria-live', 'polite');
     this.targetsHint = element('p', 'wf-feedback-targets');
     const commentLabel = element('label', 'wf-feedback-comment-label'); commentLabel.append(element('span', '', '综合反馈'));
-    this.comment = element('textarea'); this.comment.rows = 6; this.comment.maxLength = 8000; this.comment.placeholder = '例如：哪些文件或步骤有问题？希望怎样修改？可以一次描述多个方面，无需逐项填写。'; this.comment.setAttribute('aria-label', '本次运行的综合反馈'); commentLabel.append(this.comment);
+    this.comment = element('textarea'); this.comment.rows = 6; this.comment.maxLength = 8000; this.comment.placeholder = '填写反馈'; this.comment.setAttribute('aria-label', '本次运行的综合反馈'); commentLabel.append(this.comment);
     this.comment.addEventListener('input', () => { const state = this.currentState(); if (state) this.setDraft(state, this.comment.value); });
     this.lengthHint = element('p', 'wf-feedback-length');
     this.conflict = element('div', 'wf-feedback-conflict'); this.conflict.hidden = true;
@@ -57,7 +56,7 @@ export class WorkflowFeedbackUI {
     this.saveButton = button('保存反馈', () => void this.submit(false));
     this.learnButton = button('根据反馈改进 Skill', () => void this.submit(true), 'wf-button primary');
     this.actionsHint = element('span', 'wf-feedback-action-hint'); actions.append(this.saveButton, this.learnButton, this.actionsHint);
-    this.panel.append(heading, this.scope, this.guidance, this.notice, this.targetsHint, commentLabel, this.lengthHint, this.conflict, actions); host.append(this.panel);
+    this.panel.append(heading, this.scope, this.notice, this.targetsHint, commentLabel, this.lengthHint, this.conflict, actions); host.append(this.panel);
     this.panel.addEventListener('keydown', event => event.stopPropagation());
   }
   state(runId) {
@@ -112,11 +111,11 @@ export class WorkflowFeedbackUI {
       if (!Number.isInteger(result.feedback?.revision) || result.feedback.revision <= state.revision || result.feedback.runId && result.feedback.runId !== runId) throw new Error('服务未确认匹配的反馈修订，请刷新反馈核对；草稿已保留。');
       state.loadRequest++; state.feedback = result.feedback; state.revision = result.feedback.revision; state.remote = null; state.conflict = false;
       if (state.editRevision === editRevision) this.readRecord(state, result.feedback);
-      if (!learn) { state.notice = state.dirty ? '提交时的反馈已保存；之后编辑的草稿仍未保存。' : '反馈已保存，尚未修改任何 Skill。'; return; }
+      if (!learn) { state.notice = state.dirty ? '提交时的反馈已保存；之后编辑的草稿仍未保存。' : '反馈已保存。'; return; }
       state.notice = '反馈已保存，正在启动基于综合反馈的 Skill 学习…'; this.renderState();
       const job = await this.api(`/api/workflow-runs/${encodeURIComponent(runId)}/feedback/learn`, { method: 'POST', body: { feedbackRevision: state.revision } });
       if (!job?.id) throw new Error('服务未返回学习记录，请刷新学习记录确认后再重试。');
-      state.notice = '反馈学习已启动；在学习面板检查候选版本并确认应用到草稿，再完成验证和复评。';
+      state.notice = '反馈学习已启动。';
       try { await this.runtime.onFeedbackLearning?.(job); } catch { state.notice = '反馈学习已启动；学习面板暂未打开，请刷新学习记录查看。'; }
     } catch (error) {
       state.error = true;
@@ -131,7 +130,7 @@ export class WorkflowFeedbackUI {
   renderState() {
     const run = this.run, state = this.currentState(), runReason = feedbackRunReason(run);
     this.panel.hidden = !run;
-    this.scope.textContent = run ? clean(`仅反馈所选运行 ${run.id}；反馈绑定本次实际使用的 Skill 版本。`) : '';
+    this.scope.textContent = run ? clean(`运行 ${run.id}`) : '';
     const canReview = !!state?.canReview && !runReason, eligible = state ? this.eligibleTargets(state) : [], blocked = !canReview || !eligible.length || state?.busy || state?.loading || !state?.loaded || state?.conflict;
     if (this.runtime.feedbackButton) this.runtime.feedbackButton.disabled = !this.canOpen();
     this.badge.textContent = state?.dirty ? '草稿未保存' : state?.feedback ? `已保存 · 第 ${state.revision} 版` : '尚未反馈';
@@ -140,7 +139,8 @@ export class WorkflowFeedbackUI {
     this.refreshButton.disabled = !state || !!runReason || state.loading || state.busy; this.refreshButton.textContent = state?.loading ? '读取中…' : '刷新反馈';
     this.saveButton.disabled = blocked; this.learnButton.disabled = blocked;
     this.saveButton.textContent = state?.busy ? '提交中…' : '保存反馈'; this.learnButton.textContent = state?.busy ? '请等待提交完成…' : '根据反馈改进 Skill';
-    this.actionsHint.textContent = state?.dirty ? '切换运行会保留草稿；关闭或刷新页面前请保存。' : '反馈学习先生成候选，原 Skill 保留。';
+    this.actionsHint.textContent = state?.dirty ? '草稿未保存' : '';
+    this.actionsHint.hidden = !this.actionsHint.textContent;
     this.conflict.hidden = !state?.conflict;
     this.conflictText.textContent = state?.remote ? `服务器最新反馈：第 ${recordRevision(state.remote)} 版。下方仅供对照，当前未保存的综合反馈仍然保留。` : '请先刷新反馈，读取服务器最新修订。';
     this.serverFeedback.textContent = state?.remote ? clean(feedbackComment(state.remote, state.targets) || '未填写反馈') : '';

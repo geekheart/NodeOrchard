@@ -161,8 +161,8 @@ export class WorkflowBoard {
     }
     for (const [index, workflow] of sorted.filter(item => workflowLifecycle(item) !== 'active').entries()) { const card = this.cards.get(workflow.id).card, before = this.inactiveList.children[index] || null; if (before !== card) { const focused = card.contains(document.activeElement), previous = document.activeElement; this.inactiveList.insertBefore(card, before); if (focused) previous.focus({ preventScroll: true }); } }
     const empty = this.loaded && !filtered.length; this.empty.hidden = !empty; this.viewport.hidden = empty;
-    this.emptyTitle.textContent = records.length ? '没有匹配的工作流' : this.lifecycle === 'active' ? '创建第一个工作流' : this.lifecycle === 'archived' ? '暂无已归档工作流' : '回收站为空';
-    this.emptyText.textContent = records.length ? `搜索仅在${lifecycle.title}中查找，试试其它名称或 Skill。` : this.lifecycle === 'active' ? '先手动搭建节点，再保存为可复用的流程。' : this.lifecycle === 'archived' ? '在工作流卡片的更多操作中归档流程。' : '已归档工作流可移入回收站，再选择恢复或永久删除。';
+    this.emptyTitle.textContent = records.length ? '没有匹配的工作流' : this.lifecycle === 'active' ? '暂无工作流' : this.lifecycle === 'archived' ? '暂无已归档工作流' : '回收站为空';
+    this.emptyText.textContent = ''; this.emptyText.hidden = true;
     this.emptyCreate.hidden = this.lifecycle !== 'active' || records.length > 0; this.emptyClear.hidden = !records.length;
   }
   createCard(id) {

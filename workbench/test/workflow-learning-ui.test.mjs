@@ -50,7 +50,7 @@ test('learning panel mounts independent sample controls and an explicit expected
   fakeDOM(t); const value = job(), center = new FakeElement(), topRun = new FakeElement();
   const runtime = { editor: { doc: value.document, propertyDrafts: new Map(), root: { querySelector: selector => selector === '.wf-center' ? center : topRun } }, panel: new FakeElement(), startButton: new FakeElement(), stopButton: new FakeElement(), skillPending: new Set(), getBackend: () => ({ state: 'ready' }), renderTaskLink() {}, input: new FakeElement() };
   const instance = new WorkflowLearningUI(runtime); assert.equal(instance.expectedFormat.id, 'wf-learning-expected-format'); assert.equal(instance.expectedFormat.value, 'text'); assert.equal(instance.maxRounds.value, '3'); assert.equal(instance.targetScore.value, '90'); assert.equal(instance.trainableElements.has('skill'), true); assert.equal(instance.comparison, undefined); assert.equal(runtime.panel.hidden, true); assert.equal(topRun.textContent, '开始学习'); assert.equal(topRun.attributes['aria-label'], '开始学习'); assert.notEqual(instance.input, runtime.input);
-  assert.equal(instance.memoryRecord.hidden, true); assert.match(instance.memorySetupNote.textContent, /普通执行继续按原设置更新记忆/); assert.match(instance.memorySetupNote.textContent, /不回写、不动态检索外部记忆/);
+  assert.equal(instance.memoryRecord.hidden, true);
   instance.jobs.set(value.id, { ...value, status: 'running', phase: 'optimizing' }); instance.updateRunButton(); assert.equal(topRun.textContent, '调整 Skill…'); assert.equal(topRun.attributes['aria-label'], '调整 Skill…');
   instance.jobs.set(value.id, { ...value, status: 'running', phase: 'preparing-memory', memoryPolicy: { mode: 'pending', memoryWriteAllowed: null, externalMemoryAllowed: null } }); instance.updateRunButton(); assert.equal(topRun.textContent, '冻结学习记忆…'); assert.equal(topRun.attributes['aria-label'], '冻结学习记忆…');
 });
@@ -164,7 +164,7 @@ test('both learning run buttons stay disabled until a complete branch explicitly
   assert.equal(instance.startButton.disabled, false); assert.equal(topRun.disabled, false);
   assert.equal(instance.trainableElements.has('skill'), true);
   assert.equal(instance.trainableElements.get('skill').input, undefined, 'panel selection is a read-only graph summary');
-  assert.match(instance.comparisonHint.textContent, /由连线指定的对比产物/);
+  assert.match(instance.comparisonHint.textContent, /对比产物/);
 });
 
 test('restoring historical samples never overwrites current comparison or improvement node settings', t => {
@@ -332,7 +332,7 @@ test('feedback results show one overall comment and pending validation without r
   assert.equal(instance.status.textContent, '候选已生成 · 未验证'); assert.equal(instance.status.dataset.status, 'pending'); assert.equal(instance.resultsLayout.hidden, true); assert.equal(instance.feedbackResults.hidden, false); assert.equal(instance.restoreButton.hidden, true);
   assert.equal(instance.best.textContent, '未验证 · 待用户复评'); assert.equal(instance.apply.textContent, '应用候选到草稿（未验证）'); assert.equal(instance.apply.disabled, false);
   assert.equal(instance.feedbackComment.children.length, 1); assert.equal(instance.feedbackComment.children[0].children[0].textContent, '综合反馈'); assert.equal(instance.feedbackComment.children[0].children[1].textContent, value.feedbackSnapshot.comment); assert.equal(instance.feedbackComment.children[0].children.length, 3); assert.match(instance.feedbackComment.children[0].children[2].textContent, /检查范围：测试固件/); assert.doesNotMatch(instance.feedbackComment.children[0].children[2].textContent, /导出与命名/);
-  assert.match(instance.feedbackCandidateNotice.textContent, /不代表质量达标/); assert.equal(instance.feedbackChanges.children.length, 1); assert.match(instance.feedbackChanges.children[0].children[0].textContent, /测试固件/);
+  assert.match(instance.feedbackCandidateNotice.textContent, /未验证/); assert.equal(instance.feedbackChanges.children.length, 1); assert.match(instance.feedbackChanges.children[0].children[0].textContent, /测试固件/);
   instance.jobs.set(value.id, { ...value, kind: undefined }); instance.render(); assert.equal(instance.feedbackResults.hidden, true); assert.equal(instance.resultsLayout.hidden, false);
 });
 
@@ -350,7 +350,7 @@ test('old feedback learning displays historical comments as one overall text wit
 
 test('feedback that made no changes and active preparation use no baseline or success claims', t => {
   fakeDOM(t); const { instance } = mountedInspection(), value = feedbackLearning({ reason: 'feedback-no-change', candidateDocument: null }); value.workflowId = instance.workflowId; value.document.id = instance.workflowId; instance.editor.doc = structuredClone(value.document); instance.jobs.set(value.id, value); instance.jobId = value.id; instance.render();
-  assert.equal(instance.status.textContent, '未形成新候选'); assert.equal(instance.apply.disabled, true); assert.match(instance.feedbackCandidateNotice.textContent, /没有形成新候选/); assert.match(instance.summary.textContent, /原 Skill 保留/);
+  assert.equal(instance.status.textContent, '未形成新候选'); assert.equal(instance.apply.disabled, true); assert.match(instance.feedbackCandidateNotice.textContent, /没有形成新候选/); assert.equal(instance.summary.textContent, '未形成新候选');
   instance.jobs.set(value.id, { ...value, status: 'running', phase: 'preparing-memory' }); instance.render(); assert.equal(instance.summary.textContent, '准备只读记忆');
   instance.jobs.set(value.id, { ...value, status: 'running', phase: 'optimizing' }); instance.render(); assert.equal(instance.summary.textContent, '生成定向候选'); assert.equal(instance.startButton.textContent, '生成定向候选…');
 });

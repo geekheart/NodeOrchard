@@ -97,7 +97,7 @@ function pendingDOM(t) {
 }
 const pendingDOMDescendants = node => [node, ...(node.children || []).flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])];
 
-test('global application chat displays the focused issue and explains text-only completion commands', t => {
+test('global application chat displays the focused issue with a concise composer', t => {
   pendingDOM(t); const { ui } = harness(); Object.setPrototypeOf(ui, ApplicationConversationUI.prototype);
   ui.workflowId = 'global-application'; ui.editor.doc = { id: 'global-application', title: '当前应用', nodes: [], edges: [] };
   const old = { id: 'global-issue', status: 'error', user: { text: '应用页面失败', context: {} } };
@@ -105,8 +105,8 @@ test('global application chat displays the focused issue and explains text-only 
   ui.contextHost = new PendingElement('div'); ui.followSelection = {};
   WorkflowConversationUI.prototype.renderContext.call(ui);
   assert.ok(ui.contextHost.children.some(node => /当前问题：应用页面失败/.test(node.textContent || '')));
-  ui.help = {}; ApplicationConversationUI.prototype.renderComposerHelp.call(ui);
-  assert.match(ui.help.textContent, /这个问题解决了/); assert.match(ui.help.textContent, /不用处理了/);
+  ApplicationConversationUI.prototype.renderComposerHelp.call(ui);
+  assert.equal(ui.input.placeholder, '输入消息');
 });
 
 test('pending group starts folded, reports reviews and preserves its workflow preference across rerenders and reloads', t => {
@@ -381,9 +381,9 @@ test('opening chat closes an empty properties drawer while preserving a selected
   ui.editor.settings.propertiesClosed = false; ui.editor.selection.add('trim'); WorkflowConversationUI.prototype.toggle.call(ui, true); assert.equal(ui.editor.settings.propertiesClosed, false); assert.equal(applied, 1);
 });
 
-test('the default discussion composer explains direct approval and revision for the bound waiting review', () => {
-  const { ui, run } = harness(); ui.editor.doc.nodes[0].type = 'human'; run.document.nodes[0].type = 'human'; run.nodes.trim.status = 'waiting_review'; ui.help = {}; ui.state().intent = 'discuss'; ui.renderComposerHelp(); assert.match(ui.help.textContent, /回复“通过”/); assert.match(ui.input.placeholder, /要求修改/);
-  run.nodes.trim.status = 'complete'; ui.renderComposerHelp(); assert.match(ui.help.textContent, /咨询和讨论/);
+test('the composer remains concise for a bound review and after it completes', () => {
+  const { ui, run } = harness(); ui.editor.doc.nodes[0].type = 'human'; run.document.nodes[0].type = 'human'; run.nodes.trim.status = 'waiting_review'; ui.state().intent = 'discuss'; ui.renderComposerHelp(); assert.equal(ui.input.placeholder, '输入消息');
+  run.nodes.trim.status = 'complete'; ui.renderComposerHelp(); assert.equal(ui.input.placeholder, '输入消息');
 });
 
 test('the composer defaults to automatic routing and a direct run message uses the existing runtime once', async () => {

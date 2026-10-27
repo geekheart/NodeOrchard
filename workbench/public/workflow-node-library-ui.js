@@ -56,7 +56,7 @@ export class WorkflowNodeLibraryUI {
     const parent = this.editor.properties;
     for (const control of parent.querySelectorAll('[name="fieldName"], [name="required"], [name="inputType"], [name="outputType"], [name="stage"], .wf-studio-port-schema input, .wf-studio-port-schema select, .wf-studio-port-schema button, [data-action="delete"], [data-action="duplicate"]')) control.disabled = true;
     const fields = parent.querySelector('.wf-studio-field-schema'); if (fields) fields.hidden = true;
-    const note = el('p', 'wf-field-help', '这是组合的边界节点。名称可改，接口保持固定；如需调整接口，请返回上层展开后重新封装。'); parent.insertBefore(note, parent.querySelector('.wf-property-form'));
+    const note = el('p', 'wf-field-help', '组合接口固定'); parent.insertBefore(note, parent.querySelector('.wf-property-form'));
   }
   api(path, options) { return this.editor.studio.api(path, options); }
   async refresh() {
@@ -84,7 +84,6 @@ export class WorkflowNodeLibraryUI {
     const editor = this.editor, parent = editor.root.querySelector('.wf-library-items'), query = editor.root.querySelector('.wf-search').value;
     for (const item of this.tabs.children) item.setAttribute('aria-pressed', String(item.dataset.nodeLibraryTab === this.tab));
     parent.replaceChildren();
-    const tip = editor.root.querySelector('.wf-library-tip'); tip.textContent = this.tab === 'foundation' ? '基础行为 · 拖入画布或点击添加' : this.tab === 'preset' ? '基于单个基础节点 · 配置固定版本' : '多个节点组合 · 可进入内部编辑';
     const entries = this.entries({ query });
     const groups = this.tab === 'foundation' ? NODE_GROUPS.map(group => [group.id, group.label]) : [['user', '我的组合与预设'], ['builtin', '内置工具预设']];
     for (const [groupId, title] of groups) {
@@ -100,7 +99,7 @@ export class WorkflowNodeLibraryUI {
       }
       parent.append(section);
     }
-    if (!entries.length) { parent.append(el('p', 'wf-library-no-results', this.tab === 'component' && !query ? '选择多个节点，在属性栏“封装为子流程”，再保存到组合节点库。' : this.tab === 'preset' && !query ? '选中配置好的节点，在属性栏“保存为预设”。' : '此分类没有匹配项。')); }
+    if (!entries.length) { parent.append(el('p', 'wf-library-no-results', '此分类没有匹配项。')); }
     if (this.loadError) { const notice = el('div', 'wf-node-library-notice'); notice.append(el('p', 'wf-field-help', this.loadError), button('重试读取', () => void this.refresh())); parent.append(notice); }
   }
   addPreset(id, position) {
@@ -115,14 +114,14 @@ export class WorkflowNodeLibraryUI {
   }
   renderInspector(selected) {
     const editor = this.editor, section = el('section', 'wf-property-section wf-node-origin');
-    if (selected.length > 1) { const action = button('封装为子流程', () => this.openExtract(), 'wf-button primary'); action.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; section.append(el('h3', '', '组合与复用'), action, el('p', 'wf-field-help', '保留内部节点、连线和审核规则，明确对外输入与输出。')); editor.properties.append(section); return; }
+    if (selected.length > 1) { const action = button('封装为子流程', () => this.openExtract(), 'wf-button primary'); action.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; section.append(el('h3', '', '组合与复用'), action); editor.properties.append(section); return; }
     const node = selected[0]; if (!node) return;
     section.append(el('h3', '', '基础与来源')); const list = el('dl', 'wf-node-origin-list');
     for (const [key, value] of [['基础节点', labelFor(node.type)], ['来源', node.origin ? `${node.origin.title} · v${node.origin.version}` : node.type === 'tool' && node.config.executionMode === 'tool' ? '内置工具配置' : '基础节点配置']]) list.append(el('dt', '', key), el('dd', '', value)); section.append(list);
     const actions = el('div', 'wf-property-actions');
     if (node.config.document && ['subflow', 'foreach', 'loop'].includes(node.type)) {
       actions.append(button('进入子流程', () => this.openNested(node.id))); if (node.type === 'subflow') actions.append(button('展开为节点', () => this.unpack(node.id)));
-      section.append(el('p', 'wf-field-help', `${node.config.document.nodes.length} 个内部节点 · 编辑固定快照，不改变原流程或公共预设。`));
+      section.append(el('p', 'wf-field-help', `${node.config.document.nodes.length} 个内部节点`));
     }
     const save = button(node.type === 'subflow' && node.config.document ? '保存为组合节点' : '保存为预设', () => this.openSavePreset(node.id)); save.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; actions.append(save);
     if (node.origin && this.records.get(node.origin.id)?.source === 'user') { const update = button('保存新版本', () => this.openSavePreset(node.id, true)); update.disabled = save.disabled; actions.append(update); }
@@ -171,7 +170,7 @@ export class WorkflowNodeLibraryUI {
     const contextDocumentId = editor.doc.id, session = this.presetDialogSession = {}, origin = update && this.records.get(node.origin?.id), dialog = editor.dialog; dialog.replaceChildren(el('h2', '', update ? '保存预设新版本' : node.type === 'subflow' && node.config.document ? '保存组合节点' : '保存节点预设'));
     dialog.setAttribute('aria-label', update ? '保存预设新版本' : '保存节点预设');
     const form = el('form', 'wf-preset-form'); const title = editor.field(form, '预设名称', 'presetTitle', origin?.title || node.title, { required: true, maxLength: 120 }); const description = editor.field(form, '用途说明', 'presetDescription', origin?.description || '', { multiline: true, maxLength: 2000 });
-    form.append(el('p', 'wf-field-help', '保存固定配置与 Skill 版本。文件输入默认值、输出目录等本机路径会移除；代码和工具配置保留。已有工作流不会自动升级。'));
+    form.append(el('p', 'wf-field-help', '预设不包含本机路径。'));
     const error = el('p', 'wf-field-feedback'); error.setAttribute('role', 'status'); const actions = el('div', 'wf-dialog-actions'); const cancel = button('取消', () => dialog.close()), save = el('button', 'wf-button primary', update ? '发布新版本' : '保存预设'); save.type = 'submit'; actions.append(cancel, save); form.append(error, actions); dialog.append(form);
     form.addEventListener('submit', async event => { event.preventDefault(); if (save.disabled) return;
       if (editor.libraryReadOnly || editor.doc.id !== contextDocumentId || this.presetDialogSession !== session || !dialog.open || !dialog.contains(form)) { error.textContent = '当前流程已变化或为只读，请重新打开节点预设入口。'; error.classList.add('error'); return; }
@@ -196,7 +195,7 @@ export class WorkflowNodeLibraryUI {
       const doc = this.flushNodeDrafts(), ids = [...editor.selection], analysis = components.analyzeSelection(doc, ids), dialog = editor.dialog;
       dialog.replaceChildren(el('h2', '', '封装为子流程')); dialog.setAttribute('aria-label', '封装为子流程');
       const form = el('form', 'wf-component-form'), title = editor.field(form, '组合名称', 'componentTitle', '新的组合节点', { required: true, maxLength: 120 });
-      form.append(el('p', 'wf-field-help', `封装 ${ids.length} 个节点。端口根据选区边界生成，可以修改对外名称。内部审核关系保留；已有学习目标与跨运行产物回执保留在外层，暂不支持直接封装。`));
+      form.append(el('p', 'wf-field-help', `已选中 ${ids.length} 个节点。不支持封装学习目标或跨运行产物回执。`));
       const mappings = {};
       for (const [direction, caption] of [['inputs', '对外输入'], ['outputs', '对外输出']]) {
         const section = el('section', 'wf-component-ports'); section.append(el('h3', '', caption)); mappings[direction] = [];
@@ -204,7 +203,7 @@ export class WorkflowNodeLibraryUI {
         if (!analysis[direction].length) section.append(el('p', 'wf-field-help', '没有跨选区连线。')); form.append(section);
       }
       const error = el('p', 'wf-field-feedback'), actions = el('div', 'wf-dialog-actions'), submit = el('button', 'wf-button primary', '封装并保留连线'); submit.type = 'submit'; actions.append(button('取消', () => dialog.close()), submit); form.append(error, actions); dialog.append(form);
-      form.addEventListener('submit', event => { event.preventDefault(); try { if (editor.doc !== doc) throw new Error('画布已变化，请重新选择节点封装。'); const result = components.extractSelection(doc, ids, { title: title.value.trim(), inputs: mappings.inputs.map(({ mapping, input }) => ({ ...mapping, label: input.value.trim() })), outputs: mappings.outputs.map(({ mapping, input }) => ({ ...mapping, label: input.value.trim() })) }); editor.commit(result.document, '封装为子流程'); editor.selectNode(result.node.id); dialog.close(); editor.toast('已封装。进入子流程可继续编辑内部节点。'); } catch (caught) { error.textContent = caught.message; error.classList.add('error'); } });
+      form.addEventListener('submit', event => { event.preventDefault(); try { if (editor.doc !== doc) throw new Error('画布已变化，请重新选择节点封装。'); const result = components.extractSelection(doc, ids, { title: title.value.trim(), inputs: mappings.inputs.map(({ mapping, input }) => ({ ...mapping, label: input.value.trim() })), outputs: mappings.outputs.map(({ mapping, input }) => ({ ...mapping, label: input.value.trim() })) }); editor.commit(result.document, '封装为子流程'); editor.selectNode(result.node.id); dialog.close(); editor.toast('已封装。'); } catch (caught) { error.textContent = caught.message; error.classList.add('error'); } });
       if (!dialog.open) dialog.showModal(); title.focus();
     } catch (error) { editor.toast(error.message, true); }
   }

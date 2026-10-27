@@ -69,7 +69,7 @@ export class HermesModelUI {
       const data = await this.api('/api/models', { method: 'POST', body: selection });
       this.data = { ...data, providers: Array.isArray(data.providers) ? data.providers : [] };
       this.selection = { provider: data.current?.provider || selection.provider, model: data.current?.model || selection.model };
-      this.message = '已更新 Hermes 默认模型，新建任务和新工作流运行将使用此设置。';
+      this.message = 'Hermes 默认模型已更新';
       this.changed(this.data, { applied: true });
     } catch (error) { this.error = `切换失败：${error.message}`; }
     finally { this.saving = false; this.render(); }
@@ -91,7 +91,7 @@ export class HermesModelUI {
     for (const model of this.models()) { const option = document.createElement('option'); option.value = model; nodes.models.append(option); }
     nodes.model.value = this.selection.model;
     const provider = this.selectedProvider();
-    nodes.authentication.textContent = provider?.authenticated === false ? '此服务商尚未认证，请先在 Hermes 中完成认证，再刷新。' : provider?.authenticated === true ? '认证由 Hermes 管理；可选择或输入 Hermes 支持的模型 ID。' : '服务商认证状态尚未确认，请先在 Hermes 完成配置，再刷新。';
+    nodes.authentication.textContent = provider?.authenticated === false ? '未认证，请在 Hermes 认证后刷新。' : provider?.authenticated === true ? '已认证' : '认证状态未知';
     const blocked = this.loading || this.saving;
     nodes.provider.disabled = blocked || !this.data?.providers?.length;
     nodes.model.disabled = blocked || provider?.authenticated !== true;

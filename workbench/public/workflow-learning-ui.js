@@ -135,8 +135,8 @@ export class WorkflowLearningUI {
     this.recent.addEventListener('change', () => { this.jobId = this.recent.value || null; this.selectedRound = null; this.roundPinned = false; this.selectedCase = 0; this.inspectionRunId = null; this.showNotice(); this.render(); if (this.jobId) void this.loadJob(this.jobId); });
     this.refresh = button('刷新', () => void this.loadRecent(true), 'wf-button wf-runtime-small'); this.restoreButton = button('使用此记录样例与目标', () => { if (this.currentJob() && !this.starting) { this.restoreForm(this.currentJob()); this.formDirty = true; this.showNotice('已载入该记录的样例、评分目标和轮数；比较方式与改进范围仍由当前画布节点决定。'); } }, 'wf-button wf-runtime-small'); recent.append(this.recent, this.refresh, this.restoreButton);
     this.notice = element('p', 'wf-runtime-notice'); this.notice.hidden = true; this.notice.setAttribute('role', 'status');
-    this.connection = element('div', 'wf-runtime-connection'); this.connection.append(element('span', '', '学习需要连接 Hermes，执行样例并调整所选 Skill。'), button('连接 Hermes', () => void this.runtime.connectBackend(), 'wf-button wf-runtime-small'));
-    const setup = element('details', 'wf-learning-setup'); setup.open = true; setup.append(element('summary', '', '学习样例与目标（用于下一次学习）')); this.setup = setup;
+    this.connection = element('div', 'wf-runtime-connection'); this.connection.append(element('span', '', 'Hermes 未连接'), button('连接 Hermes', () => void this.runtime.connectBackend(), 'wf-button wf-runtime-small'));
+    const setup = element('details', 'wf-learning-setup'); setup.open = true; setup.append(element('summary', '', '学习样例与目标')); this.setup = setup;
     const form = element('div', 'wf-learning-form'); const examples = element('div', 'wf-learning-examples');
     this.input = this.field(examples, '样例输入', 'textarea', 'wf-learning-input'); this.input.placeholder = '按 Input 类型填写本次样例输入'; this.input.spellcheck = false;
     const expectedBox = element('div', 'wf-learning-field'); const expectedHeading = element('div', 'wf-learning-field-heading'); const expectedLabel = element('label', '', '已知答案'); expectedLabel.htmlFor = 'wf-learning-expected';
@@ -145,7 +145,7 @@ export class WorkflowLearningUI {
     this.caseEditor = element('details', 'wf-learning-case-editor'); this.caseEditor.open = true; this.caseEditor.append(element('summary', '', '逐条添加 / 编辑样例'));
     const caseMeta = element('div', 'wf-learning-controls'); this.caseName = this.field(caseMeta, '样例名称', 'input', 'wf-learning-case-name'); this.caseName.maxLength = 120; this.caseName.placeholder = '可选，便于识别';
     this.caseSplit = this.field(caseMeta, '所属集合', 'select', 'wf-learning-case-split'); for (const [value, label] of [['train', '训练集'], ['validation', '验证集']]) { const option = element('option', '', label); option.value = value; this.caseSplit.append(option); } this.caseSplit.value = 'train';
-    this.inputFormat = this.field(caseMeta, '输入格式（不自动猜测）', 'select', 'wf-learning-input-format'); for (const [value, label] of [['text', '文本'], ['json', 'JSON']]) { const option = element('option', '', label); option.value = value; this.inputFormat.append(option); } this.inputFormat.value = 'text';
+    this.inputFormat = this.field(caseMeta, '输入格式', 'select', 'wf-learning-input-format'); for (const [value, label] of [['text', '文本'], ['json', 'JSON']]) { const option = element('option', '', label); option.value = value; this.inputFormat.append(option); } this.inputFormat.value = 'text';
     const caseActions = element('div', 'wf-learning-actions'); this.saveCaseButton = button('加入样例集', () => this.saveCaseDraft(), 'wf-button'); this.cancelCaseButton = button('清空编辑', () => this.resetCaseEditor(), 'wf-button wf-runtime-small'); this.caseEditStatus = element('span', 'wf-runtime-hint'); caseActions.append(this.saveCaseButton, this.cancelCaseButton, this.caseEditStatus); this.caseEditor.append(caseMeta, examples, caseActions);
     const datasets = this.mountDatasetControls(); const importer = this.mountImporter();
     const controls = element('div', 'wf-learning-controls');
@@ -154,9 +154,8 @@ export class WorkflowLearningUI {
     this.rubric = this.field(form, '评价标准', 'textarea', 'wf-learning-rubric'); this.rubric.placeholder = '说明内容、格式与必须满足的条件，供 AI 评价和 Skill 调整使用'; this.rubric.rows = 2;
     const trainable = element('fieldset', 'wf-learning-trainable'); trainable.append(element('legend', '', '画布指定的学习支路')); this.branchStatus = element('p', 'wf-runtime-hint'); this.branchStatus.setAttribute('role', 'status'); this.trainableList = element('div', 'wf-learning-skill-list'); trainable.append(this.branchStatus, this.trainableList, element('p', 'wf-runtime-hint', '在“产物对比”节点配置比较方式与字段，在“Skill 改进”节点明确勾选主链 Skill。只调整所选 Skill 正文，工具、代码和输入数据保持固定。'));
     this.comparisonHint = element('p', 'wf-runtime-hint');
-    const actions = element('div', 'wf-learning-actions'); this.startButton = button('开始学习', () => void this.start(), 'wf-button primary'); actions.append(this.startButton, element('span', 'wf-runtime-hint', '每轮重跑全部样例；配置编辑用于下次学习。'));
-    this.memorySetupNote = element('p', 'wf-learning-memory-setup', '新学习批次共用一份固定的 Hermes 内置只读记忆快照，不回写、不动态检索外部记忆；普通执行继续按原设置更新记忆。此策略不提供操作系统文件沙箱。');
-    form.append(datasets, this.caseEditor, importer, controls, this.rubric.parentElement, trainable, this.memorySetupNote, this.comparisonHint, element('p', 'wf-runtime-hint', '已知答案只送入产物评估与训练反馈，不作为业务节点输入；学习不会修改输入数据。建议保留独立验证集，验证样例不直接提供给 Skill 改写模型。每轮重跑完整业务流程（含工具与代码），停止不会撤销已发生的副作用。只调整节点明确指定的 Skill，本次达标不代表通用效果。'), actions); setup.append(form);
+    const actions = element('div', 'wf-learning-actions'); this.startButton = button('开始学习', () => void this.start(), 'wf-button primary'); actions.append(this.startButton);
+    form.append(datasets, this.caseEditor, importer, controls, this.rubric.parentElement, trainable, this.comparisonHint, element('p', 'wf-runtime-hint', '学习会重跑完整流程；停止不能撤销已发生的操作。'), actions); setup.append(form);
     this.modelTask = element('div', 'wf-runtime-approval'); this.modelTask.hidden = true;
     const results = element('section', 'wf-learning-results'); this.results = results; const resultsHead = element('div', 'wf-runtime-section-heading'); resultsHead.append(element('strong', '', '学习结果')); this.best = element('span', 'wf-learning-best'); this.apply = button('应用最佳候选到草稿', () => void this.applyBest(), 'wf-button'); resultsHead.append(this.best, this.apply);
     this.jobInfo = element('p', 'wf-runtime-hint'); this.error = element('p', 'wf-runtime-error');
@@ -204,7 +203,7 @@ export class WorkflowLearningUI {
   renderDatasetSummary() {
     const data = this.dataset || { trainingCases: [], validationCases: [] }, train = data.trainingCases.length, validation = data.validationCases.length, total = train + validation;
     if (this.datasetSummary) this.datasetSummary.textContent = `训练 ${train} · 验证 ${validation} · 合计 ${total}/20`;
-    if (this.datasetHint) this.datasetHint.textContent = !train ? '请至少添加一条训练样例。' : !validation ? '尚无验证集：本次只能衡量训练样例，未验证泛化效果。' : '训练用于调整 Skill；独立验证集仅用于评估与回归检查。';
+    if (this.datasetHint) this.datasetHint.textContent = !train ? '请至少添加一条训练样例。' : !validation ? '尚无验证集：本次只能衡量训练样例，未验证泛化效果。' : '';
     const rounds = Number(this.maxRounds?.value); if (this.executionEstimate) this.executionEstimate.textContent = `每轮完整工作流执行 ${total} 次${Number.isInteger(rounds) && rounds >= 1 && rounds <= 10 ? ` · 最多 ${rounds * total} 次（${rounds} 轮，含基线）` : ''}。评估与 Skill 调整还会调用模型，此处不统计模型调用次数。`;
   }
   renderDataset() {
@@ -215,7 +214,7 @@ export class WorkflowLearningUI {
     }
   }
   setDataset(dataset) { const next = normalizeWorkflowDataset(dataset, { requireTraining: false }); this.dataset = next; this.formDirty = true; this.renderDataset(); return next; }
-  renderCaseEditStatus() { if (this.caseEditStatus) this.caseEditStatus.textContent = this.caseDraftDirty ? '编辑尚未保存到样例集' : this.editingCaseId ? `正在编辑 ${this.editingCaseId}` : '保存后才会用于学习'; if (this.saveCaseButton) this.saveCaseButton.textContent = this.editingCaseId ? '保存样例修改' : '加入样例集'; }
+  renderCaseEditStatus() { if (this.caseEditStatus) this.caseEditStatus.textContent = this.caseDraftDirty ? '编辑尚未保存到样例集' : this.editingCaseId ? `正在编辑 ${this.editingCaseId}` : ''; if (this.caseEditStatus) this.caseEditStatus.hidden = !this.caseEditStatus.textContent; if (this.saveCaseButton) this.saveCaseButton.textContent = this.editingCaseId ? '保存样例修改' : '加入样例集'; }
   resetCaseEditor() { if (this.starting) return; this.editingCaseId = null; this.input.value = ''; this.expected.value = ''; this.caseName.value = ''; this.caseSplit.value = 'train'; this.expectedFormat.value = 'text'; const type = this.editor.doc?.nodes?.find(item => item.type === 'input')?.config?.outputType; this.inputFormat.value = type && !['text', 'any', 'fileRef'].includes(type) ? 'json' : 'text'; this.caseDraftDirty = false; this.renderCaseEditStatus(); }
   saveCaseDraft() {
     if (this.starting) return;
@@ -294,9 +293,9 @@ export class WorkflowLearningUI {
   }
   renderComparisonHint() {
     let branch; try { branch = learningBranch(this.editor.doc); } catch (error) { this.comparisonHint.textContent = error.message; return; }
-    if (!branch) { this.comparisonHint.textContent = '执行模式可正常使用业务链；开始学习前请添加并连通“产物对比”和“Skill 改进”。'; return; }
+    if (!branch) { this.comparisonHint.textContent = '缺少产物对比或 Skill 改进节点'; return; }
     const description = branch.evaluationNode.config.comparison === 'model' ? '逐例 AI 评价，评分是模型估计。' : '精确对比：文本统一换行并忽略首尾空白；JSON 忽略对象键顺序。';
-    this.comparisonHint.textContent = `由连线指定的对比产物：${learningSourceLabel(this.editor.doc)}。${description}全部样例执行并评估完成，且每例达到目标分，才算达标。`;
+    this.comparisonHint.textContent = `对比产物：${learningSourceLabel(this.editor.doc)} · ${description}`;
   }
   renderTrainable() {
     let setup, error = ''; try { setup = learningSetupForDocument(this.editor.doc); } catch (cause) { error = cause.message; }
@@ -364,13 +363,13 @@ export class WorkflowLearningUI {
     if (this.recentSignature !== signature) { this.recent.replaceChildren(); if (!jobs.length) { const option = element('option', '', '暂无学习记录'); option.value = ''; this.recent.append(option); } for (const item of jobs) { const option = element('option', '', `${time(item.startedAt || item.times?.startedAt)} · ${statusLabel(item)}`); option.value = item.id; this.recent.append(option); } this.recentSignature = signature; }
     this.recent.value = job?.id || ''; this.recent.disabled = !jobs.length; this.refresh.disabled = this.loading;
     this.status.textContent = job ? statusLabel(job) : '尚未开始'; this.status.dataset.status = feedbackJob(job) && job.status === 'complete' ? 'pending' : job?.status === 'exhausted' ? 'interrupted' : job?.status || 'idle';
-    this.summary.textContent = job ? clean(ACTIVE.has(job.status) ? feedbackJob(job) ? feedbackPhaseLabel(job) : PHASE[job.phase] || job.phase || '执行与评估' : feedbackJob(job) ? job.reason === 'feedback-no-change' ? '原 Skill 保留 · 未形成新候选' : job.status === 'complete' ? '反馈候选 · 待验证和复评' : '反馈学习已结束 · 未自动应用' : `最佳 ${score(job.bestScore)}`) : '已知答案 → 评估 → 调整 Skill';
-    const reasons = { target: '已通过本次样例评估，可查看并选择应用最佳版本。', maxRounds: '已达到总轮数上限，尚未达到目标；可查看已验证的最佳版本。', noChange: '本轮未形成有效修改，保留已验证结果。', unchanged: '未形成新的有效修改，学习已结束并保留已验证结果。', closed: '应用已关闭，保留结果且未自动继续学习。', restart: '应用重启后保留结果，未自动继续学习。', disconnected: '连接中断后保留结果，未自动继续学习。', 'feedback-candidate-ready': '反馈候选已生成。尚未重跑工作流、验证结果或获得用户复评。', 'feedback-no-change': '本次反馈未形成新候选，原 Skill 保留；没有重跑工作流或获得用户复评。' };
+    this.summary.textContent = job ? clean(ACTIVE.has(job.status) ? feedbackJob(job) ? feedbackPhaseLabel(job) : PHASE[job.phase] || job.phase || '执行与评估' : feedbackJob(job) ? job.reason === 'feedback-no-change' ? '未形成新候选' : job.status === 'complete' ? '反馈候选 · 待验证和复评' : '反馈学习已结束' : `最佳 ${score(job.bestScore)}`) : '暂无学习记录'; this.summary.hidden = !this.summary.textContent;
+    const reasons = { target: '已通过本次样例评估，可查看并选择应用最佳版本。', maxRounds: '已达到总轮数上限，尚未达到目标；可查看已验证的最佳版本。', noChange: '本轮未形成有效修改，保留已验证结果。', unchanged: '未形成新的有效修改，学习已结束并保留已验证结果。', closed: '应用已关闭，保留结果且未自动继续学习。', restart: '应用重启后保留结果，未自动继续学习。', disconnected: '连接中断后保留结果，未自动继续学习。', 'feedback-candidate-ready': '反馈候选已生成 · 未验证', 'feedback-no-change': '未形成新候选' };
     this.results.hidden = !job; this.error.textContent = job?.error ? display(job.error) : reasons[job?.reason] || ''; this.error.hidden = !this.error.textContent; this.error.classList.toggle('wf-learning-reason', !job?.error);
     const isFeedback = feedbackJob(job), best = learningBestRound(job), bestMetrics = best ? learningRoundMetrics(job, best) : null; this.best.textContent = isFeedback ? '未验证 · 待用户复评' : best ? `最佳通过率 ${percent(bestMetrics.overall.passRate) || '待评估'} · 最低 ${score(best.score)}` : '暂无已验证最佳版本'; const changed = !!job && (learningSnapshotChanged(job.document, this.editor.doc) || this.editor.propertyDrafts?.size > 0);
     const candidateReady = isFeedback && job.status === 'complete' && job.reason !== 'feedback-no-change' && !!job.candidateDocument;
     this.apply.disabled = !(isFeedback ? candidateReady : best) || ACTIVE.has(job?.status) || changed || this.applying; this.apply.textContent = this.applying ? '正在应用…' : isFeedback ? '应用候选到草稿（未验证）' : '应用最佳候选到草稿'; this.draftNotice.hidden = !changed;
-    this.jobInfo.textContent = job ? clean(isFeedback ? [`来源运行 ${job.sourceRunId || '未记录'}`, `反馈第 ${job.feedbackRevision ?? '—'} 版`, `检查 ${job.config?.trainableNodeIds?.length || 0} 个允许改进的 Skill`, '固定原始版本与反馈快照；没有样例通过率'].join(' · ') : [`固定快照 · ${time(job.startedAt || job.times?.startedAt)}`, `${job.rounds?.length || 0}/${job.config?.maxRounds || '—'} 轮（含基线）`, job.config?.comparison === 'model' ? '逐例 AI 评分估计' : '精确对比', `目标 ${score(job.config?.targetScore)}`, `每轮 ${learningExpectedCases(job).length} 次完整流程执行`, '最佳版本按分组与总体通过率、最低分和平均分比较'].join(' · ')) : '';
+    this.jobInfo.textContent = job ? clean(isFeedback ? [`来源运行 ${job.sourceRunId || '未记录'}`, `反馈第 ${job.feedbackRevision ?? '—'} 版`, `检查 ${job.config?.trainableNodeIds?.length || 0} 个允许改进的 Skill`, '未验证'].join(' · ') : [`固定快照 · ${time(job.startedAt || job.times?.startedAt)}`, `${job.rounds?.length || 0}/${job.config?.maxRounds || '—'} 轮（含基线）`, job.config?.comparison === 'model' ? '逐例 AI 评分估计' : '精确对比', `目标 ${score(job.config?.targetScore)}`, `每轮 ${learningExpectedCases(job).length} 次完整流程执行`].join(' · ')) : '';
     if (this.restoreButton) { this.restoreButton.hidden = isFeedback; this.restoreButton.disabled = isFeedback || this.starting; }
     if (this.resultsLayout) this.resultsLayout.hidden = isFeedback;
     if (this.feedbackResults) this.feedbackResults.hidden = !isFeedback;
@@ -386,13 +385,13 @@ export class WorkflowLearningUI {
     this.jobId = job.id; this.selectedRound = null; this.roundPinned = false; this.selectedCase = 0; this.loaded = true;
     if (this.setup) this.setup.open = false;
     this.setExpanded(); this.syncMode(); this.render();
-    this.showNotice(changed ? '反馈学习已启动，当前草稿已保留。草稿与来源运行快照不同，恢复对应流程前不能应用候选。' : '正在结合综合反馈检查允许改进的 Skill；相关修改会生成候选，原 Skill 和运行记录保留，候选需要验证与复评。', changed);
+    this.showNotice(changed ? '反馈学习已启动，当前草稿已保留。草稿与来源运行快照不同，恢复对应流程前不能应用候选。' : '正在生成反馈候选。', changed);
   }
   renderFeedbackResult(job) {
     if (!this.feedbackResults) return;
     const selected = new Set(job.config?.trainableNodeIds || []), snapshot = job.feedbackSnapshot || {}, items = snapshot.targets || snapshot.items || [], round = job.rounds?.at(-1);
     const comment = typeof snapshot.comment === 'string' ? snapshot.comment : items.filter(item => item.comment?.trim()).map(item => `${item.title || item.nodeId}：${item.comment}`).join('\n\n');
-    this.feedbackCandidateNotice.textContent = job.reason === 'feedback-no-change' ? '本次没有形成新候选。原 Skill 和反馈记录保留，没有质量达标或验证结论。' : job.status === 'complete' ? '候选生成完成，不代表质量达标。请检查正文变化并应用到草稿，先用独立样例完成验证，再执行和复评；现有验收门槛继续生效。' : ACTIVE.has(job.status) ? '正在结合综合反馈与各 Skill 的实际输入、输出检查相关问题；修改将生成候选，流程不会自动重跑或应用候选。' : '本次反馈学习已结束；只保留已记录的修改，不自动应用。';
+    this.feedbackCandidateNotice.textContent = job.reason === 'feedback-no-change' ? '本次没有形成新候选。' : job.status === 'complete' ? '候选已生成 · 未验证' : ACTIVE.has(job.status) ? '正在生成反馈候选。' : '反馈学习已结束。';
     const signature = JSON.stringify([job.id, comment, items, [...selected]]);
     if (this.feedbackCommentSignature !== signature) {
       this.feedbackCommentSignature = signature; this.feedbackComment.replaceChildren();

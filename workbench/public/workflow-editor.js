@@ -129,12 +129,12 @@ export class WorkflowEditor {
       <div class="wf-recovery" role="status" hidden></div>
       <div class="wf-recovery wf-lifecycle-notice" role="status" hidden></div>
       <div class="wf-body">
-        <aside class="wf-library" aria-label="节点库"><div class="wf-library-head"><div class="wf-panel-heading"><h2>节点库</h2></div><input type="search" class="wf-search" aria-label="搜索节点" placeholder="搜索节点…" /><p class="wf-library-tip">拖入画布，或点击添加</p></div><div class="wf-library-items"></div></aside>
+        <aside class="wf-library" aria-label="节点库"><div class="wf-library-head"><div class="wf-panel-heading"><h2>节点库</h2></div><input type="search" class="wf-search" aria-label="搜索节点" placeholder="搜索节点…" /></div><div class="wf-library-items"></div></aside>
         <section class="wf-center" aria-label="流程设计">
-          <div class="wf-canvas" role="group" tabindex="0" aria-label="工作流画布" aria-describedby="wf-canvas-instructions">
+          <div class="wf-canvas" role="group" tabindex="0" aria-label="工作流画布">
             <div class="wf-world"><svg class="wf-edges" width="1" height="1" aria-label="节点连线"></svg><div class="wf-nodes"></div></div>
             <div class="wf-canvas-toolbar" role="toolbar" aria-label="画布工具"></div>
-            <div class="wf-empty"><div class="wf-empty-mark"></div><h2>从一个节点开始</h2><p>从左侧拖入节点，再连接输出与输入端口。也可以在画布上右键添加。</p><div class="wf-empty-actions"></div></div>
+            <div class="wf-empty"><div class="wf-empty-mark"></div><h2>暂无节点</h2><div class="wf-empty-actions"></div></div>
             <div class="wf-connection-hint" role="status" hidden></div>
             <div class="wf-selection-box" hidden></div>
             <div class="wf-context-menu" role="dialog" aria-label="添加节点" hidden></div>
@@ -144,7 +144,7 @@ export class WorkflowEditor {
         </section>
         <aside class="wf-properties" aria-label="节点属性"></aside>
       </div>
-      <footer class="wf-statusbar"><div><span class="wf-count"></span><span class="wf-stage-label">执行模式 · 按连线串行执行</span></div><span class="wf-shortcuts" id="wf-canvas-instructions">拖动空白平移 · 滚轮缩放 · Shift 框选</span></footer>
+      <footer class="wf-statusbar"><div><span class="wf-count"></span><span class="wf-stage-label">执行模式 · 按连线串行执行</span></div></footer>
       <input type="file" class="wf-file-input" accept=".json,application/json" hidden />
       <dialog class="wf-dialog" aria-label="工作流对话框"></dialog>`;
     this.root = root; this.container.replaceChildren(root);
@@ -271,7 +271,7 @@ export class WorkflowEditor {
     status.title = this.libraryError || ''; status.dataset.state = this.saveError || this.corruptDraft || this.storageConflict || this.libraryError ? 'error' : 'ready';
     this.root.querySelector('[data-action="undo"]').disabled = !this.history.length;
     this.root.querySelector('[data-action="redo"]').disabled = !this.future.length;
-    for (const button of this.root.querySelectorAll('[data-mode]')) { button.setAttribute('aria-pressed', String(button.dataset.mode === this.doc.mode)); button.title = button.dataset.mode === 'learn' ? '通过已知答案或运行反馈改进所选 Skill' : '执行模式支持输入 → Skill / 工具 / 代码 → 输出'; }
+    for (const button of this.root.querySelectorAll('[data-mode]')) { button.setAttribute('aria-pressed', String(button.dataset.mode === this.doc.mode)); }
     this.root.querySelector('.wf-count').textContent = `${this.doc.nodes.length} 个节点 · ${this.doc.edges.length} 条连线`;
     this.root.querySelector('.wf-stage-label').textContent = this.doc.mode === 'learn' ? '学习模式 · 根据对比结果或反馈改进 Skill' : this.doc.schemaVersion === 2 ? `执行模式 · 按依赖并行 · 最多 ${this.doc.settings?.maxConcurrency || 4} 项` : '执行模式 · 按连线串行执行';
     this.studio?.syncDocument();
@@ -568,10 +568,10 @@ export class WorkflowEditor {
     if (this.selectedEdge) { this.renderEdgeProperties(); this.applyLibraryReadOnly(); return; }
     const selected = this.doc.nodes.filter(node => this.selection.has(node.id));
     if (!selected.length) {
-      const empty = el('div', 'wf-property-empty'); empty.append(icon('cursor'), el('p', '', '点选节点配置属性，或点选连线查看数据类型。')); parent.append(empty, el('p', 'wf-field-help', '执行模式可串联 Skill、内置工具与代码。运行面板可查看各节点的输入、输出和状态。')); return;
+      const empty = el('div', 'wf-property-empty'); empty.append(icon('cursor'), el('p', '', '未选择节点')); parent.append(empty); return;
     }
     if (selected.length > 1) {
-      parent.append(el('p', 'wf-field-help', `已选中 ${selected.length} 个节点。拖动任一选中节点可整体移动。`));
+      parent.append(el('p', 'wf-field-help', `已选中 ${selected.length} 个节点`));
       const row = el('div', 'wf-property-actions'); row.append(control('复制所选节点', 'duplicate', 'copy'), control('删除所选节点', 'delete', 'trash')); parent.append(row); this.nodeLibrary?.renderInspector(selected); this.applyLibraryReadOnly(); return;
     }
     const node = selected[0], definition = TYPES.get(node.type), group = GROUPS.get(definition.category);
@@ -584,10 +584,8 @@ export class WorkflowEditor {
       if (this.doc.schemaVersion !== 2) this.field(form, '启动方式', 'trigger', c.trigger || 'manual', { options: [['manual', '手动输入'], ['schedule', '定时触发']] });
       this.field(form, '输入字段名', 'fieldName', c.fieldName, { maxLength: 128 }); this.field(form, '必填', 'required', c.required, { type: 'checkbox' });
       const fixedInput = workflowInputDefault({ type: 'input', config: c });
-      this.field(form, c.outputType === 'text' ? '固定任务说明 / 默认输入' : '默认输入（JSON）', 'defaultValue', fixedInput === undefined ? '' : typeof fixedInput === 'string' ? fixedInput : JSON.stringify(fixedInput, null, 2), { multiline: true, maxLength: 64000, placeholder: c.outputType === 'text' ? '填写后直接运行即可；运行前准备中可按需覆盖本次输入。' : '例如 {"query":"AI","limit":20}' });
-      form.append(el('p', 'wf-field-help', '固定任务只需配置一次。未提供本次输入时使用此内容；每次变化的文件和参数仍可通过资料字段填写。'));
+      this.field(form, c.outputType === 'text' ? '固定任务说明 / 默认输入' : '默认输入（JSON）', 'defaultValue', fixedInput === undefined ? '' : typeof fixedInput === 'string' ? fixedInput : JSON.stringify(fixedInput, null, 2), { multiline: true, maxLength: 64000, placeholder: c.outputType === 'text' ? '默认输入' : '例如 {"query":"AI","limit":20}' });
       if (this.doc.schemaVersion !== 2) { this.field(form, '每日时间', 'schedule', c.schedule || '09:00', { type: 'time' }); this.field(form, '时区', 'timezone', c.timezone || 'Asia/Shanghai', { maxLength: 128 }); }
-      form.append(el('p', 'wf-field-help', this.doc.schemaVersion === 2 ? '输入定义资料要求。立即运行和顶部定时任务共用这些资料字段。' : '入口时间作为定时任务的默认值。应用属性后，通过顶部“定时任务”保存并启用调度；也可立即运行。'));
     }
     if (node.type === 'skill') {
       if (this.runtime) this.runtime.mountSkillPicker(form, node, draft);
@@ -707,9 +705,8 @@ export class WorkflowEditor {
       label.textContent = `${skill.title}${metadata?.displayName ? ` · ${metadata.displayName}` : ''}`;
       row.append(label, input); section.append(row);
     }
-    if (!skills.length) section.append(el('p', 'wf-field-help', '先从输入连通业务主链，再明确选择其中的 Skill。工具与代码不能作为改进目标。'));
+    if (!skills.length) section.append(el('p', 'wf-field-help', '暂无可改进的主链 Skill'));
     if ([...selected].some(id => !skills.some(skill => skill.id === id))) section.append(el('p', 'wf-field-feedback error', '已有目标不在当前主链，应用属性时会移除，请重新检查选择。'));
-    section.append(el('p', 'wf-field-help', '没有默认目标，也不会自动选择所有 Skill。候选只修改所选正文；业务输入、代码、工具与其它 Skill 保持固定。'));
     form.append(section);
   }
 
@@ -1244,11 +1241,11 @@ export class WorkflowEditor {
     this.cancelGesture(); this.cancelConnection(); this.contextMenu.hidden = true; if (this.dialog.open) this.dialog.close(); this.dialog.replaceChildren();
     const heading = el('div', 'wf-dialog-header'); heading.append(el('h2', '', title));
     const close = control('关闭对话框', 'dialog-close', 'close', { compact: true }); close.addEventListener('click', () => this.dialog.close()); heading.append(close);
-    this.dialog.append(heading, el('p', '', description)); this.dialog.showModal(); return this.dialog;
+    this.dialog.append(heading); if (description) this.dialog.append(el('p', '', description)); this.dialog.showModal(); return this.dialog;
   }
   openImport(raw = '') {
     if (this.libraryReadOnly) return;
-    const dialog = this.openDialog('导入工作流草稿', '导入只读取 JSON 数据。替换当前画布后仍可撤销，不会执行代码或调用 Skill。'), area = el('textarea'); area.setAttribute('aria-label', '工作流 JSON'); area.placeholder = '粘贴工作流 JSON，或选择文件'; area.value = raw;
+    const dialog = this.openDialog('导入工作流草稿', '导入将替换当前画布。'), area = el('textarea'); area.setAttribute('aria-label', '工作流 JSON'); area.placeholder = '粘贴工作流 JSON，或选择文件'; area.value = raw;
     const feedback = el('p', 'wf-import-feedback'); feedback.setAttribute('role', 'status');
     const footer = el('div', 'wf-dialog-actions'), choose = el('button', 'wf-button', '选择 JSON 文件'), cancel = el('button', 'wf-button', '取消'), submit = el('button', 'wf-button primary', '导入并替换草稿');
     for (const b of [choose, cancel, submit]) b.type = 'button';
@@ -1269,8 +1266,8 @@ export class WorkflowEditor {
     cancel.type = create.type = 'button'; cancel.addEventListener('click', () => dialog.close()); create.addEventListener('click', () => { this.propertyDrafts.clear(); this.selection.clear(); this.selectedEdge = null; this.commit(createDocument({ schemaVersion: 2 }), '新建草稿'); this.fit(); dialog.close(); }); footer.append(cancel, create); dialog.append(footer);
   }
   openHelp() {
-    const dialog = this.openDialog('手动编辑工作流', '执行模式可按单线串联 Skill、内置工具与代码；通过顶部“定时任务”可保存固定流程与输入，按指定时间执行。学习模式可通过已知答案或运行结果中的综合反馈改进相关 Skill；反馈候选需要后续验证。控制节点和子流程暂不执行。'), list = el('ul');
-    for (const text of ['从节点库拖入节点；点击或 Enter 也可添加。右键画布可搜索节点。', '拖动端口连线，或依次点击两个端口。Esc 取消；类型冲突、占用输入和循环连接会被拒绝。', '拖动空白、按住空格或鼠标中键可平移；滚轮缩放；Shift 拖动空白框选。', 'Shift 点击多选；拖动任一选中节点可整体移动。方向键微调，Shift + 方向键加大步长。', 'Delete / Backspace 删除；⌘/Ctrl + D 复制，⌘/Ctrl + C/V 在编辑器内复制粘贴。', '⌘/Ctrl + Z 撤销，⌘/Ctrl + Shift + Z 重做；⌘/Ctrl + S 保存并应用属性。', '选中节点后在右侧应用属性。草稿自动保存到当前浏览器，JSON 导出用于备份或迁移。', '“添加 Skill”或“添加工具 / 代码”会在选中能力后插入并衔接连线，可撤销。只有包含 Skill 的流程需要连接 Hermes，纯工具 / 代码流程可离线运行。', 'Skill 选择真实内容指纹，每次运行固定快照；审批在对应节点的关联任务中处理。内置工具只接受列表中的固定名称和输入 / 输出约定。', 'JavaScript 填写 async 函数体，input 接收上一步数据，可 await 并 return 结果。Python 填写 def main(input) 的函数体，直接 return，不再声明 main。console.log / print 日志显示在本节点执行日志。', '代码在本机执行，不是 OS 沙箱；只运行你信任的代码。切换成内置工具模式时不会执行隐藏的代码。', '减少动效关闭接线确认动画；它不会暂停正在执行的任务。']) list.append(el('li', '', text)); dialog.append(list);
+    const dialog = this.openDialog('手动编辑工作流', ''), list = el('ul');
+    for (const text of ['从节点库拖入节点；点击或 Enter 也可添加。右键画布可搜索节点。', '拖动端口连线，或依次点击两个端口。Esc 取消；类型冲突、占用输入和循环连接会被拒绝。', '拖动空白、按住空格或鼠标中键可平移；滚轮缩放；Shift 拖动空白框选。', 'Shift 点击多选；拖动任一选中节点可整体移动。方向键微调，Shift + 方向键加大步长。', 'Delete / Backspace 删除；⌘/Ctrl + D 复制，⌘/Ctrl + C/V 在编辑器内复制粘贴。', '⌘/Ctrl + Z 撤销，⌘/Ctrl + Shift + Z 重做；⌘/Ctrl + S 保存并应用属性。', '代码在本机执行，不是 OS 沙箱；只运行你信任的代码。']) list.append(el('li', '', text)); dialog.append(list);
   }
   loadExample() {
     if (this.libraryReadOnly) return;
