@@ -22,6 +22,7 @@ import { WorkflowLibrary } from './workflows/workflow-library.mjs';
 import { WorkflowFeedback } from './workflows/workflow-feedback.mjs';
 import { WorkflowFiles } from './workflows/workflow-files.mjs';
 import { WorkflowFolders } from './workflows/workflow-folders.mjs';
+import { WorkflowAttachments } from './workflows/workflow-attachments.mjs';
 import { WorkflowPackages } from './workflows/workflow-packages.mjs';
 import { WorkflowNodePresets } from './workflows/workflow-node-presets.mjs';
 import { WorkflowConversations } from './workflows/workflow-conversations.mjs';
@@ -123,6 +124,7 @@ export class Application extends EventEmitter {
     this.learnedSkills = new LearnedSkills(this);
     this.workflowFiles = new WorkflowFiles(this);
     this.workflowFolders = new WorkflowFolders(this);
+    this.workflowAttachments = new WorkflowAttachments(this);
     this.workflows = new WorkflowRuns(this);
     this.feedback = new WorkflowFeedback(this);
     this.learningModel = new LearningModel(this);

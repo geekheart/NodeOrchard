@@ -6,6 +6,8 @@ import { applicationHttpRoute, applicationResponseTrace, applicationErrorLocatio
 import { Application } from './application.mjs';
 import { redact } from './hermes-adapter.mjs';
 import { WORKFLOW_ZIP_LIMITS } from './workflows/workflow-zip.mjs';
+import { WORKFLOW_ATTACHMENT_LIMITS } from './workflows/workflow-attachments.mjs';
+import { imageDimensions } from './workflows/workflow-files.mjs';
 
 const PUBLIC_REVIEW_ERROR_CODES = new Set(['REVISION_REQUIRES_PROPOSAL']);
 
@@ -13,6 +15,17 @@ async function readPackage(req) {
   const chunks = []; let length = 0, oversized = false;
   for await (const chunk of req) { length += chunk.length; if (length > WORKFLOW_ZIP_LIMITS.maxCompressedBytes) oversized = true; if (!oversized) chunks.push(chunk); }
   if (oversized) throw Object.assign(new Error('工作流包不能超过 256 MB。'), { httpStatus: 413 });
+  return Buffer.concat(chunks);
+}
+
+async function readAttachment(req) {
+  const chunks = []; let length = 0, oversized = false;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > WORKFLOW_ATTACHMENT_LIMITS.fileBytes) { oversized = true; chunks.length = 0; }
+    if (!oversized) chunks.push(chunk);
+  }
+  if (oversized) throw Object.assign(new Error('单个素材文件不能超过 32MB。'), { httpStatus: 413 });
   return Buffer.concat(chunks);
 }
 
@@ -61,7 +74,7 @@ export function createWorkbenchServer(config, application = new Application(conf
     res.once('close', () => { if (!res.writableFinished) logRequest(true); });
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       if (req.headers.host !== new URL(origin).host) return json(res, 403, { error: '无效的主机地址。' });
       if (req.headers.origin && req.headers.origin !== origin) return json(res, 403, { error: '禁止跨站请求。' });
@@ -74,6 +87,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         const mediaType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
         if (path === '/api/workflow-packages/import' && req.method === 'POST') {
           if (!['application/octet-stream', 'application/zip'].includes(mediaType)) return json(res, 415, { error: '工作流导入需要二进制 ZIP 文件。' });
+        } else if (/^\/api\/workflow-library\/[A-Za-z0-9_-]+\/attachments$/.test(path) && req.method === 'POST') {
+          if (mediaType !== 'application/octet-stream') return json(res, 415, { error: '素材上传需要 application/octet-stream。' });
         } else if (mediaType !== 'application/json') return json(res, 415, { error: '需要 application/json。' });
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { ...application.bootstrap(), eventCursor: application.sequence, csrfToken });
@@ -192,6 +207,27 @@ export function createWorkbenchServer(config, application = new Application(conf
         return json(res, 201, await application.workflowPackages.import(await readPackage(req), {
           filename: requestURL.searchParams.get('filename'), operationId: req.headers['x-workflow-import-id'],
         }));
+      }
+      const attachmentMatch = path.match(/^\/api\/workflow-library\/([A-Za-z0-9_-]+)\/attachments(?:\/(reference)|\/([A-Za-z0-9_-]+)\/content)?$/);
+      if (attachmentMatch) {
+        const workflowId = attachmentMatch[1], isUpload = req.method === 'POST' && !attachmentMatch[2] && !attachmentMatch[3];
+        if (isUpload) {
+          if ([...requestURL.searchParams.keys()].some(key => key !== 'filename') || requestURL.searchParams.getAll('filename').length !== 1) return json(res, 400, { error: '素材上传参数无效。' });
+          return json(res, 201, { attachment: await application.workflowAttachments.upload(workflowId, {
+            name: requestURL.searchParams.get('filename'), operationId: req.headers['x-workflow-attachment-id'], mimeType: req.headers['x-workflow-attachment-type'] || '',
+          }, await readAttachment(req)) });
+        }
+        if (requestURL.search) return json(res, 400, { error: '素材读取与引用不接受查询参数。' });
+        if (req.method === 'GET' && !attachmentMatch[2] && !attachmentMatch[3]) return json(res, 200, { attachments: application.workflowAttachments.list(workflowId) });
+        if (req.method === 'POST' && attachmentMatch[2]) return json(res, 201, { attachment: await application.workflowAttachments.reference(workflowId, await readJson(req, 8192)) });
+        if (req.method === 'GET' && attachmentMatch[3]) {
+          const { attachment, data } = await application.workflowAttachments.content(workflowId, attachmentMatch[3]), image = imageDimensions(data);
+          const raster = image?.width && image?.height && ['png', 'jpeg', 'gif', 'webp'].includes(image.format);
+          const encoded = encodeURIComponent(attachment.name).replace(/['()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+          res.writeHead(200, { 'Content-Type': raster ? 'image/' + image.format : 'application/octet-stream', 'Content-Length': data.length, 'Cache-Control': 'no-store',
+            'Content-Disposition': (raster ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encoded, 'Content-Security-Policy': "sandbox; default-src 'none'" });
+          return res.end(data);
+        }
       }
       const folderMatch = path.match(/^\/api\/workflow-library\/([A-Za-z0-9_-]+)\/folder(?:\/(open))?$/);
       if (folderMatch) {
@@ -397,6 +433,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-studio-ui.css': ['workflow-studio-ui.css', 'text/css'],
         '/workflow-versioning-ui.js': ['workflow-versioning-ui.js', 'text/javascript'],
         '/workflow-conversation-ui.js': ['workflow-conversation-ui.js', 'text/javascript'],
+        '/conversation-attachments.js': ['conversation-attachments.js', 'text/javascript'],
+        '/workflow-attachment-input.js': ['workflow-attachment-input.js', 'text/javascript'],
         '/workflow-conversation-ui.css': ['workflow-conversation-ui.css', 'text/css'],
         '/workflow-node-library-ui.js': ['workflow-node-library-ui.js', 'text/javascript'],
         '/workflow-editor.css': ['workflow-editor.css', 'text/css'],

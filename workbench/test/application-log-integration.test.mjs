@@ -75,6 +75,9 @@ test('HTTP route templates never retain a query, unknown path, or dynamic secret
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/folder/open'), '/api/workflow-library/:workflowId/folder/open');
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/export?expectedRevision=3'), '/api/workflow-library/:workflowId/export');
   assert.equal(applicationHttpRoute('/api/workflow-packages/import?filename=SECRET.workflow'), '/api/workflow-packages/import');
+  assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments?filename=PRIVATE.png'), '/api/workflow-library/:workflowId/attachments');
+  assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments/reference'), '/api/workflow-library/:workflowId/attachments/reference');
+  assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments/SECRET/content'), '/api/workflow-library/:workflowId/attachments/:attachmentId/content');
 });
 
 test('error locations only expose existing source files within the application root', () => {

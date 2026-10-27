@@ -14,6 +14,7 @@ import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
 import { WorkflowPackageUI } from './workflow-package-ui.js';
+import { openAttachmentInput } from './workflow-attachment-input.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
 
@@ -130,6 +131,11 @@ function readRoute() {
   return { page: ['board', 'statistics', 'settings'].includes(parts[0]) ? parts[0] : 'board' };
 }
 function normalizeRoute() { if (!location.hash || /^#\/workbench(?:[/?]|$)/.test(location.hash)) history.replaceState(null, '', '#/board'); else if (/^#\/projects?(?:[/?]|$)/.test(location.hash)) history.replaceState(null, '', '#/conversations'); }
+let pendingAttachmentInput = null;
+function useAttachmentAsInput(attachment) {
+  if (state.route.page === 'workflows' && workflowEditor?.active && workflowEditor.doc?.id === attachment.workflowId) return openAttachmentInput(workflowEditor, attachment);
+  pendingAttachmentInput = attachment; navigate(`#/workflows/${encodeURIComponent(attachment.workflowId)}`);
+}
 function navigate(hash) { if (location.hash === hash) void loadRouteData(); else location.hash = hash; }
 function selectSession(id) { navigate(taskURL(id)); }
 function setTaskQuery({ tab = state.route.tab, panel = state.route.panel } = {}) { navigate(taskURL(state.selectedId, tab, panel)); }
@@ -174,7 +180,7 @@ function renderShell() {
   const showApplicationChat = route.page === 'conversations' && Boolean(route.id);
   $('global-conversation-root').hidden = !showApplicationChat;
   if (showApplicationChat && state.bootstrapped) {
-    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
+    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, attachmentsClient: { api, binaryRequest }, useAttachmentAsInput, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
     if (applicationConversationSelection !== route.id) { applicationConversationSelection = route.id; void applicationConversation.selectConversation(route.id).catch(error => notify(`总控会话打开失败：${error.message}`, true)); }
   }
   renderSidebar();
@@ -238,12 +244,13 @@ function ensureConversationHub() {
 function ensureWorkflowEditor() {
   if (workflowEditor) return;
   workflowEditor = new WorkflowEditor($('workflow-root'));
+  workflowEditor.useAttachmentAsInput = useAttachmentAsInput;
   workflowEditor.getShortcuts = activeShortcuts;
   workflowEditor.runtime = new WorkflowRuntimeUI(workflowEditor, {
     api, connect: connectBackend, getBackend: () => state.backend,
     getRequests: () => [...state.requests.values()], taskURL,
   });
-  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts });
+  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, attachmentsClient: { api, binaryRequest }, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts });
   workflowEditor.updateShortcutHints();
   if (diagnosticCapture) workflowEditor.conversation.schedulePoll = () => {};
   workflowEditor.conversation.connectRuntime(workflowEditor.runtime);
@@ -567,6 +574,9 @@ async function loadRouteData() {
             history.replaceState(null, '', `#/workflows/${encodeURIComponent(workflowLibraryClient.currentId)}`); state.route = readRoute();
           }
           workflowLoading(); workflowEditor.activate(); await workflowEditor.runtime.activate(); renderShell();
+          if (pendingAttachmentInput?.workflowId === id && workflowEditor.doc?.id === id) {
+            const attachment = pendingAttachmentInput; pendingAttachmentInput = null; openAttachmentInput(workflowEditor, attachment);
+          }
         }
       }
     } catch (error) {

@@ -712,6 +712,21 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.assertEqual(self.agent.turn_calls[1][0], "next turn")
         self.assertEqual(self.tool_calls, [])
 
+    def test_assistant_image_native_gate_accepts_gif_bytes_but_keeps_the_fixed_diagnostic_root(self):
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        for signature in (b"GIF87a", b"GIF89a"):
+            root, image = self.assistant_image("reference.gif", signature + b"synthetic single image")
+            with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+                result = self.bridge.assistant_images({"session_id": "runtime-session", "images": [str(image)]})
+                self.assertEqual(result, {"attached": 1, "mode": "native-content"})
+                outside = self.workspace / "reference.gif"
+                outside.write_bytes(image.read_bytes())
+                self.assertEqual(self.bridge.assistant_images_rpc(73, {"session_id": "runtime-session", "images": [str(outside)]})["error"]["code"], 4099)
+            content = self.agent.run_conversation("compare user supplied reference")["messages"][0]["content"]
+            self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/gif;base64,"))
+            self.assertEqual(base64.b64decode(content[1]["image_url"]["url"].split(",", 1)[1]), image.read_bytes())
+            self.assertEqual(self.agent.tools, [])
+
     def test_assistant_images_reject_nonassistant_busy_unconfigured_outside_symlink_and_nonimages(self):
         root, image = self.assistant_image()
         params = {"session_id": "runtime-session", "images": [str(image)]}

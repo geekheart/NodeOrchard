@@ -60,7 +60,7 @@ export function compactDiagnosticContext(value, { initial = false } = {}) {
 export function diagnosticScope({ selection, evidence, modelRoute, capabilities, config, tools }) {
   // Control sessions and adapter log timestamps change during diagnosis. They
   // must not invalidate otherwise identical business evidence or renew its TTL.
-  return hash({ selection, workflow: evidence.workflow, run: evidence.run, latestRun: evidence.latestRun,
+  return hash({ selection, workflow: evidence.workflow, run: evidence.run, latestRun: evidence.latestRun, attachments: evidence.attachments,
     modelRoute, capabilities: Object.fromEntries(Object.entries(capabilities || {}).filter(([key]) => key !== 'loadedSkills')),
     tools, interpreter: config?.hermesPython, contractVersion: 2 });
 }

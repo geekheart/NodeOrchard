@@ -6,6 +6,7 @@ import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-hub.mjs';
 import { ASSISTANT_MODEL_TOOLS } from './assistant-model-tools.mjs';
+import { resolveAssistantAttachments } from './assistant-attachments.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -34,11 +35,14 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     steps: { type: 'array', maxItems: 12, description: '受限应用路由导航、click/scroll；禁止业务提交、输入和任意脚本' } }),
   definition('workflow.preflight', '检查工作流默认输入及文件准备；不编译或试跑 Python，不证明依赖可用或业务产物成功。', { workflowId: text }),
   definition('workflow.folder', '只读获取指定工作流的独立文件夹、资料归集状态、保存版本与 .workflow 下载入口；不打开本机窗口、不解包、不执行。', { workflowId: text }),
+  definition('workflow.attachments', '读取当前获准工作流中用户保存的素材名称、路径与哈希；不执行或修改文件。', { workflowId: text }),
+  definition('workflow.attachment.read', '按素材 ID 读取有界文本或二进制元数据，验证归属和哈希；图片在本轮选中后走原生图像输入，不把路径当成已看过。', {
+    workflowId: text, id: text, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8192 } }),
   definition('workflow.propose', '生成编辑器已校验的业务流程/代码修改候选，在原聊天应用；代码模式无需注册工具。此调用结束本轮等待应用，不自动执行。', {
     workflowId: text, request: { type: 'string', maxLength: 12000 } }, 'proposal'),
 ]);
 
-const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder']);
+const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
@@ -73,6 +77,8 @@ const FEATURES = [
     note: '设置中的快捷键操作表由用户录制、禁用、恢复和保存，跨页面生效并检查冲突；工作流、总控和任务对话共用发送组合。助手可读当前偏好，但没有快捷键设置写工具，快捷键不增加执行或审核权限。' },
   { id: 'workflow-folders', status: 'available', tools: ['workflow.folder'], note: '每个工作流在工作区 workflows/<id> 保存定义、完整聊天、素材和运行资料；读取目录不触发本机打开或执行。' },
   { id: 'workflow-packages', status: 'ui-only', inspect: 'workflow.folder', tools: [], note: '用户导出完整文件夹为 .workflow ZIP，导入解包为独立副本；历史只读，不恢复执行、审核或认证。选择本机文件、下载和打开文件夹由界面完成。' },
+  { id: 'conversation-attachments', status: 'available', tools: ['workflow.attachments', 'workflow.attachment.read'],
+    note: '聊天支持用户粘贴、拖放与选择图片/文件，素材在所属工作流目录保存且可配置为输入。AI可读获准素材的路径及有界文本，本轮选中图片通过原生图像输入分析；不自动执行素材。' },
   { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '可读预设目录，创建与版本保存使用已有界面。' },
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '现有聊天可准备明确目标的学习候选；训练答案和验证样本不开放给全局诊断模型。' },
   { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },
@@ -115,6 +121,15 @@ export class ApplicationCapabilities {
     if (name === 'assistant.skills.read') return this.skills.read(args.name);
     if (name === 'runtime.inspect') return inspectCodeRuntime(this.app, args, { signal: context.signal });
     if (name === 'workbench.inspect') return this.inspectWorkbench(args);
+    if (name === 'workflow.attachments' || name === 'workflow.attachment.read') {
+      const workflowId = args.workflowId || context.workflowId || context.document?.id;
+      this.app.workflowLibrary.assertAvailable(workflowId);
+      if (name === 'workflow.attachments') return { workflowId, attachments: this.app.workflowAttachments.list(workflowId).slice(-100) };
+      await resolveAssistantAttachments(this.app, [{ id: args.id, workflowId }], {
+        role: context.permissionScope?.role, workflowId, document: context.document, permissionScope: context.permissionScope,
+      });
+      return this.app.workflowAttachments.read(workflowId, args.id, { offset: args.offset, limit: args.limit });
+    }
     if (name === 'workflow.folder') {
       const workflowId = args.workflowId || context.workflowId || context.document?.id;
       const record = this.app.workflowLibrary.get(workflowId);

@@ -8,6 +8,7 @@ import { projectConversationIssues, canRetryConversationTurn, parseConversationI
 import { redact } from '../hermes-adapter.mjs';
 import { reviewRevisionPolicy } from '../../shared/workflow/workflow-review-revision.mjs';
 import { bindArtifactRevisionProposal, assertArtifactRevisionCodeChange } from './workflow-review-proposals.mjs';
+import { ATTACHMENT_MESSAGE_TEXT, attachmentRefs, storedAttachmentRefs, resolveAssistantAttachments } from '../assistant-attachments.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
@@ -469,7 +470,9 @@ export class WorkflowConversations {
   }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
-    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId', 'replyToTurnId', 'revisionRequest'], '对话请求');
+    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId', 'replyToTurnId', 'revisionRequest', 'attachments'], '对话请求');
+    const refs = attachmentRefs(input.attachments);
+    if (refs.length && (input.text === undefined || typeof input.text === 'string' && !input.text.trim())) input = { ...input, text: ATTACHMENT_MESSAGE_TEXT };
     identifier(input.clientMessageId, '消息幂等 ID'); text(input.text, '消息');
     if (input.intent !== undefined && !['auto', 'workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
     const document = safeDocument(input.document, workflowId), requestDigest = digest(input);
@@ -481,6 +484,8 @@ export class WorkflowConversations {
     };
     const existing = existingResponse();
     if (existing) return existing;
+    const attachments = refs.length ? await resolveAssistantAttachments(this.app, refs, { role: 'workflow', workflowId, document }) : [];
+    if (refs.length) { const concurrent = existingResponse(); if (concurrent) return concurrent; }
     let revision;
     if (input.revisionRequest !== undefined) {
       const policy = this.app.applicationAssistant?.permissions;
@@ -496,7 +501,7 @@ export class WorkflowConversations {
     }
     const requestedContext = revision ? revision.context : contextInput(input.context);
     if (input.replyToTurnId !== undefined) { identifier(input.replyToTurnId, '回复事项 ID'); this.readTurn(workflowId, input.replyToTurnId); }
-    const resolution = !revision && this.resolveIssueMessage(workflowId, input, document, requestedContext, requestDigest);
+    const resolution = !revision && !refs.length && this.resolveIssueMessage(workflowId, input, document, requestedContext, requestDigest);
     if (resolution) return resolution;
     const automatic = !!revision || !input.intent || input.intent === 'auto' || input.intent === 'redo';
     let intent = automatic ? 'auto' : input.intent;
@@ -509,18 +514,19 @@ export class WorkflowConversations {
       if (!canRetryConversationTurn(parent)) fail('此事项不能作为重试对象；未确认的操作和人工审核不能自动重放。', 409);
       if (digest(parent.user.revisionRequest || null) !== digest(revision?.request || null)) fail('重试不能改变产物修改的审核版本。', 409);
       if (parent.user.text !== input.text || digest(retryContext(parent.user.context || {})) !== digest(retryContext(bound.context))) fail('重试必须保持原消息和回复对象，请将新的问题单独发送。', 409);
+      if (digest(storedAttachmentRefs(parent.user.attachments)) !== digest(refs)) fail('重试必须保留原消息的素材引用。', 409);
       if (input.intent && input.intent !== 'auto' && input.intent !== parent.user.intent) fail('重试不能改变原事项的处理方式。', 409);
       intent = parent.user.intent;
     }
     const createdAt = now(), turn = { id: 'turn-' + randomUUID(), workflowId, clientMessageId: input.clientMessageId,
       ...(input.retryOfTurnId !== undefined ? { retryOfTurnId: input.retryOfTurnId } : {}),
       ...(input.replyToTurnId !== undefined ? { replyToTurnId: input.replyToTurnId } : {}),
-      user: { text: input.text, context: bound.context, intent, ...(revision ? { revisionRequest: revision.request } : {}) },
+      user: { text: input.text, context: bound.context, intent, ...(attachments.length ? { attachments } : {}), ...(revision ? { revisionRequest: revision.request } : {}) },
       assistant: { text: '正在整理你的要求…' }, actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
       .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic, page: input.page ? sanitizeDiagnosticEvidence(input.page) : null }));
     this.update(turn);
-    const direct = !revision && directIntent(input.text);
+    const direct = !revision && !refs.length && directIntent(input.text);
     if (direct) {
       const candidates = direct.action.startsWith('review-') ? this.pending(workflowId) : [];
       const exact = !!bound.node && Number.isSafeInteger(input.context?.attempt) && input.context.attempt > 0
@@ -626,6 +632,7 @@ export class WorkflowConversations {
         ? `用户从产物审核卡明确请求生成节点修改候选。生产节点：${revision.target.id}（${revision.target.title}，${revision.target.type}）。按下列完整审核意见修改当前草稿中的生产能力，保持无关节点与人工审核。工具节点必须重新生成该节点的Python或JavaScript核心业务代码（executionMode=code），保留端口及输入输出合约；注册工具模式可转换为代码模式，禁止修改应用源码或内置工具实现。不能只改标题、超时、说明或原封不动重跑；无法实现时明确失败。只生成可审阅候选，不应用、不运行，不改旧运行快照。审核意见：\n${turn.user.text}`
         : turn.user.text;
       const result = await this.planner(this.app, { role: 'workflow', readOnly, decision, diagnosticTurnId: turn.id,
+        attachments: storedAttachmentRefs(turn.user.attachments),
         operationNamespace: turn.retryOfTurnId || turn.id, text: proposalText, document, context, history, page, checkpoint,
         signal: controller.signal, deadlineAt, startedAt: turn.createdAt, modelCallOffset: decision?.modelCalls || 0,
         ...(decision?.modelRoute ? { modelRoute: decision.modelRoute } : {}), ...hooks });

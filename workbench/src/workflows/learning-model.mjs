@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { redact } from '../hermes-adapter.mjs';
 
 const fail = message => new Error(message);
@@ -10,6 +13,62 @@ const reasoningMetadata = (session, key) => {
 };
 const scopeConfirmed = (policy, id) => policy?.memoryAllowed === true && policy.memoryWriteAllowed === false
   && policy.externalMemoryAllowed === false && policy.memoryMode === 'batch-snapshot' && policy.memoryScopeId === id;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024, MAX_IMAGE_TOTAL_BYTES = 16 * 1024 * 1024;
+const inside = (root, target) => { const path = relative(root, target); return path && path !== '..' && !path.startsWith('..' + sep) && !isAbsolute(path); };
+
+// The native bridge keeps its fixed diagnostic root. User materials cross that
+// gate only as a bounded, ephemeral copy from the caller's bound workflow root.
+async function stageUserImages(app, paths, root) {
+  let temporary;
+  try {
+    const rootInfo = await lstat(root);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw fail('附件工作流目录无效。');
+    const canonicalRoot = await realpath(root), workspace = await realpath(app.config.workspaceRoot);
+    if (canonicalRoot !== join(workspace, 'workflows', basename(root))) throw fail('附件工作流目录不能通过链接访问其他位置。');
+    const admitted = []; let total = 0;
+    for (const source of paths) {
+      const target = resolve(source);
+      if (!inside(root, target)) throw fail('附件图片不属于当前工作流目录。');
+      let part = root;
+      for (const name of relative(root, target).split(sep)) {
+        part = join(part, name);
+        if ((await lstat(part)).isSymbolicLink()) throw fail('附件图片不能通过链接读取。');
+      }
+      if (!inside(canonicalRoot, await realpath(target))) throw fail('附件图片越过当前工作流目录。');
+      const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+      try {
+        const before = await handle.stat();
+        if (!before.isFile() || before.size > MAX_IMAGE_BYTES) throw fail('附件图片必须是最多 8 MiB 的普通文件。');
+        const buffer = Buffer.alloc(before.size + 1); let length = 0;
+        while (length < buffer.length) {
+          const result = await handle.read(buffer, length, buffer.length - length, null);
+          if (!result.bytesRead) break; length += result.bytesRead;
+        }
+        const after = await handle.stat();
+        if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+          || !inside(canonicalRoot, await realpath(target))) throw fail('附件图片在读取期间发生变化，请重新上传。');
+        const data = buffer.subarray(0, length);
+        const format = data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? 'png'
+          : data.subarray(0, 3).equals(Buffer.from([255, 216, 255])) ? 'jpg'
+            : data.subarray(0, 4).toString() === 'RIFF' && data.subarray(8, 12).toString() === 'WEBP' ? 'webp'
+              : ['GIF87a', 'GIF89a'].includes(data.subarray(0, 6).toString()) ? 'gif' : null;
+        if (!format) throw fail('附件图片仅支持 PNG、JPEG、WebP 或 GIF；其他文件请通过资料读取工具查看。');
+        total += length; if (total > MAX_IMAGE_TOTAL_BYTES) throw fail('附件图片合计不能超过 16 MiB。');
+        admitted.push({ data, format });
+      } finally { await handle.close(); }
+    }
+    const diagnosticRoot = join(app.config.dataDir, 'diagnostics'); await mkdir(diagnosticRoot, { recursive: true });
+    temporary = await mkdtemp(join(diagnosticRoot, 'assistant-materials-'));
+    const images = [];
+    for (const [index, image] of admitted.entries()) {
+      const path = join(temporary, index + '.' + image.format); await writeFile(path, image.data, { flag: 'wx', mode: 0o600 }); images.push(path);
+    }
+    return { images, cleanup: () => rm(temporary, { recursive: true, force: true }) };
+  } catch (error) {
+    if (temporary) await rm(temporary, { recursive: true, force: true });
+    throw fail(error.code ? '附件图片不存在、不可访问或已发生变化。' : error.message);
+  }
+}
 
 // A model call is a normal authenticated Hermes session, but with no callable
 // tools or memory writes. Existing builtin memory context remains readable.
@@ -95,10 +154,19 @@ export class LearningModel {
     return { id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false, snapshot: { ...snapshot } };
   }
   async generate(prompt, { signal, onSession, onProgress, memoryScopeId, modelRoute, deadlineAt, firstResponseTimeoutMs,
-    outputIdleTimeoutMs, reasoningEffort, images = [], title = '学习 · 评价 / 调整 Skill' } = {}) {
+    outputIdleTimeoutMs, reasoningEffort, images = [], userImages = [], attachmentRoot, title = '学习 · 评价 / 调整 Skill' } = {}) {
     if (this.purpose === 'assistant' && memoryScopeId !== undefined) throw fail('应用助手不能访问学习记忆。');
     if (reasoningEffort !== undefined && (this.purpose !== 'assistant' || !['low', 'medium'].includes(reasoningEffort))) throw fail('仅应用助手控制调用可指定 low 或 medium 推理强度。');
-    if (!Array.isArray(images) || images.length > 4 || images.some(path => typeof path !== 'string') || images.length && this.purpose !== 'assistant') throw fail('模型图像输入无效。');
+    if (![images, userImages].every(Array.isArray) || images.length + userImages.length > 4
+      || images.some(path => typeof path !== 'string') || userImages.some(path => typeof path !== 'string' || !isAbsolute(path) || path.includes('\0'))
+      || (images.length || userImages.length || attachmentRoot !== undefined) && this.purpose !== 'assistant') throw fail('模型图像输入无效。');
+    images = [...images]; userImages = [...userImages];
+    if (userImages.length) {
+      if (typeof attachmentRoot !== 'string' || !isAbsolute(attachmentRoot) || attachmentRoot.includes('\0')
+        || typeof this.app.config?.dataDir !== 'string' || typeof this.app.config?.workspaceRoot !== 'string' || typeof this.app.workflowFolders?.directory !== 'function'
+        || resolve(attachmentRoot) !== resolve(this.app.workflowFolders.directory(basename(resolve(attachmentRoot))))) throw fail('附件图片需要绑定当前工作流目录。');
+      attachmentRoot = resolve(attachmentRoot);
+    }
     if (this.closed || signal?.aborted) throw fail(`${this.subject}调用已停止。`);
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw fail(`${this.subject}指令超过长度限制。`);
     if (typeof title !== 'string' || !title.trim() || title.length > 120) throw fail('模型会话名称无效。');
@@ -159,11 +227,18 @@ export class LearningModel {
         throw fail('Hermes 未确认学习评价会话的无工具策略与记忆只读策略。');
       }
       if (memoryScopeId && !scopeConfirmed(prepared.policy, memoryScopeId)) throw fail('Hermes 未确认本次调用使用同批次固定记忆。');
-      if (this.purpose === 'assistant' && images.length) {
-        this.progress(state, 'prepare-images', '提交诊断图像');
-        const attached = await this.app.adapter.request('workbench.assistant.images', { session_id: session.runtimeSessionId, images });
-        if (attached?.attached !== images.length || attached.mode !== 'native-content') throw fail('Hermes 未确认接收诊断关键帧，未提交分析。');
-        if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
+      if (this.purpose === 'assistant' && (images.length || userImages.length)) {
+        this.progress(state, 'prepare-images', userImages.length ? '提交附件与参考图像' : '提交诊断图像');
+        let staged;
+        try {
+          staged = userImages.length ? await stageUserImages(this.app, userImages, attachmentRoot) : null;
+          if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
+          const batch = [...(staged?.images || []), ...images];
+          const attached = await this.app.adapter.request('workbench.assistant.images', { session_id: session.runtimeSessionId, images: batch });
+          if (attached?.attached !== batch.length || attached.mode !== 'native-content') throw fail(userImages.length
+            ? 'Hermes 未确认接收附件图像，未提交分析。' : 'Hermes 未确认接收诊断关键帧，未提交分析。');
+          if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
+        } finally { await staged?.cleanup(); }
       }
       state.submitting = true;
       state.submittedAtMs = Date.now();

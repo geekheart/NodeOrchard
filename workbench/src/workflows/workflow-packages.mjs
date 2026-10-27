@@ -4,6 +4,8 @@ import { existsSync, renameSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, sep } from 'node:path';
 import { encodeZip, decodeZip, WORKFLOW_ZIP_LIMITS } from './workflow-zip.mjs';
 import { prepareImportedWorkflowRecords } from './workflow-package-records.mjs';
+import { normalizeAttachmentRegistry, attachmentEntries, WORKFLOW_ATTACHMENT_INDEX, WORKFLOW_ATTACHMENT_LIMITS } from './workflow-attachments.mjs';
+import { imageDimensions } from './workflow-files.mjs';
 
 const FORMAT = 'NodeOrchard.workflow-package', MANIFEST = 'workflow-package.json';
 const digest = data => createHash('sha256').update(data).digest('hex');
@@ -13,6 +15,25 @@ const readJson = (entries, name, fallback) => {
   const entry = entries.find(row => row.name === name);
   if (!entry) { if (fallback !== undefined) return fallback; fail('工作流包缺少 ' + name + '。'); }
   try { return JSON.parse(entry.data.toString('utf8')); } catch { fail('工作流包中的 JSON 文件无效：' + name); }
+};
+const attachmentSnapshot = (entries, workflowId, conversation) => {
+  const file = entries.find(entry => entry.name === WORKFLOW_ATTACHMENT_INDEX);
+  if (file && file.data.length > WORKFLOW_ATTACHMENT_LIMITS.indexBytes) fail('工作流包素材索引过大。', 413);
+  const source = file ? readJson(entries, WORKFLOW_ATTACHMENT_INDEX) : null;
+  const registry = source ? normalizeAttachmentRegistry(source, workflowId) : { version: 1, workflowId, entries: [], operations: [] };
+  const files = new Map(entries.filter(entry => !entry.name.endsWith('/')).map(entry => [entry.name, entry]));
+  for (const attachment of registry.entries) {
+    const material = files.get(attachment.relativePath);
+    if (!material || material.data.length !== attachment.size || digest(material.data) !== attachment.sha256) fail('工作流包中的已登记素材缺失或哈希不一致，无法完整打包。', 409);
+    if (/^image\/(?:png|jpeg|gif|webp)$/.test(attachment.mimeType)) {
+      const image = imageDimensions(material.data);
+      if (!image?.width || !image.height || 'image/' + image.format !== attachment.mimeType) fail('工作流包中的图片素材内容与登记格式不一致。', 409);
+    }
+  }
+  for (const turn of (conversation?.conversation || conversation)?.turns || []) {
+    if (turn.user?.attachments !== undefined) attachmentEntries(registry, turn.user.attachments, workflowId);
+  }
+  return source ? registry : null;
 };
 
 // The .workflow extension wraps a normal ZIP containing the workflow folder.
@@ -55,6 +76,7 @@ export class WorkflowPackages {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== current.revision) fail('工作流版本已变化，请保存最新草稿后重新导出。', 409);
     const folder = await this.app.workflowFolders.sync(workflowId, { includeFiles: true });
     const entries = await this.entries(folder.directory);
+    attachmentSnapshot(entries, workflowId, readJson(entries, 'conversation.json'));
     if (this.app.workflowLibrary.get(workflowId).revision !== expectedRevision) fail('工作流在归集资料时已变化，请重新导出。', 409);
     const manifest = { format: FORMAT, version: 1, workflowId, revision: expectedRevision, exportedAt: new Date().toISOString(),
       files: entries.filter(entry => !entry.name.endsWith('/')).map(entry => ({ name: entry.name, size: entry.data.length, sha256: digest(entry.data) })),
@@ -87,8 +109,9 @@ export class WorkflowPackages {
       const file = files.get(entry.path);
       if (!file || digest(file.data) !== entry.sha256 || file.data.length !== entry.size) fail('工作流包的素材映射缺失或校验失败。');
     }
+    const attachments = attachmentSnapshot(entries, manifest.workflowId, conversation);
     return { entries, manifest, workflow, conversation, files: mapping,
-      runs: readJson(entries, 'history/runs.json', []), fileRuns: readJson(entries, 'history/file-runs.json', []), artifacts: readJson(entries, 'history/artifacts.json', []) };
+      runs: readJson(entries, 'history/runs.json', []), fileRuns: readJson(entries, 'history/file-runs.json', []), artifacts: readJson(entries, 'history/artifacts.json', []), ...(attachments ? { attachments } : {}) };
   }
   import(data, { filename, operationId } = {}) {
     if (typeof filename !== 'string' || extname(filename).toLowerCase() !== '.workflow' || basename(filename) !== filename || /[\\\0\r\n]/.test(filename)) fail('请选择 .workflow 工作流包。');
@@ -105,7 +128,7 @@ export class WorkflowPackages {
     const source = this.validate(data), id = 'workflow-' + randomUUID(), destination = this.app.workflowFolders.directory(id);
     const prepared = prepareImportedWorkflowRecords({ sourceWorkflowId: source.manifest.workflowId, targetWorkflowId: id,
       directory: destination, document: source.workflow.document, conversation: source.conversation,
-      runs: source.runs, fileRuns: source.fileRuns, artifacts: source.artifacts, files: source.files });
+      runs: source.runs, fileRuns: source.fileRuns, artifacts: source.artifacts, files: source.files, ...(source.attachments ? { attachments: source.attachments } : {}) });
     const root = dirname(destination); await mkdir(root, { recursive: true });
     const temporary = await mkdtemp(join(root, '.import-')); let registered = false, moved = false;
     try {
@@ -115,7 +138,7 @@ export class WorkflowPackages {
         await mkdir(dirname(target), { recursive: true }); await writeFile(target, entry.data, { flag: 'wx' });
       }
       const history = join(temporary, 'history', 'import-' + randomUUID()); await mkdir(history, { recursive: true });
-      for (const name of ['workflow.json', 'conversation.json', 'files.json', MANIFEST, 'history/runs.json', 'history/file-runs.json', 'history/artifacts.json', 'history/input-sync.json', 'history/migration-errors.json']) {
+      for (const name of ['workflow.json', 'conversation.json', 'files.json', MANIFEST, 'history/runs.json', 'history/file-runs.json', 'history/artifacts.json', 'history/input-sync.json', 'history/migration-errors.json', WORKFLOW_ATTACHMENT_INDEX]) {
         const entry = source.entries.find(item => item.name === name);
         if (entry) await writeFile(join(history, name.replaceAll('/', '-')), entry.data);
       }
@@ -124,6 +147,7 @@ export class WorkflowPackages {
       await writeFile(join(temporary, 'workflow.json'), json({ format: 'NodeOrchard.workflow-folder', version: 1, ...record }));
       await writeFile(join(temporary, 'conversation.json'), json({ version: 1, workflowId: id, revision: prepared.turns.length,
         turns: prepared.turns.map(row => ({ ...row.turn, privateValue: row.privateValue })) }));
+      if (prepared.attachments) await writeFile(join(temporary, WORKFLOW_ATTACHMENT_INDEX), json(prepared.attachments));
       await writeFile(join(temporary, 'files.json'), json({ version: 1, workflowId: id,
         entries: source.files.entries.map(entry => ({ ...entry, source: join(destination, entry.path) })),
         directories: source.files.directories.map(entry => ({ ...entry, source: join(destination, entry.path) })) }));

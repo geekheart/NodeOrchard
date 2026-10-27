@@ -12,7 +12,7 @@ export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
   supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true }),
 });
 const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
-const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
+const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
 const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.probe']);
@@ -96,7 +96,7 @@ export class ApplicationAssistantPermissions {
     if (name === 'app.logs') return scope.role === 'supervisor' && p.appLogs;
     if (MANAGE.has(name)) return scope.role === 'supervisor' && p.manageWorkflows;
     if (name === 'workflow.propose') return p.workflowRead && p.workflowEdit;
-    if (name === 'workflow.preflight' || name === 'artifact.inspect') return p.workflowRead && p.workspaceRead;
+    if (['workflow.preflight', 'artifact.inspect', 'workflow.attachments', 'workflow.attachment.read'].includes(name)) return p.workflowRead && p.workspaceRead;
     if (name === 'browser.capture') return p.workflowRead && p.capture;
     return READ.has(name) && p.workflowRead;
   }
@@ -214,12 +214,13 @@ export class ApplicationAssistantPermissions {
       if (context.workflowId && context.workflowId !== scope.workflowId || context.document && context.document.id !== scope.workflowId) fail('调用上下文越过当前工作流。');
       if (args.workflowId) this.workflow(args.workflowId, scope);
       context.workflowId = scope.workflowId;
-      if (['workflow.inspect', 'workflow.folder', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
+      if (['workflow.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
       if (name === 'assistant.diagnose' && scope.workflowId && !args.conversationId) args.workflowId = scope.workflowId;
     }
     const runId = args.runId || (!['session.history', 'tools.catalog'].includes(name) ? context.runId : null);
     if (runId) this.run(runId, scope);
     if (args.sessionId) this.session(args.sessionId, scope);
+    if (['workflow.attachments', 'workflow.attachment.read'].includes(name)) this.workflow(args.workflowId || context.workflowId, scope);
     if (name === 'artifact.inspect') {
       const artifact = this.app.workflowFiles.getArtifact(args.artifactId);
       if (artifact.runId !== args.runId || artifact.nodeId !== args.nodeId) fail('产物不属于指定运行节点。');

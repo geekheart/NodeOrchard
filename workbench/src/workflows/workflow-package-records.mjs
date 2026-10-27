@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { validateDocument } from '../../shared/workflow/workflow-model.mjs';
 import { workflowInputFields } from '../../shared/workflow/workflow-inputs.mjs';
+import { normalizeAttachmentRegistry, attachmentEntries, attachmentMetadata } from './workflow-attachments.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const MAX_RECORD_BYTES = 512 * 1024 * 1024;
@@ -103,7 +104,7 @@ function cleanDocument(value) {
 export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
   plain(input);
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('工作流包转换请求格式无效。');
-  if (Object.keys(input).some(key => !['sourceWorkflowId', 'targetWorkflowId', 'directory', 'document', 'conversation', 'runs', 'fileRuns', 'artifacts', 'files'].includes(key))) fail('工作流包转换请求包含未知字段。');
+  if (Object.keys(input).some(key => !['sourceWorkflowId', 'targetWorkflowId', 'directory', 'document', 'conversation', 'runs', 'fileRuns', 'artifacts', 'files', 'attachments'].includes(key))) fail('工作流包转换请求包含未知字段。');
   const { sourceWorkflowId, targetWorkflowId, document: sourceDocument, directory: requestedDirectory,
     conversation, runs: sourceRuns = [], fileRuns: sourceFileRuns = [], artifacts: sourceArtifacts = [], files = { entries: [], directories: [] } } = input;
   identifier(sourceWorkflowId); identifier(targetWorkflowId);
@@ -112,6 +113,9 @@ export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
   if (document.id !== sourceWorkflowId) fail('工作流包主流程身份不一致。');
   if (![sourceRuns, sourceFileRuns, sourceArtifacts].every(Array.isArray) || sourceRuns.length > 1000 || sourceFileRuns.length > 1000 || sourceArtifacts.length > 10000) fail('工作流包运行记录格式或数量无效。', 413);
   const mapPath = mappingIndex(files, directory), workflowIds = new Map([[sourceWorkflowId, targetWorkflowId]]), generated = new Set([targetWorkflowId]);
+  const sourceAttachments = input.attachments ? normalizeAttachmentRegistry(input.attachments, sourceWorkflowId) : { version: 1, workflowId: sourceWorkflowId, entries: [], operations: [] };
+  const attachments = input.attachments ? { ...normalizeAttachmentRegistry(sourceAttachments, targetWorkflowId), operations: [] } : null;
+  for (const entry of attachments?.entries || []) { if (generated.has(entry.id)) fail('导入的素材 ID 必须唯一。'); generated.add(entry.id); }
   const sourceIds = new Set([sourceWorkflowId]);
   const reserveIds = value => {
     if (!value || typeof value !== 'object') return;
@@ -122,7 +126,7 @@ export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
   };
   // Reserve every original identity before generating any replacement, including
   // later chat turns and nested attempts. A caller-supplied factory must not alias.
-  reserveIds({ document: sourceDocument, conversation, runs: sourceRuns, fileRuns: sourceFileRuns, artifacts: sourceArtifacts });
+  reserveIds({ document: sourceDocument, conversation, runs: sourceRuns, fileRuns: sourceFileRuns, artifacts: sourceArtifacts, attachments: sourceAttachments });
   if (sourceIds.has(targetWorkflowId)) fail('导入的工作流 ID 不能复用源编号。');
   const generate = prefix => {
     const value = idFactory ? idFactory(prefix) : prefix === 'artifact' ? randomUUID() : `${prefix}-${randomUUID()}`;
@@ -331,11 +335,16 @@ export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
       || typeof source.assistant?.text !== 'string' || turnIds.has(identifier(source.id)) || clientIds.has(identifier(source.clientMessageId))) fail('工作流包聊天轮次格式或归属无效。');
     turnIds.add(source.id); clientIds.add(source.clientMessageId); sourceIds.add(source.id); sourceIds.add(source.clientMessageId);
     const turn = { id: generate('turn'), workflowId: targetWorkflowId, clientMessageId: generate('message'), status: 'complete', actions: [],
-      user: { text: source.user.text, ...(typeof source.user.intent === 'string' ? { intent: source.user.intent } : {}), context: {} },
+      user: { text: source.user.text, ...(typeof source.user.intent === 'string' ? { intent: source.user.intent } : {}), context: {},
+        ...(source.user.attachments !== undefined ? { attachments: attachmentEntries(sourceAttachments, source.user.attachments, sourceWorkflowId).map(entry => {
+          const target = attachments?.entries.find(item => item.aliases.includes(entry.id));
+          if (!target) fail('聊天素材引用没有对应的导入登记。');
+          return attachmentMetadata(targetWorkflowId, target, directory);
+        }) } : {}) },
       assistant: { text: source.assistant.text }, importedArchive: true, sourceTurnId: source.id, originalStatus: source.status || 'complete',
       ...(source.createdAt ? { createdAt: source.createdAt } : {}), ...(source.updatedAt ? { updatedAt: source.updatedAt } : {}) };
     return { turn, privateValue: { document: importedDocument, automatic: true, imported: true,
-      requestDigest: digest({ sourceTurnId: source.id, targetWorkflowId, turnId: turn.id, text: turn.user.text }) } };
+      requestDigest: digest({ sourceTurnId: source.id, targetWorkflowId, turnId: turn.id, text: turn.user.text, attachments: turn.user.attachments || [] }) } };
   });
-  return { document: importedDocument, turns, runs: importedRuns, fileRuns, artifacts: [...convertedArtifacts.values()], warnings: [...warnings] };
+  return { document: importedDocument, turns, runs: importedRuns, fileRuns, artifacts: [...convertedArtifacts.values()], warnings: [...warnings], ...(attachments ? { attachments } : {}) };
 }

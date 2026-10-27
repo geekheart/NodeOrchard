@@ -4,6 +4,7 @@ import { conversationTurnGroups, canRetryConversationTurn, parseConversationIssu
 import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
 import { bindChatSendShortcut, updateChatShortcutHints } from './keyboard-shortcuts.js';
+import { ConversationAttachments } from './conversation-attachments.js';
 
 export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -76,10 +77,11 @@ export const canDismissConversationTurn = turn => ['proposed', 'error', 'interru
 export const isConversationRunCommand = value => /^(?:(?:请|帮我)\s*)?(?:运行|开始运行|立即运行|直接运行|运行一次|执行|开始执行|直接执行|运行当前流程|运行流程|执行当前流程)[。！!\s]*$/.test(value.trim());
 
 export class WorkflowConversationUI {
-  constructor(editor, { api, getBackend = () => null, getPageDiagnostics = () => ({}), getShortcuts = () => undefined }) {
+  constructor(editor, { api, getBackend = () => null, getPageDiagnostics = () => ({}), getShortcuts = () => undefined, attachmentsClient, attachmentScope = 'workflow' }) {
     this.getPageDiagnostics = getPageDiagnostics;
     this.getShortcuts = getShortcuts;
     this.editor = editor; this.api = api; this.getBackend = getBackend; this.states = new Map(); this.runtime = null; this.workflowId = null; this.attachment = null; this.destroyed = false; this.applied = new Map(); this.actionPending = new Set(); this.documentGeneration = 0; this.detachedWorkflows = new Set();
+    this.fileAttachments = new ConversationAttachments(this, { scope: attachmentScope, client: attachmentsClient });
     this.mount(); this.syncWorkflow();
   }
   currentDocument() { return this.editor.documentLoaded === false ? null : this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
@@ -122,12 +124,13 @@ export class WorkflowConversationUI {
       // Keep this retry outside the unrelated composer, including its context.
       if (state.revisionHandoff?.retryOfTurnId !== turn.id) {
         state.revisionHandoff = { text: turn.user.text, intent: 'auto', context: clone(turn.user.context || {}),
-          revisionRequest: clone(turn.user.revisionRequest), retryOfTurnId: turn.id, clientMessageId: crypto.randomUUID() };
+          revisionRequest: clone(turn.user.revisionRequest), ...(turn.user.attachments?.length ? { attachments: this.fileAttachments?.referencesFrom(turn.user.attachments) || [] } : {}), retryOfTurnId: turn.id, clientMessageId: crypto.randomUUID() };
         state.revisionHandoffStatus = '原候选请求、完整修改意见和审核版本已保留，正在重试。';
       }
       this.toggle(true); this.render(); return this.sendArtifactRevision();
     }
     const state = this.state(); this.clearRetryTarget(state); state.draft = turn.user?.text || ''; state.intent = 'auto';
+    this.fileAttachments?.restore(turn.user?.attachments || [], state);
     this.focusIssue(turn);
     if (canRetryConversationTurn(turn)) { state.retryOfTurnId = turn.id; state.retryTarget = { text: state.draft.trim(), context: contextKey(this.getContext()) }; }
     this.render(); this.input.focus();
@@ -158,8 +161,9 @@ export class WorkflowConversationUI {
     this.input = element('textarea'); this.input.rows = 3; this.input.maxLength = 8000; this.input.placeholder = '输入消息'; this.input.setAttribute('aria-label', '给工作流 AI 的消息');
     this.input.addEventListener('input', () => { const state = this.state(); state.draft = this.input.value; state.messageEdit++; this.retryTargetFor(state.draft.trim(), this.getContext(), state); this.updateSendButton(); });
     bindChatSendShortcut(this.input, { getShortcuts: () => this.getShortcuts(), canSend: () => !this.sendButton.disabled, send: () => void this.send() });
-    const actions = element('div', 'wf-conversation-composer-actions'); this.runButton = button('运行当前流程', () => void this.startRun(), 'wf-button'); this.sendButton = element('button', 'wf-button primary', '发送'); this.sendButton.type = 'submit'; this.sendButton.setAttribute('aria-label', '发送工作流消息'); actions.append(this.runButton, this.sendButton);
-    composer.addEventListener('submit', event => { event.preventDefault(); void this.send(); }); composer.addEventListener('keydown', event => event.stopPropagation()); composer.append(this.revisionHandoffHost, this.contextHost, options, this.input, actions);
+    const actions = element('div', 'wf-conversation-composer-actions'), secondary = element('div', 'wf-conversation-composer-secondary'); this.runButton = button('运行当前流程', () => void this.startRun(), 'wf-button'); this.sendButton = element('button', 'wf-button primary', '发送'); this.sendButton.type = 'submit'; this.sendButton.setAttribute('aria-label', '发送工作流消息');
+    this.fileAttachments.mount({ input: this.input, dropZone: composer }); secondary.append(this.fileAttachments.control, this.runButton); actions.append(secondary, this.sendButton);
+    composer.addEventListener('submit', event => { event.preventDefault(); void this.send(); }); composer.addEventListener('keydown', event => event.stopPropagation()); composer.append(this.revisionHandoffHost, this.contextHost, options, this.input, this.fileAttachments.host, actions);
     panel.append(this.resizeHandle, heading, this.notice, this.pendingHost, this.messages, this.resultHost, composer); this.panel = panel; this.editor.root.querySelector('.wf-body').append(panel);
     this.editor.root.classList.add('wf-chat-enabled');
     this.openButton = button('打开工作流对话', () => this.toggle(true), 'wf-button wf-conversation-open');
@@ -355,7 +359,12 @@ export class WorkflowConversationUI {
     this.input.placeholder = '输入消息';
   }
   updateShortcutHints() { updateChatShortcutHints(this.input, this.sendButton, this.getShortcuts?.()); }
-  updateSendButton() { const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status)); this.sendButton.disabled = !state.loaded || state.sending || !this.input.value.trim() || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; this.updateShortcutHints(); }
+  updateSendButton() {
+    const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status));
+    const empty = !this.input.value.trim() && !this.fileAttachments?.references(state).length;
+    this.sendButton.disabled = !state.loaded || state.sending || empty || Boolean(this.fileAttachments?.blocked(state)) || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested);
+    this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; this.updateShortcutHints();
+  }
   renderNotice() {
     const state = this.state(); this.notice.replaceChildren(); this.notice.hidden = !(state.error || state.loading && !state.loaded || state.retry);
     if (state.error) this.notice.append(element('p', 'wf-conversation-error', state.error)); else if (state.loading && !state.loaded) this.notice.append(element('p', '', '正在读取已保存的工作流对话…'));
@@ -376,7 +385,7 @@ export class WorkflowConversationUI {
       }
       this.messages.append(this.turnView(groups.latest, true));
     }
-    this.renderResult(); this.renderContext(); if (this.input.value !== state.draft) this.input.value = state.draft; this.intentSelect.value = state.intent; this.renderComposerHelp(); this.updateSendButton();
+    this.renderResult(); this.renderContext(); if (this.input.value !== state.draft) this.input.value = state.draft; this.intentSelect.value = state.intent; this.renderComposerHelp(); this.fileAttachments?.render(); this.updateSendButton();
     this.runButton.disabled = this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested) || !this.currentDocument()?.nodes?.length || Boolean(this.runtime?.starting);
     this.refreshButton.disabled = state.loading;
     if (followLatest) this.messages.scrollTop = this.messages.scrollHeight;
@@ -405,6 +414,7 @@ export class WorkflowConversationUI {
   turnView(turn, latest = false) {
     const section = element('section', 'wf-conversation-turn' + (latest ? ' is-latest' : '')); section.dataset.turnId = turn.id;
     const user = element('article', 'wf-conversation-message is-user'); user.append(element('div', 'wf-conversation-speaker', '你'), element('p', 'wf-conversation-prose', turn.user?.text || ''));
+    if (turn.user?.attachments?.length && this.fileAttachments) user.append(this.fileAttachments.messageView(turn.user.attachments));
     const context = turn.user?.context || {}; const scope = element('p', 'wf-conversation-message-scope', this.describeContext(context).join(' / ')); user.append(scope); section.append(user);
     const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', turnStatus(turn))); assistant.append(meta);
     const text = turn.assistant?.text || turn.error?.message || (typeof turn.error === 'string' ? turn.error : '') || (['thinking', 'queued'].includes(turn.status) ? '正在生成回复…' : '已记录'); assistant.append(element('p', 'wf-conversation-prose', text));
@@ -577,9 +587,11 @@ export class WorkflowConversationUI {
   async send(retry) {
     const id = this.workflowId; if (!id || !this.currentDocument()) return;
     const state = this.state(id), generation = this.documentGeneration; if (state.sending || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return;
-    const text = (retry?.text ?? state.draft).trim(); if (!text || !state.loaded) return;
+    if (!retry && this.fileAttachments?.blocked(state)) { state.error = '附件尚未保存完成，请先选择目标工作流或重试附件。'; this.renderNotice(); return; }
+    const attachments = retry ? retry.attachments || [] : this.fileAttachments?.references(state) || [], rawText = (retry?.text ?? state.draft).trim();
+    const text = rawText || (attachments.length ? '请查看这些素材。' : ''); if (!text || !state.loaded) return;
     if (state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) { state.error = 'AI 正在回复上一条消息，请完成后继续。'; this.renderNotice(); return; }
-    if (!retry && isConversationRunCommand(text)) {
+    if (!retry && !attachments.length && isConversationRunCommand(text)) {
       state.sending = true; const messageEdit = state.messageEdit; this.render();
       try { if (await this.startRun() && state.messageEdit === messageEdit && state.draft.trim() === text) state.draft = ''; }
       catch (error) { state.error = `运行未完成：${error.message}`; }
@@ -587,13 +599,17 @@ export class WorkflowConversationUI {
       return;
     }
     const context = retry?.context || clone(this.getContext()), retryOfTurnId = retry?.retryOfTurnId || (!retry ? this.retryTargetFor(text, context, state) : undefined),
-      replyToTurnId = retry?.replyToTurnId || (!retry ? this.issueReplyTargetFor(text, context, state) : undefined), focusedIssueId = state.issueReplyTarget?.turnId || null;
-    const request = retry || { text, intent: state.intent, context, page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID(), ...(retryOfTurnId ? { retryOfTurnId } : {}), ...(replyToTurnId ? { replyToTurnId } : {}) }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
+      replyToTurnId = retry?.replyToTurnId || (!retry && !attachments.length ? this.issueReplyTargetFor(text, context, state) : undefined), focusedIssueId = state.issueReplyTarget?.turnId || null;
+    const request = retry || { text, intent: state.intent, context, page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID(), ...(attachments.length ? { attachments } : {}), ...(retryOfTurnId ? { retryOfTurnId } : {}), ...(replyToTurnId ? { replyToTurnId } : {}) }, messageEdit = state.messageEdit;
+    if (!request.document) request.document = clone(this.currentDocument());
+    if (!request.revisionRequest) this.fileAttachments?.trackRequest(state, request);
+    state.sending = true; state.error = ''; state.retry = null; this.render();
     try {
       const document = request.document; if (document.id !== id || this.currentDocument().id !== id) throw new Error('工作流已切换，请在对应工作流中发送。');
       const snapshot = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { ...request, document } });
       if (generation !== this.documentGeneration || this.detachedWorkflows?.has(id)) return;
       const sameIssue = (state.issueReplyTarget?.turnId || null) === focusedIssueId; this.accept(snapshot, id);
+      this.fileAttachments?.consumeRequest(state, request);
       if (request.revisionRequest && state.revisionHandoff?.clientMessageId === request.clientMessageId) { state.revisionHandoff = null; state.revisionHandoffStatus = ''; }
       if (!request.revisionRequest && state.messageEdit === messageEdit && state.draft.trim() === text && (state.retryOfTurnId || null) === (request.retryOfTurnId || null) && sameIssue) { state.draft = ''; this.clearRetryTarget(state); }
       if (request.replyToTurnId && sameIssue && !canDismissConversationTurn(state.conversation.turns.find(turn => turn.id === request.replyToTurnId))) this.clearIssueTarget(state);
@@ -649,5 +665,5 @@ export class WorkflowConversationUI {
     catch (error) { this.state(id).error = `结束事项未确认：${error.message}。对话记录仍保留。`; }
     finally { this.actionPending.delete(key); if (this.workflowId === id) this.render(); }
   }
-  destroy() { this.destroyed = true; clearTimeout(this.pollTimer); clearTimeout(this.pendingRefreshTimer); clearTimeout(this.progressTimer); this.finishResize?.(); this.panel?.remove(); this.openButton?.remove(); this.editor.root.classList.remove('wf-chat-enabled', 'wf-chat-open'); }
+  destroy() { this.destroyed = true; clearTimeout(this.pollTimer); clearTimeout(this.pendingRefreshTimer); clearTimeout(this.progressTimer); this.finishResize?.(); this.fileAttachments?.destroy(); this.panel?.remove(); this.openButton?.remove(); this.editor.root.classList.remove('wf-chat-enabled', 'wf-chat-open'); }
 }

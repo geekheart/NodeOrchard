@@ -98,6 +98,22 @@
 .wf-conversation-revision-handoff > pre { max-height: 150px; margin-top: 7px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
 .wf-conversation-composer-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 9px; }
 .wf-conversation-composer-actions > .primary { min-width: 66px; }
+.wf-conversation-composer-secondary { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.wf-conversation .wf-conversation-attach { display: grid; place-items: center; width: 31px; padding: 5px; }
+.wf-conversation-attach svg { width: 17px; height: 17px; }
+.wf-conversation-composer.is-file-dragging { outline: 2px solid var(--accent); outline-offset: -3px; background: var(--surface); }
+.wf-conversation-attachments { display: grid; gap: 6px; margin-top: 8px; min-width: 0; max-height: 240px; overflow-y: auto; }
+.wf-conversation-attachments[hidden] { display: none; }
+.wf-conversation-composer .wf-conversation-attachment-target { max-width: 100%; width: 100%; }
+.wf-conversation-attachment { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; min-width: 0; padding: 8px 27px 8px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+.wf-conversation-attachment img { display: block; width: 100%; max-height: 100px; object-fit: contain; border-radius: 3px; background: var(--bg); }
+.wf-conversation-attachment-name { min-width: 0; color: var(--secondary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+a.wf-conversation-attachment-name:hover { color: var(--accent); }
+.wf-conversation-attachment-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.wf-conversation-attachment-remove { position: absolute; right: 5px; top: 5px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--muted); }
+.wf-conversation-attachment-remove:hover { color: var(--text); background: var(--hover); }
+.wf-conversation-attachment .wf-conversation-message-scope { margin: 0; }
+.wf-conversation-attachments.is-message { max-height: none; }
 .wf-conversation-open { white-space: nowrap; }
 @media (min-width: 1700px) { .wf-editor.wf-chat-enabled { --wf-chat-width: 400px; } }
 @media (max-width: 1100px) { .wf-editor.wf-chat-enabled { --wf-chat-width: 325px; --wf-chat-library-width: 210px; } .wf-editor.wf-chat-enabled.library-closed { --wf-chat-library-width: 0px; } .wf-editor.wf-chat-enabled.wf-chat-open .wf-properties { right: 0; max-width: 100%; } .wf-conversation-heading { padding: 10px 12px; } .wf-conversation-heading p { font-size: 9px; } }

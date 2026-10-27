@@ -796,9 +796,10 @@ class WorkflowGateway:
             os.close(directory_fd)
         mime = ("image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else
                 "image/jpeg" if data.startswith(b"\xff\xd8\xff") else
-                "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else None)
+                "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else
+                "image/gif" if data.startswith((b"GIF87a", b"GIF89a")) else None)
         if mime is None:
-            raise WorkflowPolicyError("Diagnostic image must contain PNG, JPEG or WebP image data.")
+            raise WorkflowPolicyError("Diagnostic image must contain PNG, JPEG, WebP or GIF image data.")
         return {"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")}}, len(data)
 
     def assistant_images(self, params, rid=None):
