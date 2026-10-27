@@ -7,8 +7,9 @@ const ACTIVE_RUN = new Set(['preparing', 'running', 'waiting', 'queued']);
 const ACTIVE_LEARNING = new Set(['running', 'waiting']);
 const BUSY_RUN = new Set([...ACTIVE_RUN, 'waiting_review']);
 const LIFECYCLES = new Set(['active', 'archived', 'trashed']);
-const TRANSITIONS = Object.freeze({ archive: ['active', 'archived'], unarchive: ['archived', 'active'],
-  trash: ['archived', 'trashed'], restore: ['trashed', 'archived'], purge: ['trashed', 'deleted'] });
+// Old action names remain aliases with the same revision and state barriers.
+const TRANSITIONS = Object.freeze({ archive: ['active', 'trashed'], unarchive: ['trashed', 'active'],
+  trash: ['active', 'trashed'], restore: ['trashed', 'active'], purge: ['trashed', 'deleted'] });
 const ATTENTION = new Set(['error', 'failed', 'interrupted', 'unknown', 'exhausted', 'waiting_review']);
 const LIMIT = 2 * 1024 * 1024;
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
@@ -81,14 +82,16 @@ export class WorkflowLibrary {
 
   lifecycle(workflowId) {
     const row = this.db.prepare('SELECT lifecycle,archived_at,trashed_at FROM workflow_lifecycle WHERE workflow_id=?').get(workflowId);
-    return { lifecycle: row?.lifecycle || 'active', archivedAt: row?.archived_at || null, trashedAt: row?.trashed_at || null };
+    // Read old archives as trash without rewriting user definitions or history.
+    return { lifecycle: row?.lifecycle === 'archived' ? 'trashed' : row?.lifecycle || 'active',
+      archivedAt: row?.archived_at || null, trashedAt: row?.trashed_at || (row?.lifecycle === 'archived' ? row.archived_at : null) || null };
   }
 
   assertRunnable(workflowId) {
     const workflow = id(workflowId);
     this.assertAvailable(workflow);
     const { lifecycle } = this.lifecycle(workflow);
-    if (lifecycle !== 'active') fail(lifecycle === 'trashed' ? '此工作流已移入回收站，请先恢复并取消归档后再使用。' : '此工作流已归档，请先取消归档后再使用。', 409);
+    if (lifecycle !== 'active') fail('此工作流已移入回收站，请先恢复后再使用。', 409);
   }
 
   record(row) {
@@ -167,7 +170,7 @@ export class WorkflowLibrary {
       const previous = JSON.parse(row.value);
       if (!previous.enabled && previous.nextRunAt == null && previous.lastTrigger?.status !== 'claimed') continue;
       const schedule = { ...previous, enabled: false, nextRunAt: null, revision: row.revision + 1, updatedAt: now };
-      if (schedule.lastTrigger?.status === 'claimed') schedule.lastTrigger = { ...schedule.lastTrigger, status: 'cancelled', error: '工作流已归档；本次定时触发已取消，未补跑。' };
+      if (schedule.lastTrigger?.status === 'claimed') schedule.lastTrigger = { ...schedule.lastTrigger, status: 'cancelled', error: '工作流已移入回收站；本次定时触发已取消，未补跑。' };
       const result = this.db.prepare('UPDATE workflow_schedules SET revision=?,value=? WHERE id=? AND revision=?')
         .run(schedule.revision, JSON.stringify(schedule), row.id, row.revision);
       if (!result.changes) fail('关联定时任务已变化，请刷新后重试。', 409);
@@ -186,11 +189,11 @@ export class WorkflowLibrary {
       const record = this.get(workflow);
       if (record.revision !== request.expectedRevision) fail('工作流文档已变化，请刷新最新版本后再操作。', 409);
       const [required, next] = TRANSITIONS[action];
-      if (record.lifecycle !== required) fail('工作流状态已变化；请按“归档 → 回收站 → 永久删除”的顺序操作。', 409);
+      if (record.lifecycle !== required) fail('工作流状态已变化；请先移入回收站，再恢复或永久删除。', 409);
       if (action === 'purge' && request.confirmationTitle !== record.document.title) fail('请输入完整工作流名称以确认永久删除。');
       this.assertIdle(workflow);
       const now = new Date(Math.max(Date.now(), timestamp(record.updatedAt) + 1)).toISOString();
-      if (action === 'archive') schedules = this.pauseSchedules(workflow, now);
+      if (next === 'trashed') schedules = this.pauseSchedules(workflow, now);
       if (action === 'purge') {
         this.db.prepare('INSERT INTO workflow_library_meta(key,value) VALUES(?,?)')
           .run('deleted:' + workflow, JSON.stringify({ deletedAt: now, revision: record.revision + 1, title: record.document.title }));
@@ -198,7 +201,7 @@ export class WorkflowLibrary {
         this.db.prepare('DELETE FROM workflow_lifecycle WHERE workflow_id=?').run(workflow);
         result = { deleted: true, id: workflow, lifecycle: 'deleted' };
       } else {
-        const archivedAt = next === 'active' ? null : action === 'archive' ? now : record.archivedAt;
+        const archivedAt = null;
         const trashedAt = next === 'trashed' ? now : null;
         this.db.prepare(`INSERT INTO workflow_lifecycle(workflow_id,lifecycle,archived_at,trashed_at) VALUES(?,?,?,?)
           ON CONFLICT(workflow_id) DO UPDATE SET lifecycle=excluded.lifecycle,archived_at=excluded.archived_at,trashed_at=excluded.trashed_at`)
@@ -211,7 +214,7 @@ export class WorkflowLibrary {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     // No network work is allowed in the scheduler hook: it only fences pending
     // in-memory admissions after their durable schedules have been paused.
-    if (action === 'archive') this.app.schedules?.onWorkflowArchived?.(workflow, schedules);
+    if (TRANSITIONS[action][1] === 'trashed') this.app.schedules?.onWorkflowArchived?.(workflow, schedules);
     for (const schedule of schedules) this.app.publish?.('workflow.schedule', null, { schedule });
     this.app.publish?.('workflow.document', null, result);
     this.app.publish?.('workflow.lifecycle', null, result);
@@ -317,6 +320,7 @@ export class WorkflowLibrary {
 
   list({ lifecycle = 'active' } = {}) {
     if (!LIFECYCLES.has(lifecycle) && lifecycle !== 'all') fail('无效的工作流分类。');
+    if (lifecycle === 'archived') lifecycle = 'trashed';
     const activities = this.activities();
     return this.db.prepare(`SELECT document.* FROM workflow_documents AS document
       WHERE NOT EXISTS (SELECT 1 FROM workflow_library_meta AS meta WHERE meta.key='deleted:' || document.id)

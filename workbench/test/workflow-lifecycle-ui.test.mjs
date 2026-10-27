@@ -26,36 +26,37 @@ function menuLabels(ui) { return ui.menu.children.filter(item => item.tagName ==
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
 // These tests exercise state transitions and UI submission barriers; the backend tests verify the persisted lifecycle policy.
-test('lifecycle tabs isolate active, archived and trash while old summaries stay active', async t => {
+test('two lifecycle tabs combine legacy archives with trash while old summaries stay active', async t => {
   const ctx = mounted(t, [summary('old', undefined), summary('a', 'active'), summary('b', 'archived', { archivedAt: '2030-01-02T00:00:00Z' }), summary('c', 'trashed')]); await ctx.ui.load();
   assert.equal(ctx.calls[0].path, '/api/workflow-library?lifecycle=all'); assert.equal(workflowLifecycle({}), 'active'); assert.equal(workflowLifecycle({ lifecycle: 'unexpected' }), 'unknown');
+  assert.deepEqual([...ctx.ui.lifecycleTabs.keys()], ['active', 'trashed']); assert.equal(workflowLifecycle({ lifecycle: 'archived' }), 'trashed');
   assert.equal(ctx.ui.cards.get('old').card.hidden, false); assert.equal(ctx.ui.cards.get('b').card.hidden, true); assert.match(ctx.ui.summary.textContent, /工作流中 2 \/ 2.*全部 4/);
-  ctx.ui.selectLifecycle('archived'); assert.equal(ctx.ui.columnGrid.hidden, true); assert.equal(ctx.ui.inactiveList.hidden, false); assert.equal(ctx.ui.filterLabel.hidden, true); assert.equal(ctx.ui.cards.get('b').card.hidden, false); assert.equal(ctx.ui.cards.get('a').card.hidden, true); assert.match(ctx.ui.cards.get('b').updated.textContent, /已归档/); assert.match(ctx.ui.cards.get('b').timingText.textContent, /定时任务已停用/);
-  ctx.ui.search.value = '流程 c'; ctx.ui.render(); assert.equal(ctx.ui.empty.hidden, false); assert.match(ctx.ui.emptyText.textContent, /搜索仅在已归档中查找/);
-  ctx.ui.selectLifecycle('trashed'); assert.equal(ctx.ui.cards.get('c').card.hidden, false); assert.equal(ctx.ui.empty.hidden, true); assert.equal(ctx.ui.lifecycleTabs.get('trashed').tab.attributes['aria-selected'], 'true');
+  ctx.ui.selectLifecycle('trashed'); assert.equal(ctx.ui.columnGrid.hidden, true); assert.equal(ctx.ui.inactiveList.hidden, false); assert.equal(ctx.ui.filterLabel.hidden, true); assert.equal(ctx.ui.cards.get('b').card.hidden, false); assert.equal(ctx.ui.cards.get('c').card.hidden, false); assert.equal(ctx.ui.cards.get('a').card.hidden, true); assert.match(ctx.ui.cards.get('b').updated.textContent, /已在回收站/); assert.match(ctx.ui.cards.get('b').timingText.textContent, /定时任务已停用/);
+  assert.equal(ctx.ui.lifecycleTabs.get('trashed').total.textContent, '2'); assert.equal(ctx.ui.lifecycleTabs.get('trashed').tab.attributes['aria-selected'], 'true');
+  ctx.ui.search.value = '不存在'; ctx.ui.render(); assert.equal(ctx.ui.empty.hidden, false); assert.equal(ctx.ui.emptyText.hidden, true); assert.equal(ctx.ui.emptyTitle.textContent, '没有匹配的工作流');
 });
 
 test('each lifecycle exposes only legal actions and separate menu buttons never open the editor', async t => {
   const { ui, opened } = mounted(t, [summary('a', 'active'), summary('b', 'archived'), summary('c', 'trashed')]); await ui.load();
   for (const row of ui.cards.values()) { assert.equal(row.card.tagName, 'ARTICLE'); assert.equal(row.openButton.contains(row.more), false); assert.equal(row.more.contains(row.openButton), false); assert.match(row.openButton.attributes['aria-label'], /^打开工作流：/); }
-  ui.cards.get('a').more.emit('click'); assert.deepEqual(menuLabels(ui), ['归档工作流']); assert.deepEqual(opened, []); assert.equal(ui.cards.get('a').more.attributes['aria-expanded'], 'true');
-  ui.selectLifecycle('archived'); ui.cards.get('b').more.emit('click'); assert.deepEqual(menuLabels(ui), ['恢复到工作流', '移入回收站']);
-  ui.selectLifecycle('trashed'); ui.cards.get('c').more.emit('click'); assert.deepEqual(menuLabels(ui), ['恢复到已归档', '永久删除工作流']); assert.deepEqual(workflowLifecycleActions({ lifecycle: 'deleted' }), []);
+  ui.cards.get('a').more.emit('click'); assert.deepEqual(menuLabels(ui), ['移入回收站']); assert.deepEqual(opened, []); assert.equal(ui.cards.get('a').more.attributes['aria-expanded'], 'true');
+  ui.selectLifecycle('trashed'); ui.cards.get('b').more.emit('click'); assert.deepEqual(menuLabels(ui), ['恢复到工作流', '永久删除工作流']);
+  ui.selectLifecycle('trashed'); ui.cards.get('c').more.emit('click'); assert.deepEqual(menuLabels(ui), ['恢复到工作流', '永久删除工作流']); assert.deepEqual(workflowLifecycleActions({ lifecycle: 'deleted' }), []);
 });
 
-test('waiting review and learning work cannot be silently archived or stopped from the menu', async t => {
+test('waiting review and learning work cannot be silently trashed or stopped from the menu', async t => {
   const { ui, calls } = mounted(t, [summary('review', 'active', { state: 'attention', latestRun: { status: 'waiting_review' } }), summary('learn', 'active', { state: 'attention', latestLearning: { status: 'waiting' } })]); await ui.load();
-  for (const id of ['review', 'learn']) { ui.toggleMenu(id); assert.equal(ui.menu.children[0].disabled, true); assert.match(ui.menu.children[1].textContent, /先停止/); ui.openLifecycleDialog(id, 'archive', ui.cards.get(id).more); assert.equal(ui.dialog, null); }
+  for (const id of ['review', 'learn']) { ui.toggleMenu(id); assert.equal(ui.menu.children[0].disabled, true); assert.match(ui.menu.children[1].textContent, /先停止/); ui.openLifecycleDialog(id, 'trash', ui.cards.get(id).more); assert.equal(ui.dialog, null); }
   assert.equal(calls.length, 1);
 });
 
-test('archive sends the revision once and keeps the original card until a new authoritative list arrives', async t => {
+test('trash sends the revision once and keeps the original card until a new authoritative list arrives', async t => {
   const ctx = mounted(t, [summary('a', 'active')]); const { ui } = ctx; await ui.load(); const post = deferred(), read = deferred(); const mutations = []; let reads = 0;
   ui.api = (path, options) => { if (options?.method === 'POST') { mutations.push({ path, options }); return post.promise; } reads++; return read.promise; };
-  ui.openLifecycleDialog('a', 'archive', ui.cards.get('a').more); assert.match(ui.dialog.panel.children[2].textContent, /停用关联定时任务/); const submitting = ui.submitLifecycle(); await ui.submitLifecycle();
-  assert.equal(mutations.length, 1); assert.equal(mutations[0].path, '/api/workflow-library/a/archive'); assert.deepEqual(mutations[0].options.body, { expectedRevision: 4 }); assert.equal(ui.dialog.pending, true); assert.equal(ui.dialog.cancel.disabled, true); assert.equal(workflowLifecycle(ui.workflows[0]), 'active');
-  post.resolve({ workflow: summary('a', 'archived', { revision: 5 }) }); await Promise.resolve(); await Promise.resolve(); assert.equal(reads, 1); assert.equal(ui.cards.get('a').card.hidden, false);
-  read.resolve({ workflows: [summary('a', 'archived', { revision: 5 })] }); await submitting; assert.equal(ui.dialog, null); assert.equal(ui.cards.get('a').card.hidden, true); assert.match(ui.noticeText.textContent, /已归档/);
+  ui.openLifecycleDialog('a', 'trash', ui.cards.get('a').more); assert.match(ui.dialog.panel.children[2].textContent, /停用关联定时任务/); const submitting = ui.submitLifecycle(); await ui.submitLifecycle();
+  assert.equal(mutations.length, 1); assert.equal(mutations[0].path, '/api/workflow-library/a/trash'); assert.deepEqual(mutations[0].options.body, { expectedRevision: 4 }); assert.equal(ui.dialog.pending, true); assert.equal(ui.dialog.cancel.disabled, true); assert.equal(workflowLifecycle(ui.workflows[0]), 'active');
+  post.resolve({ workflow: summary('a', 'trashed', { revision: 5 }) }); await Promise.resolve(); await Promise.resolve(); assert.equal(reads, 1); assert.equal(ui.cards.get('a').card.hidden, false);
+  read.resolve({ workflows: [summary('a', 'trashed', { revision: 5 })] }); await submitting; assert.equal(ui.dialog, null); assert.equal(ui.cards.get('a').card.hidden, true); assert.match(ui.noticeText.textContent, /已移入回收站/);
 });
 
 test('purge requires the exact complete name, only exists in trash, and errors preserve the input', async t => {
@@ -66,11 +67,12 @@ test('purge requires the exact complete name, only exists in trash, and errors p
   await ui.submitLifecycle(); assert.equal(ui.dialog, dialog); assert.equal(dialog.input.value, '完整流程 / C'); assert.match(dialog.error.textContent, /版本已变化/); assert.equal(dialog.submit.disabled, false); assert.deepEqual(mutations[0].options.body, { expectedRevision: 4, confirmationTitle: '完整流程 / C' });
 });
 
-test('restore goes to archived and unarchive requires its own explicit action', async t => {
+test('restore returns directly to active using one explicit action and the current revision', async t => {
   const { ui } = mounted(t, [summary('c', 'trashed')]); await ui.load(); const calls = []; let lifecycle = 'trashed', revision = 4;
-  ui.api = async (path, options) => { calls.push({ path, options }); if (options?.method === 'POST') { lifecycle = path.endsWith('/restore') ? 'archived' : 'active'; revision++; return { workflow: summary('c', lifecycle, { revision }) }; } return { workflows: [summary('c', lifecycle, { revision })] }; };
-  ui.selectLifecycle('trashed'); ui.openLifecycleDialog('c', 'restore'); await ui.submitLifecycle(); assert.equal(ui.workflows[0].lifecycle, 'archived'); assert.equal(calls.filter(item => item.options?.method === 'POST').length, 1);
-  ui.selectLifecycle('archived'); ui.openLifecycleDialog('c', 'unarchive'); await ui.submitLifecycle(); assert.equal(ui.workflows[0].lifecycle, 'active'); assert.deepEqual(calls.filter(item => item.options?.method === 'POST').map(item => item.options.body.expectedRevision), [4, 5]);
+  ui.api = async (path, options) => { calls.push({ path, options }); if (options?.method === 'POST') { lifecycle = 'active'; revision++; return { workflow: summary('c', lifecycle, { revision }) }; } return { workflows: [summary('c', lifecycle, { revision })] }; };
+  ui.selectLifecycle('trashed'); ui.openLifecycleDialog('c', 'restore'); await ui.submitLifecycle(); assert.equal(ui.workflows[0].lifecycle, 'active');
+  const mutations = calls.filter(item => item.options?.method === 'POST'); assert.equal(mutations.length, 1); assert.equal(mutations[0].path, '/api/workflow-library/c/restore'); assert.deepEqual(mutations[0].options.body, { expectedRevision: 4 });
+  ui.selectLifecycle('active'); assert.equal(ui.cards.get('c').card.hidden, false); assert.deepEqual(workflowLifecycleActions(ui.workflows[0]), ['trash']);
 });
 
 test('a successful mutation with a failed refresh offers a read retry without repeating the mutation', async t => {
@@ -81,14 +83,14 @@ test('a successful mutation with a failed refresh offers a read retry without re
 });
 
 test('menus and dialogs support Escape, focus return, tab trapping and tab arrow navigation', async t => {
-  const { ui, document } = mounted(t, [summary('b', 'archived')]); await ui.load(); ui.selectLifecycle('archived'); const more = ui.cards.get('b').more; more.focus(); more.emit('click'); const first = ui.menu.children[0], second = ui.menu.children[1]; assert.equal(document.activeElement, first);
+  const { ui, document } = mounted(t, [summary('b', 'archived')]); await ui.load(); ui.selectLifecycle('trashed'); const more = ui.cards.get('b').more; more.focus(); more.emit('click'); const first = ui.menu.children[0], second = ui.menu.children[1]; assert.equal(document.activeElement, first);
   ui.menu.emit('keydown', { key: 'ArrowDown' }); assert.equal(document.activeElement, second); ui.root.emit('keydown', { key: 'Escape' }); assert.equal(ui.menu.hidden, true); assert.equal(document.activeElement, more);
-  ui.openLifecycleDialog('b', 'trash', more); assert.equal(document.activeElement, ui.dialog.cancel); ui.dialog.overlay.emit('keydown', { key: 'Tab', shiftKey: true }); assert.equal(document.activeElement, ui.dialog.submit); ui.dialog.overlay.emit('keydown', { key: 'Escape' }); assert.equal(ui.dialog, null); assert.equal(document.activeElement, more);
-  ui.lifecycleTabs.get('archived').tab.emit('keydown', { key: 'ArrowRight' }); assert.equal(ui.lifecycle, 'trashed'); assert.equal(document.activeElement, ui.lifecycleTabs.get('trashed').tab);
+  ui.openLifecycleDialog('b', 'restore', more); assert.equal(document.activeElement, ui.dialog.cancel); ui.dialog.overlay.emit('keydown', { key: 'Tab', shiftKey: true }); assert.equal(document.activeElement, ui.dialog.submit); ui.dialog.overlay.emit('keydown', { key: 'Escape' }); assert.equal(ui.dialog, null); assert.equal(document.activeElement, more);
+  ui.lifecycleTabs.get('trashed').tab.emit('keydown', { key: 'ArrowRight' }); assert.equal(ui.lifecycle, 'active'); assert.equal(document.activeElement, ui.lifecycleTabs.get('active').tab);
 });
 
 test('lifecycle events invalidate a pending read and unknown lifecycle data cannot hide a workflow silently', async t => {
-  const { ui } = mounted(t, [summary('a', 'active')]); await ui.load(); const read = deferred(); ui.api = () => read.promise; const loading = ui.load(); ui.handleEvent({ type: 'workflow.lifecycle', payload: { workflow: summary('a', 'archived', { revision: 5 }) } }); read.resolve({ workflows: [summary('a', 'active')] }); await loading; assert.equal(ui.reloadNeeded, true); assert.equal(ui.workflows[0].lifecycle, 'active');
+  const { ui } = mounted(t, [summary('a', 'active')]); await ui.load(); const read = deferred(); ui.api = () => read.promise; const loading = ui.load(); ui.handleEvent({ type: 'workflow.lifecycle', payload: { workflow: summary('a', 'trashed', { revision: 5 }) } }); read.resolve({ workflows: [summary('a', 'active')] }); await loading; assert.equal(ui.reloadNeeded, true); assert.equal(ui.workflows[0].lifecycle, 'active');
   ui.api = async () => ({ workflows: [summary('a', 'unexpected')] }); await ui.load(); assert.match(ui.noticeText.textContent, /格式不正确/); assert.equal(ui.workflows[0].lifecycle, 'active');
 });
 
@@ -99,8 +101,8 @@ test('toolbar clearing stays available for a matching search and restores every 
   ui.clearFilterButton.emit('click'); assert.equal(ui.search.value, ''); assert.equal(ui.filter.value, 'all'); assert.equal(ui.lifecycle, 'active'); assert.equal(ui.cards.get('b').card.hidden, false); assert.equal(ui.cards.get('c').card.hidden, true); assert.equal(ui.clearFilterButton.hidden, true); assert.equal(document.activeElement, ui.search); assert.equal(calls.length, 1);
 });
 
-test('toolbar clearing resets a state-only filter and keeps archived or trash tab selection', async t => {
+test('toolbar clearing resets a state-only filter and keeps trash tab selection', async t => {
   const { ui } = mounted(t, [summary('a', 'active'), summary('b', 'active', { state: 'draft' }), summary('c', 'archived'), summary('d', 'trashed')]); await ui.load();
   ui.filter.value = 'draft'; ui.filter.emit('change'); assert.equal(ui.clearFilterButton.hidden, false); assert.match(ui.filterHint.textContent, /状态：待完善/); ui.clearFilterButton.emit('click'); assert.equal(ui.cards.get('a').card.hidden, false); assert.equal(ui.filter.value, 'all');
-  for (const lifecycle of ['archived', 'trashed']) { ui.selectLifecycle(lifecycle); ui.search.value = '流程'; ui.filter.value = 'ready'; ui.search.emit('input'); assert.equal(ui.clearFilterButton.hidden, false); ui.clearFilterButton.emit('click'); assert.equal(ui.lifecycle, lifecycle); assert.equal(ui.search.value, ''); assert.equal(ui.filter.value, 'all'); assert.equal(ui.clearFilterButton.hidden, true); }
+  for (const lifecycle of ['trashed']) { ui.selectLifecycle(lifecycle); ui.search.value = '流程'; ui.filter.value = 'ready'; ui.search.emit('input'); assert.equal(ui.clearFilterButton.hidden, false); ui.clearFilterButton.emit('click'); assert.equal(ui.lifecycle, lifecycle); assert.equal(ui.search.value, ''); assert.equal(ui.filter.value, 'all'); assert.equal(ui.clearFilterButton.hidden, true); }
 });

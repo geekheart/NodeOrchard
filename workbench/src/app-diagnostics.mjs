@@ -118,7 +118,7 @@ const tool = (name, description, properties = {}) => Object.freeze({ name, descr
 const idSchema = { type: 'string', maxLength: 128 };
 const TOOLS = Object.freeze([
   tool('app.state', '读取应用与 Hermes 连接状态、会话摘要和待处理请求；不读取认证配置。'),
-  tool('workflows.list', '读取工作流列表，无需先选中工作流。', { lifecycle: { type: 'string', enum: ['active', 'archived', 'trashed', 'all'] } }),
+  tool('workflows.list', '读取工作流或回收站列表，无需先选中工作流。', { lifecycle: { type: 'string', enum: ['active', 'trashed', 'all'] } }),
   tool('workflow.inspect', '读取当前草稿与已保存版本信息；不保存草稿。', { workflowId: idSchema }),
   tool('workflow.run', '读取明确指定或最新运行的节点错误、时序、日志和可见输出；绝不自动换成其他运行。', {
     workflowId: idSchema, runId: idSchema, nodeId: idSchema, runSelection: { type: 'string', enum: ['explicit', 'latest'] } }),
@@ -189,7 +189,8 @@ export class AppDiagnostics {
   }
 
   workflows({ lifecycle = 'active' } = {}) {
-    if (!['active', 'archived', 'trashed', 'all'].includes(lifecycle)) fail('工作流分类无效。');
+    if (lifecycle === 'archived') lifecycle = 'trashed';
+    if (!['active', 'trashed', 'all'].includes(lifecycle)) fail('工作流分类无效。');
     const items = this.app.workflowLibrary?.list?.({ lifecycle }) || [];
     return { lifecycle, count: items.length, items: items.slice(0, APP_DIAGNOSTIC_LIMITS.workflows).map(item => ({ id: item.id, title: item.title,
       mode: item.mode, revision: item.revision, lifecycle: item.lifecycle, state: item.state, readiness: item.readiness,

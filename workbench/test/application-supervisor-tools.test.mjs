@@ -77,22 +77,23 @@ test('new test workflows always receive fresh IDs and a visible test name withou
   assert.deepEqual(f.app.workflowLibrary.get(empty.targetWorkflowId).document.nodes, []);
 });
 
-test('delete archives active workflows, pauses schedules and moves to recoverable trash without purging', async t => {
+test('delete directly moves active workflows to recoverable trash and atomically pauses schedules without purging', async t => {
   const f = fixture(t), source = f.save();
   const schedule = { id: 'timer', workflowId: source.id, enabled: true, nextRunAt: '2026-10-28T00:00:00Z', revision: 1 };
   f.db.prepare('INSERT INTO workflow_schedules VALUES(?,?,?)').run(schedule.id, schedule.revision, JSON.stringify(schedule));
   const request = { workflowId: source.id, expectedRevision: 1, operationId: 'trash-one' };
   const receipt = await f.tools.call('workflow.delete', request, supervisor);
   assert.equal(receipt.status, 'complete'); assert.equal(receipt.deleted, true); assert.equal(receipt.permanent, false);
-  assert.equal(receipt.recoverable, true); assert.equal(receipt.revision, 3); assert.equal(receipt.lifecycle, 'trashed');
+  assert.equal(receipt.recoverable, true); assert.equal(receipt.revision, 2); assert.equal(receipt.lifecycle, 'trashed');
   assert.equal(f.app.workflowLibrary.get(source.id).lifecycle, 'trashed');
   assert.deepEqual(f.app.workflowLibrary.get(source.id).document, source.document);
   const paused = JSON.parse(f.db.prepare('SELECT value FROM workflow_schedules WHERE id=?').get('timer').value);
   assert.equal(paused.enabled, false); assert.equal(paused.nextRunAt, null);
   assert.deepEqual(await f.tools.call('workflow.delete', request, supervisor), receipt);
-  assert.equal(f.app.workflowLibrary.get(source.id).revision, 3);
-  f.app.workflowLibrary.transition(source.id, 'restore', { expectedRevision: 3 });
-  f.app.workflowLibrary.transition(source.id, 'unarchive', { expectedRevision: 4 });
+  assert.equal(f.app.workflowLibrary.get(source.id).revision, 2);
+  f.app.workflowLibrary.transition(source.id, 'restore', { expectedRevision: 2 });
+  assert.equal(f.app.workflowLibrary.get(source.id).lifecycle, 'active');
+  assert.equal(JSON.parse(f.db.prepare('SELECT value FROM workflow_schedules WHERE id=?').get('timer').value).enabled, false);
   assert.deepEqual(f.app.workflowLibrary.get(source.id).document, source.document);
 });
 
@@ -131,19 +132,29 @@ test('post-commit listener failure returns durable uncertainty rather than repla
   assert.equal(f.app.workflowLibrary.list().length, 2);
 });
 
-test('a failed trash step preserves partial archive evidence and cannot silently retry', async t => {
+test('a failed trash transition preserves an unknown receipt and cannot silently retry', async t => {
   const f = fixture(t), source = f.save();
-  const transition = f.app.workflowLibrary.transition.bind(f.app.workflowLibrary);
-  f.app.workflowLibrary.transition = (id, action, options) => {
-    if (action === 'trash') throw new Error('回收站暂不可用');
-    return transition(id, action, options);
-  };
-  const request = { workflowId: source.id, expectedRevision: 1, operationId: 'partial-delete' };
+  let calls = 0;
+  f.app.workflowLibrary.transition = () => { calls++; throw new Error('回收站暂不可用'); };
+  const request = { workflowId: source.id, expectedRevision: 1, operationId: 'unknown-delete' };
   const receipt = await f.tools.call('workflow.delete', request, supervisor);
-  assert.equal(receipt.status, 'partial'); assert.equal(receipt.lifecycle, 'archived');
-  assert.equal(receipt.deleted, false); assert.equal(receipt.revision, 2);
+  assert.equal(receipt.status, 'unknown'); assert.equal(receipt.executed, null);
+  assert.deepEqual(receipt.observed, { revision: 1, lifecycle: 'active', title: source.document.title });
+  assert.deepEqual(await f.tools.call('workflow.delete', request, supervisor), receipt);
+  assert.deepEqual(f.app.workflowLibrary.get(source.id), source);
+  assert.equal(calls, 1);
+});
+
+test('post-commit delete listener failure retains observed trash without replaying the mutation', async t => {
+  const f = fixture(t), source = f.save();
+  f.app.publish = () => { throw new Error('listener failed'); };
+  const request = { workflowId: source.id, expectedRevision: 1, operationId: 'committed-unknown-delete' };
+  const receipt = await f.tools.call('workflow.delete', request, supervisor);
+  assert.equal(receipt.status, 'unknown'); assert.equal(receipt.executed, null);
+  assert.deepEqual(receipt.observed, { revision: 2, lifecycle: 'trashed', title: source.document.title });
   assert.deepEqual(await f.tools.call('workflow.delete', request, supervisor), receipt);
   assert.equal(f.app.workflowLibrary.get(source.id).revision, 2);
+  assert.equal(f.app.workflowLibrary.isDeleted(source.id), false);
 });
 
 test('cancelled admissions, unknown fields, accessors and invalid documents have no side effects', async t => {

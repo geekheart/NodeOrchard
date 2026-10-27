@@ -24,7 +24,7 @@ function nestedHarness(t) {
 test('root lifecycle events during nested editing cancel the local session without ever saving the child', async t => {
   const { fixture, editor, ui, writes } = nestedHarness(t), calls = []; const client = new WorkflowLibraryClient(editor, { api: async (path, options) => { calls.push([path, options]); throw new Error('unexpected request'); } }); client.currentId = fixture.document.id; client.adopt({ id: fixture.document.id, revision: 1, lifecycle: 'active', document: fixture.document });
   ui.openNested(fixture.node.id); const childId = editor.doc.id; editor.doc.title = 'local nested edit'; await client.handleLifecycle({ id: fixture.document.id, revision: 2, lifecycle: 'archived' });
-  assert.equal(ui.nested, undefined); assert.equal(editor.doc.id, fixture.document.id); assert.equal(editor.libraryReadOnly, true); assert.equal(client.slot(fixture.document.id).lifecycle, 'archived'); assert.equal(client.slots.has(childId), false); assert.equal(calls.length, 0); assert.ok(writes.every(([key]) => !key.includes(childId))); assert.equal(editor.libraryStatus, '只读 · 本地未同步草稿保留');
+  assert.equal(ui.nested, undefined); assert.equal(editor.doc.id, fixture.document.id); assert.equal(editor.libraryReadOnly, true); assert.equal(client.slot(fixture.document.id).lifecycle, 'trashed'); assert.equal(client.slots.has(childId), false); assert.equal(calls.length, 0); assert.ok(writes.every(([key]) => !key.includes(childId))); assert.equal(editor.libraryStatus, '只读 · 本地未同步草稿保留');
 });
 
 test('pending root saves keep their acknowledgement while nested canvas and child autosaves stay isolated', async t => {

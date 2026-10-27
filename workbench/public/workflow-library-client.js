@@ -6,7 +6,7 @@ const copy = value => structuredClone(value);
 const signature = document => JSON.stringify(document);
 const content = document => JSON.stringify({ ...document, viewport: null });
 const unwrap = value => value?.workflow || value;
-const lifecycle = record => ['active', 'archived', 'trashed', 'deleted'].includes(record?.lifecycle) ? record.lifecycle : 'active';
+const lifecycle = record => record?.lifecycle === 'archived' ? 'trashed' : ['active', 'trashed', 'deleted'].includes(record?.lifecycle) ? record.lifecycle : 'active';
 
 // Each asset keeps its own acknowledgement and queue. A late save never changes
 // the canvas that the user has since opened, and a conflict never overwrites it.
@@ -57,7 +57,7 @@ export class WorkflowLibraryClient {
     if (next === 'active' && (this.hasLeftEditor || this.editor.active === false)) return true;
     // An active event is only permission to fetch the latest revision, never to
     // publish an old cached draft using its freshly learned acknowledgement.
-    this.setEditorLifecycle(next === 'active' ? 'archived' : next); this.status();
+    this.setEditorLifecycle(next === 'active' ? 'trashed' : next); this.status();
     if (next === 'active') {
       // The current navigation owns its loading indicator. Let its bounded
       // epoch retry fetch this revision without creating a second generation.

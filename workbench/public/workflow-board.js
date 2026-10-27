@@ -6,21 +6,18 @@ const GROUPS = [
 ];
 const STATES = new Set(GROUPS.map(item => item.id));
 const LIFECYCLES = [
-  { id: 'active', title: '工作流', hint: '可编辑和运行的工作流。先归档，再移入回收站，最后才能永久删除。' },
-  { id: 'archived', title: '已归档', hint: '已停用关联定时任务。可恢复到工作流，或移入回收站；历史运行和已生成文件保留。' },
-  { id: 'trashed', title: '回收站', hint: '可恢复为已归档，或永久删除流程定义。历史运行和已生成文件保留。' },
+  { id: 'active', title: '工作流' },
+  { id: 'trashed', title: '回收站' },
 ];
 const LIFECYCLE_ACTIONS = {
-  archive: { label: '归档工作流', confirm: '确认归档', target: 'archived', description: '归档后收起此工作流并停用关联定时任务；运行历史和已生成文件保留。恢复时不会自动启用定时任务。', success: '工作流已归档，关联定时任务已停用。' },
-  unarchive: { label: '恢复到工作流', confirm: '确认恢复', target: 'active', description: '恢复后可编辑和运行。之前停用的定时任务仍需手动启用。', success: '已恢复到工作流；定时任务保持停用。' },
-  trash: { label: '移入回收站', confirm: '移入回收站', target: 'trashed', description: '此工作流已归档。移入回收站后仍可恢复，运行历史和已生成文件保留。', success: '工作流已移入回收站。' },
-  restore: { label: '恢复到已归档', confirm: '确认恢复', target: 'archived', description: '恢复为已归档。需要再恢复到工作流，才可编辑和运行；定时任务保持停用。', success: '已恢复到已归档。' },
+  trash: { label: '移入回收站', confirm: '移入回收站', target: 'trashed', description: '移入回收站并停用关联定时任务。可随时恢复；运行历史和已生成文件保留。', success: '工作流已移入回收站，关联定时任务已停用。' },
+  restore: { label: '恢复到工作流', confirm: '确认恢复', target: 'active', description: '恢复后可编辑和运行。之前停用的定时任务仍需手动启用。', success: '已恢复到工作流；定时任务保持停用。' },
   purge: { label: '永久删除工作流', confirm: '永久删除', target: 'deleted', description: '永久删除此工作流的流程定义，无法恢复。运行历史和已生成文件保留。', success: '工作流定义已永久删除；运行历史和已生成文件保留。' },
 };
 const ACTIVE_RUNS = new Set(['queued', 'preparing', 'running', 'waiting_review', 'waiting']);
 const ACTIVE_LEARNING = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review']);
-export function workflowLifecycle(summary) { return summary?.lifecycle === undefined ? 'active' : LIFECYCLES.some(item => item.id === summary?.lifecycle) ? summary.lifecycle : 'unknown'; }
-export function workflowLifecycleActions(summary) { const value = workflowLifecycle(summary); return value === 'active' ? ['archive'] : value === 'archived' ? ['unarchive', 'trash'] : value === 'trashed' ? ['restore', 'purge'] : []; }
+export function workflowLifecycle(summary) { return summary?.lifecycle === undefined ? 'active' : summary.lifecycle === 'archived' ? 'trashed' : LIFECYCLES.some(item => item.id === summary?.lifecycle) ? summary.lifecycle : 'unknown'; }
+export function workflowLifecycleActions(summary) { const value = workflowLifecycle(summary); return value === 'active' ? ['trash'] : value === 'trashed' ? ['restore', 'purge'] : []; }
 function busyWorkflow(summary) { return summary?.state === 'running' || ACTIVE_RUNS.has(summary?.latestRun?.status) || ACTIVE_LEARNING.has(summary?.latestLearning?.status); }
 const RUN = { queued: '排队中', waiting_review: '待审核', preparing: '准备中', running: '运行中', waiting: '等待人工处理', complete: '已完成', error: '失败', interrupted: '已停止', unknown: '状态待确认' };
 const LEARNING = { running: '学习中', waiting: '等待人工处理', complete: '本次达标', exhausted: '未达目标', interrupted: '已停止', unknown: '状态待确认', error: '失败' };
@@ -62,13 +59,12 @@ export class WorkflowBoard {
     this.root = element('div', 'workflow-board');
     const header = element('header', 'wf-board-header'), titleGroup = element('div', 'wf-board-title-group'); titleGroup.append(icon('workflow'), element('h1', '', '工作流看板')); this.total = element('span', 'wf-board-total'); titleGroup.append(this.total);
     this.newButton = button('新建工作流', () => void this.create(), 'button primary'); this.newButton.prepend(icon('plus')); header.append(titleGroup, this.newButton);
-    this.tabs = element('div', 'wf-board-tabs'); this.tabs.setAttribute('role', 'tablist'); this.tabs.setAttribute('aria-label', '工作流归档与回收站');
+    this.tabs = element('div', 'wf-board-tabs'); this.tabs.setAttribute('role', 'tablist'); this.tabs.setAttribute('aria-label', '工作流与回收站');
     for (const item of LIFECYCLES) {
       const tab = button('', () => this.selectLifecycle(item.id), 'wf-board-tab'); tab.setAttribute('role', 'tab'); const label = element('span', '', item.title), total = element('span', 'wf-board-tab-count', '—'); tab.append(label, total);
       tab.addEventListener('keydown', event => { const index = LIFECYCLES.findIndex(value => value.id === item.id); const next = event.key === 'ArrowRight' ? (index + 1) % LIFECYCLES.length : event.key === 'ArrowLeft' ? (index + LIFECYCLES.length - 1) % LIFECYCLES.length : event.key === 'Home' ? 0 : event.key === 'End' ? LIFECYCLES.length - 1 : -1; if (next < 0) return; event.preventDefault?.(); this.selectLifecycle(LIFECYCLES[next].id); this.lifecycleTabs.get(LIFECYCLES[next].id).tab.focus(); });
       this.tabs.append(tab); this.lifecycleTabs.set(item.id, { tab, total });
     }
-    this.lifecycleHint = element('p', 'wf-board-lifecycle-hint');
     const toolbar = element('div', 'wf-board-toolbar'), searchLabel = element('label', 'wf-board-search'); this.search = element('input'); this.search.type = 'search'; this.search.placeholder = '搜索名称或 Skill'; this.search.setAttribute('aria-label', '搜索工作流名称或 Skill'); searchLabel.append(icon('search'), this.search);
     const filterLabel = element('label', 'wf-board-filter'); this.filterLabel = filterLabel; filterLabel.append(element('span', '', '状态')); this.filter = element('select'); this.filter.setAttribute('aria-label', '筛选工作流状态');
     for (const [id, title] of [['all', '全部状态'], ...GROUPS.map(item => [item.id, item.title])]) { const option = element('option', '', title); option.value = id; this.filter.append(option); } this.filter.value = 'all'; filterLabel.append(this.filter);
@@ -87,7 +83,7 @@ export class WorkflowBoard {
     }
     this.inactiveList = element('div', 'wf-board-inactive-list'); this.inactiveList.hidden = true; this.viewport.append(this.columnGrid, this.inactiveList);
     this.menu = element('div', 'wf-board-menu'); this.menu.setAttribute('role', 'menu'); this.menu.hidden = true;
-    this.root.append(header, this.tabs, this.lifecycleHint, this.pending, toolbar, this.notice, this.empty, this.viewport); this.container.replaceChildren(this.root); (document.body || this.root).append(this.menu);
+    this.root.append(header, this.tabs, this.pending, toolbar, this.notice, this.empty, this.viewport); this.container.replaceChildren(this.root); (document.body || this.root).append(this.menu);
     this.search.addEventListener('input', () => { this.closeMenu(false); this.render(); }); this.filter.addEventListener('change', () => { this.closeMenu(false); this.render(); });
     this.root.addEventListener('click', event => { if (this.openMenu && !this.menu.contains(event.target) && !this.openMenu.trigger.contains(event.target)) this.closeMenu(false); });
     this.root.addEventListener('keydown', event => { if (event.key === 'Escape' && this.openMenu && !this.dialog) { event.preventDefault?.(); this.closeMenu(); } });
@@ -133,9 +129,9 @@ export class WorkflowBoard {
     this.renderControls(); this.renderPending();
     const lifecycle = LIFECYCLES.find(item => item.id === this.lifecycle), records = this.workflows.filter(item => workflowLifecycle(item) === this.lifecycle);
     const state = this.lifecycle === 'active' ? this.filter.value || 'all' : 'all', filtered = filterWorkflowBoard(records, this.search.value, state), visible = new Set(filtered.map(item => item.id)), allIds = new Set(this.workflows.map(item => item.id));
-    this.total.textContent = this.loaded ? String(this.workflows.length) : '—'; this.total.title = '全部工作流，包含已归档和回收站';
+    this.total.textContent = this.loaded ? String(this.workflows.length) : '—'; this.total.title = '全部工作流，包含回收站';
     this.summary.textContent = !this.loaded ? this.loading ? '正在读取…' : '尚未读取' : `${lifecycle.title}中 ${filtered.length} / ${records.length} 个 · 全部 ${this.workflows.length} 个`;
-    this.lifecycleHint.textContent = lifecycle.hint; this.filterLabel.hidden = this.lifecycle !== 'active';
+    this.filterLabel.hidden = this.lifecycle !== 'active';
     const hasFilter = Boolean(this.search.value || this.filter.value !== 'all'), filters = [];
     if (this.search.value) filters.push(`搜索“${this.search.value}”`);
     if (this.filter.value !== 'all') filters.push(this.lifecycle === 'active' ? `状态：${GROUPS.find(item => item.id === this.filter.value)?.title || '已筛选'}` : '已保留工作流状态筛选（本页不应用）');
@@ -145,7 +141,7 @@ export class WorkflowBoard {
     this.columnGrid.hidden = this.lifecycle !== 'active'; this.inactiveList.hidden = this.lifecycle === 'active'; this.columnGrid.classList.toggle('is-filtered', state !== 'all');
     this.viewport.setAttribute('aria-label', this.lifecycle === 'active' ? '按实际状态分组的工作流' : `${lifecycle.title}工作流`);
     for (const [id, row] of this.cards) if (!allIds.has(id)) { if (this.openMenu?.id === id) this.closeMenu(false); row.card.remove(); this.cards.delete(id); }
-    const sorted = [...this.workflows].sort((a, b) => String((workflowLifecycle(b) === 'trashed' ? b.trashedAt : workflowLifecycle(b) === 'archived' ? b.archivedAt : b.updatedAt) || '').localeCompare(String((workflowLifecycle(a) === 'trashed' ? a.trashedAt : workflowLifecycle(a) === 'archived' ? a.archivedAt : a.updatedAt) || '')) || a.id.localeCompare(b.id));
+    const sorted = [...this.workflows].sort((a, b) => String((workflowLifecycle(b) === 'trashed' ? b.trashedAt || b.archivedAt : b.updatedAt) || '').localeCompare(String((workflowLifecycle(a) === 'trashed' ? a.trashedAt || a.archivedAt : a.updatedAt) || '')) || a.id.localeCompare(b.id));
     for (const workflow of sorted) {
       let row = this.cards.get(workflow.id); if (!row) { row = this.createCard(workflow.id); this.cards.set(workflow.id, row); }
       const parent = workflowLifecycle(workflow) === 'active' ? this.columns.get(workflowBoardState(workflow)).list : this.inactiveList;
@@ -161,7 +157,7 @@ export class WorkflowBoard {
     }
     for (const [index, workflow] of sorted.filter(item => workflowLifecycle(item) !== 'active').entries()) { const card = this.cards.get(workflow.id).card, before = this.inactiveList.children[index] || null; if (before !== card) { const focused = card.contains(document.activeElement), previous = document.activeElement; this.inactiveList.insertBefore(card, before); if (focused) previous.focus({ preventScroll: true }); } }
     const empty = this.loaded && !filtered.length; this.empty.hidden = !empty; this.viewport.hidden = empty;
-    this.emptyTitle.textContent = records.length ? '没有匹配的工作流' : this.lifecycle === 'active' ? '暂无工作流' : this.lifecycle === 'archived' ? '暂无已归档工作流' : '回收站为空';
+    this.emptyTitle.textContent = records.length ? '没有匹配的工作流' : this.lifecycle === 'active' ? '暂无工作流' : '回收站为空';
     this.emptyText.textContent = ''; this.emptyText.hidden = true;
     this.emptyCreate.hidden = this.lifecycle !== 'active' || records.length > 0; this.emptyClear.hidden = !records.length;
   }
@@ -192,7 +188,7 @@ export class WorkflowBoard {
     const reason = group === 'draft' ? workflow.readiness?.error : group === 'attention' ? recent?.error || (recent?.status === 'waiting' ? '等待审批或澄清' : recent?.status === 'exhausted' ? '本次学习尚未达到目标' : !STATES.has(workflow.state) ? '摘要状态待确认，请刷新检查。' : '打开工作流查看执行与学习记录') : '';
     row.reason.textContent = clean(reason || ''); row.reason.hidden = !reason; row.reason.title = row.reason.textContent;
     row.timingText.textContent = Number.isInteger(workflow.scheduleCount) ? workflow.scheduleCount ? `已启用定时 ${workflow.scheduleCount}${workflow.nextRunAt ? ` · 下次 ${time(workflow.nextRunAt)}` : ' · 暂无下次触发'}` : '暂无已启用定时任务' : '定时信息未采集';
-    row.updated.textContent = lifecycle === 'archived' ? `${time(workflow.archivedAt) || '时间未记录'} · 已归档` : lifecycle === 'trashed' ? `${time(workflow.trashedAt) || '时间未记录'} · 已在回收站` : time(workflow.updatedAt) ? `${time(workflow.updatedAt)} 更新` : '更新时间未记录';
+    row.updated.textContent = lifecycle === 'trashed' ? `${time(workflow.trashedAt || workflow.archivedAt) || '时间未记录'} · 已在回收站` : time(workflow.updatedAt) ? `${time(workflow.updatedAt)} 更新` : '更新时间未记录';
     if (lifecycle !== 'active') row.timingText.textContent = '关联定时任务已停用；恢复后需手动启用';
   }
   toggleMenu(id) {
@@ -202,7 +198,7 @@ export class WorkflowBoard {
     this.openMenu = { id, trigger: row.more }; row.more.setAttribute('aria-expanded', 'true'); this.menu.replaceChildren(); this.menu.setAttribute('aria-label', clean(`${workflow.title}的操作`));
     for (const action of workflowLifecycleActions(workflow)) {
       const spec = LIFECYCLE_ACTIONS[action], item = button(spec.label, () => this.openLifecycleDialog(id, action, row.more), `wf-board-menu-item${action === 'purge' ? ' danger' : ''}`); item.setAttribute('role', 'menuitem');
-      if (action === 'archive' && busyWorkflow(workflow)) { item.disabled = true; item.title = '请先停止当前运行、审核或学习，再归档。'; this.menu.append(item, element('p', 'wf-board-menu-hint', item.title)); } else this.menu.append(item);
+      if (action === 'trash' && busyWorkflow(workflow)) { item.disabled = true; item.title = '请先停止当前运行、审核或学习，再移入回收站。'; this.menu.append(item, element('p', 'wf-board-menu-hint', item.title)); } else this.menu.append(item);
     }
     this.menu.hidden = false;
     const bounds = row.more.getBoundingClientRect?.(); if (bounds) { this.menu.style.left = `${Math.max(8, Math.min(bounds.right - 210, (globalThis.innerWidth || 1280) - 222))}px`; this.menu.style.top = `${Math.max(8, Math.min(bounds.bottom + 5, (globalThis.innerHeight || 800) - 165))}px`; }
@@ -211,7 +207,7 @@ export class WorkflowBoard {
   closeMenu(restoreFocus = true) { const previous = this.openMenu; this.openMenu = null; this.menu.hidden = true; if (previous) { previous.trigger.setAttribute('aria-expanded', 'false'); if (restoreFocus) previous.trigger.focus({ preventScroll: true }); } }
   openLifecycleDialog(id, action, returnFocus) {
     const workflow = this.workflows.find(item => item.id === id), spec = LIFECYCLE_ACTIONS[action];
-    if (this.dialog || !workflow || !spec || !workflowLifecycleActions(workflow).includes(action) || action === 'archive' && busyWorkflow(workflow)) return;
+    if (this.dialog || !workflow || !spec || !workflowLifecycleActions(workflow).includes(action) || action === 'trash' && busyWorkflow(workflow)) return;
     this.closeMenu(false);
     const overlay = element('div', 'wf-board-dialog-overlay'), panel = element('section', 'wf-board-dialog'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-labelledby', 'wf-board-dialog-title'); panel.setAttribute('aria-describedby', 'wf-board-dialog-description');
     const title = element('h2', '', spec.label); title.id = 'wf-board-dialog-title'; const name = element('p', 'wf-board-dialog-name', workflow.title), description = element('p', '', spec.description); description.id = 'wf-board-dialog-description'; panel.append(title, name, description);

@@ -67,6 +67,9 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.equal(interfaces.features.find(row => row.id === 'execution').status, 'ui-only');
   assert.equal(interfaces.features.find(row => row.id === 'business-code').status, 'proposal-only');
   assert.equal(interfaces.features.find(row => row.id === 'application-source-editing').status, 'unavailable');
+  const recycle = interfaces.features.find(row => row.id === 'workflow-recycle-bin');
+  assert.equal(recycle.status, 'ui-only'); assert.equal(recycle.requiresUserConfirmation, true); assert.deepEqual(recycle.tools, []);
+  assert.match(recycle.note, /完整名称确认/);
   const tools = f.assistant.tools();
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));

@@ -208,7 +208,8 @@ export class WorkflowEditor {
 
   get libraryReadOnly() { return Boolean(this.libraryLifecycle && this.libraryLifecycle !== 'active'); }
   setLibraryLifecycle(lifecycle) {
-    if (!['active', 'archived', 'trashed', 'deleted'].includes(lifecycle)) throw new Error('无效的工作流管理状态。');
+    if (lifecycle === 'archived') lifecycle = 'trashed';
+    if (!['active', 'trashed', 'deleted'].includes(lifecycle)) throw new Error('无效的工作流管理状态。');
     this.nodeLibrary?.cancelNested(true); this.cancelGesture(); this.cancelConnection(); clearTimeout(this.saveTimer);
     this.libraryLifecycle = lifecycle;
     if (this.libraryReadOnly) {
@@ -224,7 +225,7 @@ export class WorkflowEditor {
     if (notice) {
       notice.hidden = !readonly;
       notice.textContent = this.libraryLifecycle === 'deleted' ? '已永久删除 · 只读，本地草稿保留供导出；请返回看板。'
-        : `${this.libraryLifecycle === 'trashed' ? '回收站' : '已归档'} · 只读，请回看板恢复。运行历史和已生成文件仍可查看。`;
+        : '回收站 · 只读，请回看板恢复。';
     }
     this.lifecycleDisabled ||= new WeakMap();
     const selectors = '.wf-document-title, .wf-mode:not(.wf-view-switch) button, .wf-library-item, .wf-port, .wf-property-form input, .wf-property-form select, .wf-property-form textarea, .wf-property-form button, .wf-properties [data-action="duplicate"], .wf-properties [data-action="delete"], .wf-properties [data-action="remove-edge"], [data-action="undo"], [data-action="redo"], [data-action="new"], [data-action="import"], [data-action="save"], [data-action="run"], [data-action="schedules"], [data-action="add-input"], [data-action="example"]';

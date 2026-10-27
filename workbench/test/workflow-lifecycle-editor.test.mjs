@@ -6,7 +6,7 @@ import { createDocument, createNode, validateDocument } from '../shared/workflow
 
 const PREFIX = 'workbench.workflow-document.v1:', ACK = 'workbench.workflow-library-ack.v1';
 const copy = value => structuredClone(value), immediate = () => new Promise(resolve => setImmediate(resolve));
-const fail = status => Object.assign(new Error(status === 410 ? '已永久删除' : '已归档或文档已变化'), { httpStatus: status });
+const fail = status => Object.assign(new Error(status === 410 ? '已永久删除' : '已移入回收站或文档已变化'), { httpStatus: status });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function globalValue(t, name, value) {
   const before = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -66,8 +66,8 @@ test('archived or trashed initial caches remain untouched and never flush, recov
     const instance = editor(local, { cached: true }), api = remote([record(server, lifecycle, 8)]);
     const client = new WorkflowLibraryClient(instance, { api: api.api }); client.slot(local.id).queued = local;
     await client.initialize();
-    assert.equal(instance.libraryLifecycle, lifecycle); assert.equal(instance.libraryReadOnly, true); assert.deepEqual(instance.doc, server);
-    assert.equal(client.slot(local.id).queued, null); assert.equal(client.slot(local.id).revision, 8); assert.equal(api.posts.length, 0);
+    assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(instance.libraryReadOnly, true); assert.deepEqual(instance.doc, server);
+    assert.equal(client.slot(local.id).lifecycle, 'trashed'); assert.equal(client.slot(local.id).queued, null); assert.equal(client.slot(local.id).revision, 8); assert.equal(api.posts.length, 0);
     assert.equal(values.get(PREFIX + local.id), raw); assert.equal(instance.lastToast, undefined);
     client.queue(local); await client.flush(local.id); client.leave(); assert.equal(api.posts.length, 0); assert.equal(values.get(PREFIX + local.id), raw);
     const next = await client.create(); assert.notEqual(next, local.id); assert.equal(api.posts.length, 1);
@@ -88,14 +88,14 @@ test('opening the same id rechecks authority before any save and opens newly arc
   const { values } = storage(t), original = doc(), instance = editor(doc('placeholder')), api = remote([record(original)]);
   const client = new WorkflowLibraryClient(instance, { api: api.api }); await client.open(original.id);
   const raw = values.get(PREFIX + original.id); instance.doc.title = '尚未保存的内存标题';
-  api.records.set(original.id, record(original, 'archived', 2));
-  await client.open(original.id); assert.equal(api.gets.length, 2); assert.equal(instance.libraryLifecycle, 'archived'); assert.equal(api.posts.length, 0);
+  api.records.set(original.id, record(original, 'trashed', 2));
+  await client.open(original.id); assert.equal(api.gets.length, 2); assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(api.posts.length, 0);
   assert.equal(values.get(PREFIX + original.id), raw);
   api.records.set(original.id, record(original, 'trashed', 3)); await client.open(original.id);
   assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(client.slot(original.id).revision, 3); assert.equal(api.posts.length, 0);
 });
 
-test('a lifecycle event fences a late active save response, clears its tail, and never reactivates the archived canvas', async t => {
+test('a lifecycle event fences a late active save response, clears its tail, and never reactivates the trashed canvas', async t => {
   storage(t); const original = doc(), instance = editor(doc('placeholder')), api = remote([record(original)]), gate = deferred(), saved = [];
   t.after(() => gate.resolve()); const client = new WorkflowLibraryClient(instance, { api: api.api, onSaved: value => saved.push(value) }); await client.open(original.id);
   api.afterSave = () => gate.promise; instance.doc.title = '已发出的修改'; instance.persist(); await immediate();
@@ -103,8 +103,8 @@ test('a lifecycle event fences a late active save response, clears its tail, and
   const pending = client.flush(); await client.handleLifecycle({ workflow: { id: original.id, lifecycle: 'archived', revision: 3 } });
   assert.equal(instance.libraryReadOnly, true); assert.equal(client.slot(original.id).queued, null);
   gate.resolve(); await pending;
-  assert.equal(api.posts.length, 1); assert.equal(saved.length, 0); assert.equal(client.slot(original.id).revision, 3); assert.equal(client.slot(original.id).lifecycle, 'archived');
-  assert.equal(instance.libraryLifecycle, 'archived'); assert.equal(client.slot(original.id).error, '');
+  assert.equal(api.posts.length, 1); assert.equal(saved.length, 0); assert.equal(client.slot(original.id).revision, 3); assert.equal(client.slot(original.id).lifecycle, 'trashed');
+  assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(client.slot(original.id).error, '');
 });
 
 test('late A restore events update their slot without stealing a newer B navigation from the inactive A canvas', async t => {
@@ -129,7 +129,7 @@ test('late A restore events update their slot without stealing a newer B navigat
 
 test('a restore after leaving only updates its slot, while restoring the active current canvas still fetches fresh content', async t => {
   storage(t); const a = doc('visible-restore-A'), instance = editor(doc('placeholder'));
-  const api = remote([record(a, 'archived', 2)]), client = new WorkflowLibraryClient(instance, { api: api.api });
+  const api = remote([record(a, 'trashed', 2)]), client = new WorkflowLibraryClient(instance, { api: api.api });
   await client.open(a.id); client.leave(); instance.active = false;
   api.records.set(a.id, record({ ...a, title: 'Restored while on board' }, 'active', 3));
   await client.handleLifecycle({ id: a.id, lifecycle: 'active', revision: 3 });
@@ -145,10 +145,10 @@ test('a restore after leaving only updates its slot, while restoring the active 
   assert.equal(instance.libraryReadOnly, false); assert.equal(client.slot(a.id).refreshRequired, false);
 });
 
-test('unarchive stays read-only until fresh server content arrives, preserves the unsynced cache, then saves with the current revision', async t => {
+test('restore stays read-only until fresh server content arrives, preserves the unsynced cache, then saves with the current revision', async t => {
   const original = doc(), local = doc(original.id, '必须保留的旧本地编辑'), raw = JSON.stringify({ version: 1, document: local });
   const { values } = storage(t, [[PREFIX + local.id, raw], [ACK, JSON.stringify({ [local.id]: 1 })]]);
-  const instance = editor(local, { cached: true }), api = remote([record(original, 'archived', 2)]), gate = deferred();
+  const instance = editor(local, { cached: true }), api = remote([record(original, 'trashed', 2)]), gate = deferred();
   t.after(() => gate.resolve()); const client = new WorkflowLibraryClient(instance, { api: api.api }); await client.initialize();
   const latest = doc(local.id, '恢复后的权威定义'); api.records.set(local.id, record(latest, 'active', 5)); api.beforeGet = () => gate.promise;
   const restoring = client.handleLifecycle({ id: local.id, lifecycle: 'active', revision: 5 }); await immediate();
@@ -159,8 +159,8 @@ test('unarchive stays read-only until fresh server content arrives, preserves th
   assert.equal(api.posts.length, 1); assert.equal(api.posts[0].expectedRevision, 5); assert.equal(api.posts[0].document.title, '恢复后新的编辑');
 });
 
-test('a stale active GET after an unarchive event cannot unlock the editor or resurrect a cached draft', async t => {
-  const { values } = storage(t), original = doc(), instance = editor(doc('placeholder')), api = remote([record(original, 'archived', 2)]);
+test('a stale active GET after a restore event cannot unlock the editor or resurrect a cached draft', async t => {
+  const { values } = storage(t), original = doc(), instance = editor(doc('placeholder')), api = remote([record(original, 'trashed', 2)]);
   const client = new WorkflowLibraryClient(instance, { api: api.api }); await client.open(original.id); const raw = values.get(PREFIX + original.id);
   api.records.set(original.id, record(original, 'active', 3));
   assert.equal(await client.handleLifecycle({ id: original.id, lifecycle: 'active', revision: 5 }), false);
@@ -170,6 +170,20 @@ test('a stale active GET after an unarchive event cannot unlock the editor or re
   assert.equal(instance.libraryLifecycle, 'active'); assert.equal(api.posts.length, 0);
 });
 
+test('a newer trash event fences an in-flight restore read and preserves the inactive local draft', async t => {
+  const original = doc(), local = doc(original.id, '待保留的本地编辑'), raw = JSON.stringify({ version: 1, document: local });
+  const { values } = storage(t, [[PREFIX + local.id, raw]]), instance = editor(local, { cached: true }), api = remote([record(original, 'trashed', 2)]), gate = deferred();
+  t.after(() => gate.resolve()); const client = new WorkflowLibraryClient(instance, { api: api.api }); await client.initialize();
+  api.records.set(local.id, record({ ...original, title: '恢复版本' }, 'active', 3));
+  let first = true; api.beforeGet = () => { if (first) { first = false; return gate.promise; } };
+  const restoring = client.handleLifecycle({ id: local.id, lifecycle: 'active', revision: 3 }); await immediate();
+  assert.equal(instance.libraryReadOnly, true); assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(client.slot(local.id).refreshRequired, true);
+  api.records.set(local.id, record(original, 'trashed', 4)); await client.handleLifecycle({ id: local.id, lifecycle: 'trashed', revision: 4 });
+  gate.resolve(); assert.equal(await restoring, true);
+  assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(instance.libraryReadOnly, true); assert.equal(client.slot(local.id).revision, 4);
+  client.queue(local); await client.flush(); assert.equal(api.posts.length, 0); assert.equal(values.get(PREFIX + local.id), raw);
+});
+
 test('lifecycle during initial read fences its obsolete result, and duplicate active events preserve later editing', async t => {
   const original = doc(), raw = JSON.stringify({ version: 1, document: original });
   storage(t, [[PREFIX + original.id, raw]]);
@@ -177,7 +191,7 @@ test('lifecycle during initial read fences its obsolete result, and duplicate ac
   let first = true; api.beforeGet = () => { if (first) { first = false; return gate.promise; } };
   const client = new WorkflowLibraryClient(instance, { api: api.api }), initializing = client.initialize(); await immediate();
   await client.handleLifecycle({ id: original.id, lifecycle: 'archived', revision: 2 }); gate.resolve(); await initializing;
-  assert.equal(instance.libraryLifecycle, 'archived'); assert.equal(api.posts.length, 0); assert.equal(client.slot(original.id).revision, 2);
+  assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(api.posts.length, 0); assert.equal(client.slot(original.id).revision, 2);
   api.records.set(original.id, record(original, 'active', 3)); await client.handleLifecycle({ id: original.id, lifecycle: 'active', revision: 3 });
   assert.equal(instance.libraryLifecycle, 'active');
   const getCount = api.gets.length; client.slot(original.id).queued = { ...original, title: '事件之后的真实编辑' };
@@ -187,9 +201,9 @@ test('lifecycle during initial read fences its obsolete result, and duplicate ac
 
 test('inactive opening does not parse or replace a corrupt browser draft, and non-current lifecycle events cannot alter the canvas', async t => {
   const original = doc(), other = doc('flow-B'), raw = '{original unreadable data';
-  const { values } = storage(t, [[PREFIX + original.id, raw]]), instance = editor(doc('placeholder')), api = remote([record(original, 'archived', 2), record(other)]);
+  const { values } = storage(t, [[PREFIX + original.id, raw]]), instance = editor(doc('placeholder')), api = remote([record(original, 'trashed', 2), record(other)]);
   const client = new WorkflowLibraryClient(instance, { api: api.api }); await client.open(original.id);
-  assert.equal(instance.libraryLifecycle, 'archived'); assert.equal(values.get(PREFIX + original.id), raw);
+  assert.equal(instance.libraryLifecycle, 'trashed'); assert.equal(values.get(PREFIX + original.id), raw);
   await client.open(other.id); await client.handleLifecycle({ deleted: true, id: original.id, lifecycle: 'deleted' });
   assert.equal(instance.doc.id, other.id); assert.equal(instance.libraryLifecycle, 'active'); assert.equal(client.slot(original.id).lifecycle, 'deleted'); assert.equal(api.posts.length, 0);
 });
@@ -198,7 +212,7 @@ test('read-only core rejects graph mutation and run preparation while camera, ex
   const original = doc(), raw = JSON.stringify({ version: 1, document: original }), { values, writes } = storage(t, [[PREFIX + original.id, raw]]);
   const instance = editor(original, { cached: true }); instance.history = [{ document: doc('old-id'), label: '旧历史' }]; instance.selection.add('input');
   let callbacks = 0, exports = 0; instance.onPersist = () => callbacks++; instance.download = () => exports++;
-  instance.setLibraryLifecycle('archived'); const before = copy(instance.doc), history = copy(instance.history);
+  instance.setLibraryLifecycle('trashed'); const before = copy(instance.doc), history = copy(instance.history);
   instance.commit({ ...instance.doc, title: '禁止更名' }, '更名'); instance.undo(); instance.undo(true); instance.deleteSelection(); instance.addNode('tool');
   instance.clipboard = { nodes: [createNode('tool', { x: 0, y: 0 })], edges: [] }; instance.pasteSelection(); instance.createMinimalFlow(); instance.loadExample();
   instance.activatePort({ node: 'input', port: 'out', direction: 'output' }); instance.openImport('{}'); instance.openNewDialog(); instance.saveDraft();
@@ -227,7 +241,7 @@ test('read-only keyboard edits and node dragging cannot change the graph, while 
       return null;
     }
   }
-  globalValue(t, 'Element', Target); instance.setLibraryLifecycle('archived'); instance.selection.add('input');
+  globalValue(t, 'Element', Target); instance.setLibraryLifecycle('trashed'); instance.selection.add('input');
   let prevented = 0;
   for (const event of [{ key: 'Delete' }, { key: 'ArrowRight' }, { key: 's', ctrlKey: true }, { key: 'z', metaKey: true }, { key: 'v', metaKey: true }]) {
     instance.onKeyDown({ ...event, target: new Target(), preventDefault() { prevented++; } });

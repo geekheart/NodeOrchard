@@ -35,7 +35,7 @@ function stableIds() {
 function savedRecord(value, expectedId) {
   const record = unwrap(value);
   if (!record || record.id !== expectedId || record.document?.id !== expectedId || !Number.isSafeInteger(record.revision) || record.revision < 1) throw new Error('工作流保存记录与当前对象不匹配。');
-  if (lifecycle(record) !== 'active') throw new Error('工作流已归档或进入回收站，请先从看板恢复。');
+  if (lifecycle(record) !== 'active') throw new Error('工作流已在回收站，请先从看板恢复。');
   return { ...record, document: validateDocument(record.document) };
 }
 

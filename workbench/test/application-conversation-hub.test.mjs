@@ -64,6 +64,19 @@ test('directory is one entry per saved workflow, including empty chats, without 
   assert.deepEqual(hashes(f), before); assert.deepEqual(f.adapter.calls, []);
 });
 
+test('recycle directory includes legacy archives without rewriting workflow or conversation history', async t => {
+  const f = await fixture(t); seed(f, f.first, 1);
+  f.db.prepare('INSERT INTO workflow_lifecycle(workflow_id,lifecycle,archived_at,trashed_at) VALUES(?,?,?,NULL)')
+    .run(f.first.id, 'archived', '2026-10-27T01:00:00.000Z');
+  const before = hashes(f), recycled = f.hub.list({ lifecycle: 'trashed' });
+  assert.deepEqual(f.hub.tools()[0].inputSchema.properties.lifecycle.enum, ['active', 'trashed', 'all']);
+  assert.deepEqual(recycled.workflows.map(row => [row.workflowId, row.lifecycle, row.conversation.turnCount]), [[f.first.id, 'trashed', 1]]);
+  assert.deepEqual(f.hub.list({ lifecycle: 'archived' }), recycled);
+  assert.deepEqual(f.hub.list().workflows.map(row => row.workflowId), [f.second.id]);
+  assert.equal(f.hub.read({ workflowId: f.first.id }).turns[0].id, 'fixture-turn-1');
+  assert.deepEqual(hashes(f), before); assert.deepEqual(f.adapter.calls, []);
+});
+
 test('history pagination stays in one workflow and exposes only bounded public evidence', async t => {
   const f = await fixture(t);
   for (let index = 1; index <= 5; index++) seed(f, f.first, index, { assistant: { text: '结果 Bearer SHOULD_BE_REDACTED',

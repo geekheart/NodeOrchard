@@ -50,7 +50,7 @@ async function fixture(t) {
   f.restart = async () => { await f.close(); await f.open(); };
   f.request = async (path, { body, method = body === undefined ? 'GET' : 'POST', headers = {}, raw } = {}) => {
     const response = await fetch(f.origin + path, { method,
-      headers: method === 'POST' ? { 'Content-Type': 'application/json', 'X-Workbench-Token': f.csrfToken, ...headers } : headers,
+      headers: ['POST', 'PUT'].includes(method) ? { 'Content-Type': 'application/json', 'X-Workbench-Token': f.csrfToken, ...headers } : headers,
       ...(raw === undefined && body === undefined ? {} : { body: raw ?? JSON.stringify(body) }),
     });
     return { status: response.status, body: await response.json() };
@@ -91,7 +91,7 @@ function transitioned(response, lifecycle) {
   assert.equal(value.lifecycle, lifecycle); assert(Number.isSafeInteger(value.revision)); return value;
 }
 
-test('archive, recycle, restore and purge preserve real output and all history, while schedules stay disabled after restoration', async t => {
+test('trash, restore and purge preserve real output and all history, while schedules stay disabled after restoration', async t => {
   const f = await fixture(t), value = document(), neighbor = document();
   let record = await f.save(value); await f.save(neighbor);
   const started = await f.api('/api/workflow-runs', { document: value, input: '  preserved output  ' });
@@ -124,21 +124,17 @@ test('archive, recycle, restore and purge preserve real output and all history, 
     assert.equal(download.status, 200); assert.equal(await download.text(), 'preserved output');
     assert.equal(hash(await readFile(file)), fileHash); assert.equal(await readFile(originalSource, 'utf8'), 'source must remain intact');
   };
-  record = transitioned(await f.transition(record, 'archive'), 'archived');
+  record = transitioned(await f.transition(record, 'trash'), 'trashed');
   assert.deepEqual((await f.list()).map(item => item.id), [neighbor.id]);
   assert.deepEqual((await f.list('archived')).map(item => item.id), [value.id]);
   const disabled = (await f.api(`/api/workflow-schedules/${schedule.id}`)).body.schedule;
   assert.equal(disabled.enabled, false); assert.equal(disabled.nextRunAt, null); assert(disabled.revision > schedule.revision);
   assert.deepEqual(disabled.document, schedule.document);
-  record = transitioned(await f.transition(record, 'trash'), 'trashed');
   assert.deepEqual((await f.list('trashed')).map(item => item.id), [value.id]);
   assert.deepEqual(new Set((await f.list('all')).map(item => item.id)), new Set([value.id, neighbor.id]));
-  record = transitioned(await f.transition(record, 'restore'), 'archived');
-  assert.equal((await f.api(`/api/workflow-schedules/${schedule.id}`)).body.schedule.enabled, false);
-  record = transitioned(await f.transition(record, 'unarchive'), 'active');
+  record = transitioned(await f.transition(record, 'restore'), 'active');
   assert.equal((await f.api(`/api/workflow-schedules/${schedule.id}`)).body.schedule.enabled, false);
   await assertHistory();
-  record = transitioned(await f.transition(record, 'archive'), 'archived');
   record = transitioned(await f.transition(record, 'trash'), 'trashed');
   const purged = await f.transition(record, 'purge', { confirmationTitle: value.title });
   assert.equal(purged.status, 200, JSON.stringify(purged.body)); assert.equal(purged.body.deleted, true); assert.equal(purged.body.id, value.id);
@@ -152,16 +148,14 @@ test('archive, recycle, restore and purge preserve real output and all history, 
 
 test('lifecycle HTTP requires explicit ordered states, exact purge title and the current revision', async t => {
   const f = await fixture(t), value = document(); let record = await f.save(value);
-  for (const action of ['trash', 'restore', 'purge']) {
+  for (const action of ['restore', 'unarchive', 'purge']) {
     assert.equal((await f.transition(record, action, action === 'purge' ? { confirmationTitle: value.title } : {})).status, 409);
   }
   const original = record;
-  record = transitioned(await f.transition(record, 'archive'), 'archived');
+  record = transitioned(await f.transition(record, 'trash'), 'trashed');
   assert(record.revision > original.revision);
   assert.equal((await f.transition(original, 'trash')).status, 409);
-  assert.equal((await f.transition(record, 'purge', { confirmationTitle: value.title })).status, 409);
-  record = transitioned(await f.transition(record, 'trash'), 'trashed');
-  assert.equal((await f.transition(record, 'unarchive')).status, 409);
+  for (const action of ['trash', 'archive']) assert.equal((await f.transition(record, action)).status, 409);
   for (const confirmationTitle of ['', value.title + ' ', '另一工作流', value.title.toUpperCase()]) {
     if (confirmationTitle === value.title) continue;
     assert.equal((await f.transition(record, 'purge', { confirmationTitle })).status, 400);
@@ -171,8 +165,35 @@ test('lifecycle HTTP requires explicit ordered states, exact purge title and the
   assert.equal((await f.transition(record, 'restore')).status, 410);
 });
 
+test('legacy archives and old action routes use canonical trash while preserving stored history until an explicit mutation', async t => {
+  const f = await fixture(t), value = document(); let record = await f.save(value);
+  const archivedAt = '2026-10-24T01:02:03.000Z';
+  f.app.store.db.prepare('INSERT INTO workflow_lifecycle(workflow_id,lifecycle,archived_at,trashed_at) VALUES(?,?,?,NULL)')
+    .run(value.id, 'archived', archivedAt);
+  const stored = () => ({ document: f.app.store.db.prepare('SELECT * FROM workflow_documents WHERE id=?').get(value.id),
+    lifecycle: f.app.store.db.prepare('SELECT * FROM workflow_lifecycle WHERE workflow_id=?').get(value.id) });
+  const before = stored();
+  for (const restart of [false, true]) {
+    if (restart) await f.restart();
+    record = (await f.api(`/api/workflow-library/${value.id}`)).body.workflow;
+    assert.equal(record.lifecycle, 'trashed'); assert.equal(record.trashedAt, archivedAt);
+    for (const lifecycle of ['archived', 'trashed', 'all']) {
+      const listed = await f.list(lifecycle); assert.equal(listed.length, 1); assert.equal(listed[0].lifecycle, 'trashed');
+    }
+    assert.deepEqual(stored(), before);
+    assert.equal((await f.api('/api/workflow-runs', { document: value, input: ' denied old archive ' })).status, 409);
+  }
+  record = transitioned(await f.transition(record, 'restore'), 'active');
+  const active = record;
+  record = transitioned(await f.transition(record, 'archive'), 'trashed');
+  assert.equal((await f.transition(active, 'archive')).status, 409);
+  assert.equal((await f.transition(record, 'archive')).status, 409);
+  record = transitioned(await f.transition(record, 'unarchive'), 'active');
+  assert.equal(record.revision, active.revision + 2); assert.equal(record.archivedAt, null); assert.equal(record.trashedAt, null);
+});
+
 test('lifecycle HTTP enforces CSRF, method, body, ID and list-filter validation without changing state', async t => {
-  const f = await fixture(t), value = document(), record = await f.save(value), path = `/api/workflow-library/${value.id}/archive`;
+  const f = await fixture(t), value = document(), record = await f.save(value), path = `/api/workflow-library/${value.id}/trash`;
   for (const headers of [{ 'X-Workbench-Token': '' }, { 'X-Workbench-Token': 'incorrect' }, { Origin: 'https://example.invalid' }]) {
     assert.equal((await f.api(path, { expectedRevision: record.revision }, headers)).status, 403);
   }
@@ -194,24 +215,23 @@ test('lifecycle HTTP enforces CSRF, method, body, ID and list-filter validation 
 
 test('lifecycle transitions conflict with concurrent edits and stale cached saves cannot resurrect inactive documents', async t => {
   const f = await fixture(t), value = document(); let record = await f.save(value);
-  const outcomes = await Promise.all([f.transition(record, 'archive'),
+  const outcomes = await Promise.all([f.transition(record, 'trash'),
     f.api('/api/workflow-library', { document: { ...value, title: '并发编辑后的名称' }, expectedRevision: record.revision })]);
   assert.deepEqual(outcomes.map(item => item.status).sort(), [200, 409]);
   record = (await f.api(`/api/workflow-library/${value.id}`)).body.workflow;
-  if (record.lifecycle === 'active') record = transitioned(await f.transition(record, 'archive'), 'archived');
+  if (record.lifecycle === 'active') record = transitioned(await f.transition(record, 'trash'), 'trashed');
   const staleSaves = async status => {
     for (const body of [{ document: value }, { document: record.document || value, expectedRevision: record.revision },
       { document: value, expectedRevision: 0 }]) assert.equal((await f.api('/api/workflow-library', body)).status, status);
   };
   await staleSaves(409);
-  record = transitioned(await f.transition(record, 'trash'), 'trashed'); await staleSaves(409);
   const current = (await f.api(`/api/workflow-library/${value.id}`)).body.workflow;
   assert.equal((await f.transition(record, 'purge', { confirmationTitle: current.document.title })).status, 200);
   await staleSaves(410); await f.restart(); await staleSaves(410);
   assert.deepEqual(await f.list('all'), []);
 });
 
-test('archived, trashed and purged documents reject v1/v2 execution, rerun and schedule reactivation but allow fresh temporary workflows', async t => {
+test('trashed and purged documents reject v1/v2 execution, rerun and schedule reactivation but allow fresh temporary workflows', async t => {
   const f = await fixture(t);
   for (const schemaVersion of [1, 2]) {
     const value = document({ schemaVersion }); let record = await f.save(value);
@@ -219,9 +239,9 @@ test('archived, trashed and purged documents reject v1/v2 execution, rerun and s
     const run = (await until(() => f.api(`/api/workflow-runs/${initial.body.id}`), result => result.body.status === 'complete')).body;
     const scheduled = await f.api('/api/workflow-schedules', scheduleBody(value));
     assert.equal(scheduled.status, 201, JSON.stringify(scheduled.body)); const schedule = scheduled.body.schedule;
-    for (const [action, status] of [['archive', 409], ['trash', 409], ['purge', 410]]) {
+    for (const [action, status] of [['trash', 409], ['purge', 410]]) {
       const changed = await f.transition(record, action, action === 'purge' ? { confirmationTitle: value.title } : {});
-      if (action !== 'purge') record = transitioned(changed, action === 'archive' ? 'archived' : 'trashed'); else assert.equal(changed.status, 200);
+      if (action !== 'purge') record = transitioned(changed, 'trashed'); else assert.equal(changed.status, 200);
       const started = await f.api('/api/workflow-runs', { document: value, input: ' must not run ' });
       assert.equal(started.status, status, JSON.stringify(started.body));
       if (schemaVersion === 2) assert.equal((await f.api(`/api/workflow-runs/${run.id}/rerun`, { nodeIds: ['trim'] })).status, status);
@@ -236,15 +256,15 @@ test('archived, trashed and purged documents reject v1/v2 execution, rerun and s
   assert.equal((await until(() => f.api(`/api/workflow-runs/${started.body.id}`), result => result.body.status === 'complete')).body.output, 'temporary');
 });
 
-test('a real human-review wait blocks archival until the running graph is stopped', async t => {
+test('a real human-review wait blocks trash until the running graph is stopped', async t => {
   const f = await fixture(t), value = document({ human: true }); const record = await f.save(value);
   const started = await f.api('/api/workflow-runs', { document: value, input: ' review pending ' }); assert.equal(started.status, 202);
   await until(() => f.api(`/api/workflow-runs/${started.body.id}`), result => result.body.status === 'waiting_review');
   const before = (await f.api(`/api/workflow-runs/${started.body.id}`)).body;
-  assert.equal((await f.transition(record, 'archive')).status, 409);
+  assert.equal((await f.transition(record, 'trash')).status, 409);
   assert.deepEqual((await f.api(`/api/workflow-runs/${started.body.id}`)).body, before);
   assert.equal((await f.api(`/api/workflow-runs/${started.body.id}/interrupt`, {})).body.status, 'interrupted');
-  transitioned(await f.transition(record, 'archive'), 'archived');
+  transitioned(await f.transition(record, 'trash'), 'trashed');
 });
 
 test('persisted queued runs and learning phases block lifecycle changes without touching their histories', async t => {
@@ -252,7 +272,7 @@ test('persisted queued runs and learning phases block lifecycle changes without 
   const insert = f.app.store.db.prepare('INSERT INTO workflow_runs(id,value) VALUES(?,?)');
   for (const status of ['preparing', 'running', 'waiting', 'queued', 'waiting_review']) {
     const id = randomUUID(), raw = JSON.stringify({ id, workflowId: value.id, status, document: value, nodes: {}, startedAt: new Date().toISOString() });
-    insert.run(id, raw); assert.equal((await f.transition(record, 'archive')).status, 409, status);
+    insert.run(id, raw); assert.equal((await f.transition(record, 'trash')).status, 409, status);
     assert.equal(f.app.store.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(id).value, raw);
     f.app.store.db.prepare('DELETE FROM workflow_runs WHERE id=?').run(id);
   }
@@ -260,42 +280,42 @@ test('persisted queued runs and learning phases block lifecycle changes without 
   for (const phase of ['preparing-memory', 'running-sample', 'evaluating', 'rewriting', 'waiting-review', 'stopping']) {
     const id = randomUUID(), raw = JSON.stringify({ id, workflowId: value.id, status: phase === 'waiting-review' ? 'waiting' : 'running', phase,
       document: { ...value, mode: 'learn' }, config: { trainingCases: [], validationCases: [] }, rounds: [], startedAt: new Date().toISOString() });
-    insertLearning.run(id, raw); assert.equal((await f.transition(record, 'archive')).status, 409, phase);
+    insertLearning.run(id, raw); assert.equal((await f.transition(record, 'trash')).status, 409, phase);
     assert.equal(f.app.store.db.prepare('SELECT value FROM workflow_learning WHERE id=?').get(id).value, raw);
     f.app.store.db.prepare('DELETE FROM workflow_learning WHERE id=?').run(id);
   }
-  f.app.workflows.locks.set(value.id, {}); assert.equal((await f.transition(record, 'archive')).status, 409); f.app.workflows.locks.delete(value.id);
-  f.app.learning.locks.set(value.id, {}); assert.equal((await f.transition(record, 'archive')).status, 409); f.app.learning.locks.delete(value.id);
-  transitioned(await f.transition(record, 'archive'), 'archived');
+  f.app.workflows.locks.set(value.id, {}); assert.equal((await f.transition(record, 'trash')).status, 409); f.app.workflows.locks.delete(value.id);
+  f.app.learning.locks.set(value.id, {}); assert.equal((await f.transition(record, 'trash')).status, 409); f.app.learning.locks.delete(value.id);
+  transitioned(await f.transition(record, 'trash'), 'trashed');
 });
 
-test('archive racing an awaited DAG preflight cannot admit an archived workflow', async t => {
+test('trash racing an awaited DAG preflight cannot admit a trashed workflow', async t => {
   const f = await fixture(t), value = document(); let record = await f.save(value);
   const original = f.app.workflowFiles.prepareRun.bind(f.app.workflowFiles);
   let release, entered; const gate = new Promise(resolve => { entered = resolve; });
   f.app.workflowFiles.prepareRun = async (...args) => { entered(); await new Promise(resolve => { release = resolve; }); return original(...args); };
   const starting = f.api('/api/workflow-runs', { document: value, input: ' race ' });
   await gate;
-  let archived;
-  try { archived = await f.transition(record, 'archive'); }
+  let trashed;
+  try { trashed = await f.transition(record, 'trash'); }
   finally { release(); }
   const started = await starting;
-  assert([200, 409].includes(archived.status), JSON.stringify(archived.body));
-  if (archived.status === 200) {
-    assert.equal(started.status, 409, 'the final admission check must reject a workflow archived during preflight');
-    assert.equal(f.app.workflows.list(value.id).length, 0); record = archived.body.workflow;
+  assert([200, 409].includes(trashed.status), JSON.stringify(trashed.body));
+  if (trashed.status === 200) {
+    assert.equal(started.status, 409, 'the final admission check must reject a workflow trashed during preflight');
+    assert.equal(f.app.workflows.list(value.id).length, 0); record = trashed.body.workflow;
   } else {
     assert.equal(started.status, 202, JSON.stringify(started.body));
     await until(() => f.api(`/api/workflow-runs/${started.body.id}`), result => result.body.status === 'complete');
-    record = transitioned(await f.transition(record, 'archive'), 'archived');
+    record = transitioned(await f.transition(record, 'trash'), 'trashed');
   }
-  assert.equal((await f.api(`/api/workflow-library/${value.id}`)).body.workflow.lifecycle, 'archived');
+  assert.equal((await f.api(`/api/workflow-library/${value.id}`)).body.workflow.lifecycle, 'trashed');
   assert.equal((await f.api('/api/workflow-runs', { document: value, input: ' denied after race ' })).status, 409);
 });
 
-test('an embedded archived child snapshot cannot bypass lifecycle execution admission', async t => {
+test('an embedded trashed child snapshot cannot bypass lifecycle execution admission', async t => {
   const f = await fixture(t), child = document(); let childRecord = await f.save(child);
-  childRecord = transitioned(await f.transition(childRecord, 'archive'), 'archived');
+  childRecord = transitioned(await f.transition(childRecord, 'trash'), 'trashed');
   let parent = createDocument({ title: '包含冻结子流程', schemaVersion: 2 });
   parent.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'entry', config: { outputType: 'text' } }),
     createNode('subflow', { x: 300, y: 0 }, { id: 'child', config: { inputType: 'text', outputType: 'text', workflowRef: child.id,
@@ -311,7 +331,7 @@ test('an embedded archived child snapshot cannot bypass lifecycle execution admi
   assert.equal(f.app.workflows.list().length, 0);
 });
 
-test('a schedule claimed before archival is fenced during its awaited preflight and is never replayed after restart', async t => {
+test('a schedule claimed before trash is fenced during its awaited preflight and is never replayed after restart', async t => {
   const f = await fixture(t), value = document(); let record = await f.save(value);
   const scheduled = await f.api('/api/workflow-schedules', scheduleBody(value)); assert.equal(scheduled.status, 201, JSON.stringify(scheduled.body));
   const schedule = scheduled.body.schedule, original = f.app.workflowFiles.prepareRun.bind(f.app.workflowFiles);
@@ -320,19 +340,19 @@ test('a schedule claimed before archival is fenced during its awaited preflight 
   f.app.schedules.clock = () => Date.parse(schedule.nextRunAt) + 100;
   const ticking = f.app.schedules.tick(); await gate;
   assert.equal(f.app.schedules.pending.size, 1);
-  let archived;
-  try { archived = await f.transition(record, 'archive'); }
+  let trashed;
+  try { trashed = await f.transition(record, 'trash'); }
   finally { release(); }
   await ticking;
   assert.equal(f.app.schedules.pending.size, 0);
-  if (archived.status === 200) {
-    record = archived.body.workflow; assert.equal(f.app.workflows.list(value.id).length, 0, 'the old claimed snapshot did not start');
+  if (trashed.status === 200) {
+    record = trashed.body.workflow; assert.equal(f.app.workflows.list(value.id).length, 0, 'the old claimed snapshot did not start');
   } else {
-    assert.equal(archived.status, 409, JSON.stringify(archived.body));
+    assert.equal(trashed.status, 409, JSON.stringify(trashed.body));
     await until(() => f.app.workflows.list(value.id), runs => runs.length === 1 && runs[0].status === 'complete');
-    record = transitioned(await f.transition(record, 'archive'), 'archived');
+    record = transitioned(await f.transition(record, 'trash'), 'trashed');
   }
-  assert.equal(record.lifecycle, 'archived');
+  assert.equal(record.lifecycle, 'trashed');
   const count = f.app.workflows.list(value.id).length;
   assert.equal((await f.api(`/api/workflow-schedules/${schedule.id}`)).body.schedule.enabled, false);
   await f.app.schedules.tick(); assert.equal(f.app.workflows.list(value.id).length, count);
@@ -373,9 +393,9 @@ test('inactive workflows cannot begin sample learning, feedback learning or cand
   f.app.learning.model.createMemoryScope = async () => { calls.memory++; throw Error('Inactive workflow captured memory.'); };
   f.app.learning.model.generate = async () => { calls.generate++; throw Error('Inactive workflow called a model.'); };
   f.app.learnedSkills.publish = async () => { calls.publish++; throw Error('Inactive workflow published a candidate.'); };
-  for (const [action, status] of [['archive', 409], ['trash', 409], ['purge', 410]]) {
+  for (const [action, status] of [['trash', 409], ['purge', 410]]) {
     const changed = await f.transition(record, action, action === 'purge' ? { confirmationTitle: linked.title } : {});
-    if (action === 'purge') assert.equal(changed.status, 200); else record = transitioned(changed, action === 'archive' ? 'archived' : 'trashed');
+    if (action === 'purge') assert.equal(changed.status, 200); else record = transitioned(changed, 'trashed');
     const requests = [
       ['/api/workflow-learning', { document: { ...linked, mode: 'learn' }, input: 'training', expected: 'expected', targetScore: 100, maxRounds: 1 }],
       [`/api/workflow-runs/${id}/feedback/learn`, { feedbackRevision: 1 }],

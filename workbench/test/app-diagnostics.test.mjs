@@ -55,6 +55,14 @@ test('global diagnostics work without a selected workflow and do not contact Her
   assert.deepEqual(f.calls, []);
 });
 
+test('workflow diagnostics advertise the recycle bin and normalize the archived query alias', async () => {
+  const f = fixture(), filters = [];
+  f.app.workflowLibrary.list = ({ lifecycle }) => { filters.push(lifecycle); return []; };
+  assert.deepEqual(f.diagnostics.tools().find(row => row.name === 'workflows.list').inputSchema.properties.lifecycle.enum, ['active', 'trashed', 'all']);
+  const result = await f.diagnostics.read('workflows.list', { lifecycle: 'archived' });
+  assert.equal(result.lifecycle, 'trashed'); assert.deepEqual(filters, ['trashed']); assert.deepEqual(f.calls, []);
+});
+
 test('explicit run stays distinct from latest and from the current draft', async () => {
   const f = fixture(), document = copy(f.document); document.nodes[0].config.timeoutSeconds = 300;
   const result = await f.diagnostics.snapshot({ workflowId: document.id, document, runId: 'run-old' });

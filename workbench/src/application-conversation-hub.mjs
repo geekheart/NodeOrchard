@@ -12,7 +12,7 @@ const definition = (name, description, inputSchema, effect = 'read-only') => ({ 
   annotations: { readOnlyHint: effect === 'read-only', destructiveHint: false, idempotentHint: true, openWorldHint: false } });
 export const APPLICATION_CONVERSATION_HUB_TOOLS = Object.freeze([
   definition('conversations.list', '总控专用：按工作流读取独立会话目录和有界状态摘要，不合并各会话历史，不创建空会话。', schema({
-    lifecycle: { enum: ['active', 'archived', 'trashed', 'all'] }, search: { type: 'string', maxLength: 128 }, limit: { type: 'integer', minimum: 1, maximum: 200 } })),
+    lifecycle: { enum: ['active', 'trashed', 'all'] }, search: { type: 'string', maxLength: 128 }, limit: { type: 'integer', minimum: 1, maximum: 200 } })),
   definition('conversation.inspect', '总控专用：按需读取指定工作流独立会话的有界脱敏消息和待处理元数据；学习/反馈材料、业务代码与检查点不展开。', schema({
     workflowId: string, limit: { type: 'integer', minimum: 1, maximum: 40 }, beforeTurnId: string }, ['workflowId'])),
   definition('conversation.delegate', '总控专用：依据本轮人工明确委派，向指定工作流助手派发只读诊断；返回消息身份和进度，不等待模型，不应用、运行、审核或学习。重复 operationId 读回原任务，不重发。', schema({
@@ -91,8 +91,8 @@ export class ApplicationConversationHub {
   project(workflowId, turns) { return projectConversationIssues(turns, { reviewState: context => this.app.conversations.reviewState(workflowId, context) }); }
   list(args = {}) {
     plain(args, ['lifecycle', 'search', 'limit']);
-    const lifecycle = args.lifecycle || 'active', max = limit(args.limit, 100, 200);
-    if (!['active', 'archived', 'trashed', 'all'].includes(lifecycle)) fail('会话工作流分类无效。');
+    const lifecycle = args.lifecycle === 'archived' ? 'trashed' : args.lifecycle || 'active', max = limit(args.limit, 100, 200);
+    if (!['active', 'trashed', 'all'].includes(lifecycle)) fail('会话工作流分类无效。');
     if (args.search !== undefined && (typeof args.search !== 'string' || args.search.length > 128 || args.search.includes('\0'))) fail('会话检索条件无效。');
     const search = (args.search || '').trim().toLowerCase(), source = this.app.workflowLibrary.list({ lifecycle })
       .filter(row => !search || (row.title + ' ' + row.id).toLowerCase().includes(search));

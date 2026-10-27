@@ -42,7 +42,7 @@ NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 
 | 产物交付 | 阶段输出与最终输出；执行原件和交付副本分离，副本可单独重试保存 |
 | 执行与学习 | 执行固定 Skill 版本；学习基于训练／验证样例与反馈提出候选，记录逐例结果和正文差异 |
 | 定时任务 | 指定时间运行一次，或按时区每日运行；与手动执行共用输入预检 |
-| 工作流管理 | 看板、搜索、另存新版、归档与回收站；永久删除须先进入回收站 |
+| 工作流管理 | 看板、搜索、另存新版、回收站；工作流先移入回收站，再恢复或永久删除 |
 
 学习不是自动获得通用能力的保证。训练集与验证集用于评估和候选选择，仍需独立样例及人工复评；执行允许 Hermes 更新长期记忆，学习批次使用固定的只读记忆快照，避免本批样例写回共享记忆。
 
@@ -339,7 +339,7 @@ Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人�
 | [节点体系](workbench/docs/workflow-node-system.md) | 基础节点、预设、组合与当前限制 |
 | [工作流对话](workbench/docs/workflow-conversation.md) | AI 修改、产物反馈与回复对象 |
 | [输入与恢复](workbench/docs/workflow-inputs-and-recovery.md) | 输入预检、原件、审核与重启恢复 |
-| [版本与生命周期](workbench/docs/workflow-versioning.md) / [归档与回收站](workbench/docs/workflow-lifecycle.md) | 另存新版、归档、恢复与删除 |
+| [版本与生命周期](workbench/docs/workflow-versioning.md) / [回收站与删除](workbench/docs/workflow-lifecycle.md) | 另存新版、移入回收站、恢复与删除 |
 | [学习协议](workbench/docs/learning-protocol.md) | 多样例评估、候选版本与记忆隔离 |
 | [Hermes 协议](workbench/docs/hermes-protocol.md) | 原生 stdio 网关与适配边界 |
 | [架构](workbench/docs/architecture.md) / [协作规则](AGENTS.md) | 模块职责、代码边界与验证规范 |

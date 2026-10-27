@@ -17,7 +17,7 @@ export const APPLICATION_SUPERVISOR_TOOLS = Object.freeze([
   mutation('workflow.create-test', '总控专用：新增独立测试工作流草稿；可提供完整节点文档，名称自动标记测试；不运行。新对象 expectedRevision 必须为 0，operationId 必须稳定。',
     { title, document: { type: 'object' }, expectedRevision: { type: 'integer', enum: [0] }, operationId: identifier },
     ['title', 'expectedRevision', 'operationId']),
-  mutation('workflow.delete', '总控专用：按明确版本将工作流移入可恢复回收站；活动流程先归档并暂停定时任务，忙碌流程拒绝。无永久删除权限，不取消或重跑业务。',
+  mutation('workflow.delete', '总控专用：按明确版本将工作流直接移入可恢复回收站，同时暂停定时任务，忙碌流程拒绝。无永久删除权限，不取消或重跑业务。',
     { workflowId: identifier, expectedRevision: revision, operationId: identifier }, ['workflowId', 'expectedRevision', 'operationId']),
   { name: 'app.logs', description: '总控专用：读取当前进程保留的应用事件摘要与 Hermes 诊断日志；脱敏、有界，不包含完整持久历史、训练样本或内部推理。',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 },
@@ -173,23 +173,11 @@ export class ApplicationSupervisorTools {
 
   remove(request, source) {
     const library = this.app.workflowLibrary;
-    let current = source;
-    if (current.lifecycle === 'active') {
-      library.transition(current.id, 'archive', { expectedRevision: current.revision });
-      current = library.get(current.id);
-    }
-    try {
-      library.transition(current.id, 'trash', { expectedRevision: current.revision });
-    } catch (error) {
-      const observed = library.get(current.id);
-      return { status: 'partial', executed: true, targetWorkflowId: current.id, revision: observed.revision,
-        lifecycle: observed.lifecycle, archived: observed.lifecycle !== 'active', deleted: observed.lifecycle === 'trashed', permanent: false, recoverable: true,
-        reason: sanitizeDiagnosticText(error.message).slice(0, 2000), runStarted: false };
-    }
-    const saved = library.get(current.id);
+    library.transition(source.id, 'trash', { expectedRevision: request.expectedRevision });
+    const saved = library.get(source.id);
     return { status: 'complete', executed: true, targetWorkflowId: saved.id, revision: saved.revision,
       lifecycle: saved.lifecycle, deleted: true, permanent: false, recoverable: true, runStarted: false,
-      recovery: '回收站恢复后取消归档；定时任务保持暂停，需用户重新启用。' };
+      recovery: '在回收站恢复到工作流；定时任务保持暂停，需用户重新启用。' };
   }
 
   logs({ limit = 40, afterId = 0 } = {}) {

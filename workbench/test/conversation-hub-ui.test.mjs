@@ -14,7 +14,7 @@ const flatten = value => [value, ...value.children.flatMap(flatten)];
 const contents = value => flatten(value).map(item => item.textContent).join('\n');
 const data = () => ({ workflows: [
   { workflowId: 'workflow-a', title: '采集热榜', lifecycle: 'active', conversation: { turnCount: 5, pendingCount: 1, active: false, status: 'error', lastMessage: { text: '原错误证据保留' } } },
-  { workflowId: 'workflow-b', title: '整理报告', lifecycle: 'archived', conversation: { turnCount: 2, pendingCount: 0, active: true, status: 'thinking' } },
+  { workflowId: 'workflow-b', title: '整理报告', lifecycle: 'trashed', conversation: { turnCount: 2, pendingCount: 0, active: true, status: 'thinking' } },
 ], supervisors: [
   { id: 'supervisor-new', title: '修复热榜连接', turnCount: 2, pendingCount: 0, legacy: false },
   { id: 'global-application', title: '旧全局记录', turnCount: 3, pendingCount: 0, legacy: true },
@@ -94,8 +94,23 @@ test('search and status filters operate on summaries without merging workflows o
   assert.deepEqual(filterHubConversations(rows, { query: '错误证据' }).map(row => row.workflowId), ['workflow-a']);
   assert.deepEqual(filterHubConversations(rows, { filter: 'active' }).map(row => row.workflowId), ['workflow-b']);
   assert.deepEqual(filterHubConversations(rows, { filter: 'pending' }).map(row => row.workflowId), ['workflow-a', 'workflow-b']);
-  assert.deepEqual(filterHubConversations(rows, { filter: 'archived' }).map(row => row.workflowId), ['workflow-b']);
+  assert.deepEqual(filterHubConversations(rows, { filter: 'trashed' }).map(row => row.workflowId), ['workflow-b']);
+  assert.deepEqual(filterHubConversations(rows, { filter: 'trashed' }).map(row => row.workflowId),
+    filterHubConversations(rows.map(row => row.lifecycle === 'trashed' ? { ...row, lifecycle: 'archived' } : row), { filter: 'trashed' }).map(row => row.workflowId));
   assert.equal(rows.length, 2);
+});
+
+test('directory uses one recycle-bin filter and labels older archived records as recycled', async t => {
+  const records = data(); records.workflows[1].lifecycle = 'archived';
+  const f = fixture(t, async () => records);
+  await f.ui.activate({ id: 'supervisor-new' });
+  assert.deepEqual(f.ui.filterInput.children.map(item => [item.value, item.textContent]),
+    [['all', '全部'], ['pending', '待处理'], ['active', '正在回复'], ['trashed', '回收站']]);
+  assert.match(contents(f.ui.workflowList), /回收站/);
+  assert.doesNotMatch(contents(f.ui.workflowList), /归档/);
+  f.ui.filterInput.value = 'trashed'; f.ui.filterInput.listeners.get('change')();
+  assert.match(contents(f.ui.workflowList), /整理报告/);
+  assert.doesNotMatch(contents(f.ui.workflowList), /采集热榜/);
 });
 
 test('ordinary historical tasks remain navigable and managed model sessions are not duplicated', async t => {
