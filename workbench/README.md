@@ -4,6 +4,8 @@
 
 本机单用户应用，以 Hermes 为 Agent 核心，由 Hermes 管理模型连接、认证、Skills 和记忆。支持工作流看板、节点编排、AI 对话修改、并行调度、人工审核、定时运行及多样例 Skill 学习。
 
+顶部提示横幅右侧的关闭按钮可隐藏当前消息；后续新提示仍会显示，Hermes 连接与运行状态不受影响。
+
 ## 运行与工作环境
 
 需要 Node.js ≥ 22.13。主应用使用 Node 内置模块，无需安装前端框架或独立数据库服务。**使用 AI 功能前，先按 [Hermes 官方指南](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装 Hermes Agent**，运行 `hermes model` 配置提供商和模型，再用 `hermes` 验证一次对话。当前适配已验证 Hermes 0.21.4。

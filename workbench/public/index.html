@@ -22,7 +22,7 @@
   <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="收起主边栏" tabindex="-1" hidden></button>
   <div id="main-shell" class="main-shell">
     <header class="topbar"><div id="breadcrumb" class="breadcrumb"></div><div class="topbar-actions"><button id="hermes-model-button" class="button quiet hermes-model-button" type="button" aria-haspopup="dialog" aria-controls="hermes-model-dialog" title="切换 Hermes 模型"><span data-icon="model"></span><span id="hermes-model-label">Hermes 模型</span><span class="hermes-model-chevron" aria-hidden="true">⌄</span></button><button id="details-button" class="button quiet" type="button" hidden><span data-icon="panel"></span>执行详情</button><button id="new-task-button" class="button primary" type="button"><span data-icon="plus"></span>新建任务</button></div></header>
-    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="notice" class="notice" hidden><span id="notice-text" role="status" aria-live="polite"></span><button id="notice-close" class="icon-button notice-close" type="button" aria-label="关闭提示" title="关闭提示"><span data-icon="close"></span></button></div>
     <div class="main-body">
       <main id="main-content" class="main-content">
         <section id="page-workflows" class="workflow-page" data-page="workflows" hidden><div id="workflow-root"></div><div id="workflow-load-status" class="workflow-load-status" role="status" hidden></div></section>

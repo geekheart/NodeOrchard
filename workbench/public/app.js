@@ -64,7 +64,7 @@ function dirname(cwd) { return String(cwd || '').replace(/[\\/]+$/, '').split(/[
 function selectedSession() { return state.sessions.find((session) => session.id === state.selectedId); }
 function isBusy(id) { return state.streams.has(id) || state.posting.has(id) || ['running', 'busy', 'waiting'].includes(state.sessions.find((session) => session.id === id)?.status); }
 function preferences() { return { ...defaults, ...state.settings?.preferences }; }
-function notify(text, error = false) { $('notice').hidden = !text; $('notice').textContent = safeText(text); $('notice').className = error ? 'notice error' : 'notice'; }
+function notify(text, error = false) { $('notice').hidden = !text; $('notice-text').textContent = safeText(text); $('notice').className = error ? 'notice error' : 'notice'; }
 async function api(path, { method = 'GET', body } = {}) {
   const headers = { Accept: 'application/json' };
   if (method !== 'GET') { if (!state.csrfToken) throw new Error('工作台尚未就绪，请刷新后重试。'); headers['Content-Type'] = 'application/json'; headers['X-Workbench-Token'] = state.csrfToken; }
@@ -553,6 +553,7 @@ document.addEventListener('keydown', event => {
   }
 });
 $('sidebar-connect').addEventListener('click', () => state.backend.state === 'ready' ? navigate('#/settings') : connectBackend());
+$('notice-close').addEventListener('click', () => notify(''));
 $('connect-button').addEventListener('click', connectBackend);
 $('new-task-connect').addEventListener('click', connectBackend);
 $('refresh-button').addEventListener('click', async () => { const ok = await synchronize(); await Promise.allSettled([loadSettings(), hermesModels.refresh({ preserveSelection: true })]); if (ok && !state.source) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; openEvents(); } });
