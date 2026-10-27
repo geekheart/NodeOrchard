@@ -51,6 +51,7 @@ test('persistent model records carry authoritative timeouts, character counts an
   db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'complete',
     startedAt: start, submittedAt: start, firstOutputAt: output, lastOutputAt: end, completedAt: end,
     promptCharacters: 48262, outputCharacters: 136, timeoutKind: null, errorCode: null,
+    requestedReasoningEffort: 'medium', reasoningEffort: 'medium', reasoningEffortWire: 'medium',
     timeoutPolicy: { firstResponseTimeoutMs: 180000, outputIdleTimeoutMs: 30000, maxDurationMs: 240000, deadlineAt: '2026-10-27T07:11:56.000Z' },
     prompt: 'PRIVATE_PROMPT', body: 'PRIVATE_BODY', token: 'PRIVATE_CREDENTIAL' }));
   db.prepare('INSERT INTO run_usage VALUES(?,?,?)').run('run-three','session-three', JSON.stringify({ status:'measured',final:true,source:'message.complete',usage:{input:14000,output:500,total:14500,context_used:14000},path:'PRIVATE_PATH' }));
@@ -59,6 +60,7 @@ test('persistent model records carry authoritative timeouts, character counts an
   assert.equal(call.status,'complete'); assert.equal(call.complete,true); assert.equal(call.promptCharacters,48262);
   assert.equal(call.outputCharacters,136); assert.equal(call.usage.inputTokens,14000); assert.equal(call.usage.outputTokens,500);
   assert.equal(call.usage.totalTokens,14500); assert.equal(call.timeoutPolicy.firstResponseTimeoutMs,180000);
+  assert.equal(call.requestedReasoningEffort, 'medium'); assert.equal(call.reasoningEffort, 'medium'); assert.equal(call.reasoningEffortWire, 'medium');
   assert.equal(JSON.stringify(result).includes('PRIVATE_'),false);
 });
 

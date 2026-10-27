@@ -3,6 +3,11 @@ import { redact } from '../hermes-adapter.mjs';
 
 const fail = message => new Error(message);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const reasoningMetadata = (session, key) => {
+  const value = session && Object.getOwnPropertyDescriptor(session, key)?.value;
+  return REASONING_EFFORTS.has(value) ? value : null;
+};
 const scopeConfirmed = (policy, id) => policy?.memoryAllowed === true && policy.memoryWriteAllowed === false
   && policy.externalMemoryAllowed === false && policy.memoryMode === 'batch-snapshot' && policy.memoryScopeId === id;
 
@@ -90,8 +95,9 @@ export class LearningModel {
     return { id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false, snapshot: { ...snapshot } };
   }
   async generate(prompt, { signal, onSession, onProgress, memoryScopeId, modelRoute, deadlineAt, firstResponseTimeoutMs,
-    outputIdleTimeoutMs, images = [], title = '学习 · 评价 / 调整 Skill' } = {}) {
+    outputIdleTimeoutMs, reasoningEffort, images = [], title = '学习 · 评价 / 调整 Skill' } = {}) {
     if (this.purpose === 'assistant' && memoryScopeId !== undefined) throw fail('应用助手不能访问学习记忆。');
+    if (reasoningEffort !== undefined && (this.purpose !== 'assistant' || !['low', 'medium'].includes(reasoningEffort))) throw fail('仅应用助手控制调用可指定 low 或 medium 推理强度。');
     if (!Array.isArray(images) || images.length > 4 || images.some(path => typeof path !== 'string') || images.length && this.purpose !== 'assistant') throw fail('模型图像输入无效。');
     if (this.closed || signal?.aborted) throw fail(`${this.subject}调用已停止。`);
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw fail(`${this.subject}指令超过长度限制。`);
@@ -116,11 +122,17 @@ export class LearningModel {
     result.catch(() => {});
     if (state.done) return result;
     void (async () => { try {
-      const session = await this.app.createSession({ title, ...(this.purpose === 'assistant' ? { managedPurpose: 'assistant' } : {}), ...(modelRoute ? { modelRoute } : {}) });
+      const session = await this.app.createSession({ title, ...(this.purpose === 'assistant' ? { managedPurpose: 'assistant' } : {}),
+        ...(reasoningEffort !== undefined ? { assistantReasoningEffort: reasoningEffort } : {}), ...(modelRoute ? { modelRoute } : {}) });
       // Creation can outlive abort or close. Never touch a closed database; while
       // still open, retain ownership of even an unused late session.
       if (this.closed) return;
       state.id = session.id;
+      if (this.purpose === 'assistant') {
+        state.requestedReasoningEffort = reasoningMetadata(session, 'requestedReasoningEffort');
+        state.reasoningEffort = reasoningMetadata(session, 'reasoningEffort');
+        state.reasoningEffortWire = reasoningMetadata(session, 'reasoningEffortWire');
+      }
       this.db.prepare(`INSERT OR IGNORE INTO ${this.sessionTable}(id) VALUES(?)`).run(session.id);
       if (state.done || signal?.aborted) { void this.app.interrupt(session.id).catch(() => {}); return; }
       this.persistMetrics(state);
@@ -131,6 +143,13 @@ export class LearningModel {
       const prepared = await this.app.adapter.request(this.purpose === 'assistant' ? 'workbench.assistant.prepare' : 'workbench.learning.prepare', { session_id: session.runtimeSessionId,
         ...(memoryScopeId ? { memory_scope_id: memoryScopeId } : {}) });
       if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
+      if (this.purpose === 'assistant') {
+        // Lazy native sessions may publish their actual configuration only when
+        // preparation builds the agent. This is observation, never an override.
+        const info = this.app.sessionInfo?.get(session.runtimeSessionId);
+        state.reasoningEffort = reasoningMetadata(info, 'reasoning_effort') ?? state.reasoningEffort;
+        state.reasoningEffortWire = reasoningMetadata(info, 'reasoning_effort_wire') ?? state.reasoningEffortWire;
+      }
       if (this.purpose === 'assistant' ? prepared?.policy?.toolsAllowed !== false || prepared.policy.applicationTools !== 'broker-only'
         || prepared.policy.sourceMutationBlocked !== true || prepared.policy.skillMutationBlocked !== true
         || prepared.policy.memoryAllowed !== false || prepared.policy.memoryWriteAllowed !== false
@@ -174,6 +193,8 @@ export class LearningModel {
       submittedAt: date(state.submittedAtMs), firstOutputAt: date(state.firstOutputAtMs), lastOutputAt: date(state.lastOutputAtMs),
       completedAt: date(state.completedAtMs), promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters,
       timeoutKind: state.timeoutKind || null, errorCode: state.errorCode || null,
+      requestedReasoningEffort: state.requestedReasoningEffort ?? null, reasoningEffort: state.reasoningEffort ?? null,
+      reasoningEffortWire: state.reasoningEffortWire ?? null,
       timeoutPolicy: { firstResponseTimeoutMs: state.firstResponseTimeoutMs, outputIdleTimeoutMs: state.outputIdleTimeoutMs,
         maxDurationMs: this.maxDurationMs, deadlineAt: date(state.deadlineAtMs) } };
   }
@@ -189,6 +210,7 @@ export class LearningModel {
         ...(state.firstOutputAtMs !== undefined ? { waitMs: state.firstOutputAtMs - state.startedAtMs,
           outputMs: Math.max(0, (state.completedAtMs ?? Date.now()) - state.firstOutputAtMs) } : {}),
         promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters, timeoutKind: state.timeoutKind,
+        requestedReasoningEffort: state.requestedReasoningEffort, reasoningEffort: state.reasoningEffort, reasoningEffortWire: state.reasoningEffortWire,
         errorCode: state.errorCode, firstResponseTimeoutMs: state.firstResponseTimeoutMs,
         outputIdleTimeoutMs: state.outputIdleTimeoutMs, maxDurationMs: this.maxDurationMs }); } catch { /* Logging never changes model control. */ }
   }

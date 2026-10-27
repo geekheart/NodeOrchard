@@ -12,6 +12,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const array = value => Array.isArray(value) ? value : [];
 const identifier = value => typeof value === 'string' && ID.test(value) && !['__proto__', 'prototype', 'constructor'].includes(value);
 const number = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+const effort = value => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value) ? value : null;
 const time = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const delta = (from, to) => from && to ? number(Date.parse(to) - Date.parse(from)) : null;
 const parse = value => { try { return JSON.parse(value); } catch { return null; } };
@@ -155,6 +156,8 @@ export class AssistantModelDiagnostics {
         : snapshot ? { usage: own(snapshot, 'usage'), source: 'session.snapshot', complete: ['complete', 'completed'].includes(run.status)
           && own(snapshot, 'source') === 'message.complete', tokensRecorded: own(snapshot, 'source') === 'message.complete' ? true : null } : info;
       return { index, sessionId, status: terminalStatus, model: label(session?.model), provider: label(session?.provider),
+        requestedReasoningEffort: effort(own(stored, 'requestedReasoningEffort')), reasoningEffort: effort(own(stored, 'reasoningEffort')),
+        reasoningEffortWire: effort(own(stored, 'reasoningEffortWire')),
         ownerStatus, ownerUpdatedAt: time(own(turn, 'updatedAt')), persistedSnapshotStatus, statusSource,
         modelTerminalConfirmed: !staleRunning && Boolean(stored && completedAt || !stored && readResultAt),
         startedAt, submittedAt, firstOutputAt, completedAt, waitMs: delta(submittedAt, firstOutputAt || readResultAt || completedAt),

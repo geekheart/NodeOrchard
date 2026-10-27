@@ -28,10 +28,48 @@ import { ApplicationAssistant } from './application-assistant.mjs';
 import { AssistantPermissionSettings } from './assistant-permission-settings.mjs';
 import { createAppDiagnosticBrowser } from './app-diagnostic-browser.mjs';
 
+const REASONING_EFFORTS = new Set(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+const ASSISTANT_REASONING_EFFORTS = new Set(['low', 'medium']);
+const reasoningError = () => Object.assign(new Error('Hermes 未确认助手会话的推理档位，已停止提交。'), { code: 'ASSISTANT_REASONING_UNCONFIRMED' });
+
 function infoView(info = {}) {
   const usage = sanitizeSessionUsage(info.usage);
   return { ...Object.fromEntries(['model', 'provider', 'version', 'cwd', 'running', 'yolo', 'approval_mode', 'tools', 'skills', 'credential_warning']
-    .filter(key => info[key] !== undefined).map(key => [key, info[key]])), ...(usage ? { usage } : {}) };
+    .filter(key => info[key] !== undefined).map(key => [key, info[key]])),
+  ...Object.fromEntries(['reasoning_effort', 'reasoning_effort_wire'].filter(key => REASONING_EFFORTS.has(info[key])).map(key => [key, info[key]])),
+  ...(usage ? { usage } : {}) };
+}
+
+function observeAssistantReasoning(adapter) {
+  // Native session.create returns a lazy snapshot; the built agent later emits
+  // session.info. Subscribe before create so an early ready event is not lost.
+  const observed = new Map();
+  let waiting, timer, disconnected = false;
+  const onEvent = event => {
+    if (event.type !== 'session.info' || !event.session_id || event.payload?.lazy === true) return;
+    const info = infoView(event.payload || {});
+    observed.set(event.session_id, info);
+    if (observed.size > 32) observed.delete(observed.keys().next().value);
+    if (waiting?.runtime === event.session_id) waiting.resolve(info);
+  };
+  const onState = state => {
+    if (!['disconnected', 'error', 'stopped'].includes(state?.state)) return;
+    disconnected = true;
+    waiting?.reject(reasoningError());
+  };
+  adapter.on('event', onEvent); adapter.on('state', onState);
+  return {
+    wait(runtime, initial) {
+      if (disconnected) return Promise.reject(reasoningError());
+      if (observed.has(runtime)) return Promise.resolve(observed.get(runtime));
+      if (initial && initial.lazy !== true) return Promise.resolve(infoView(initial));
+      return new Promise((resolve, reject) => {
+        waiting = { runtime, resolve, reject };
+        timer = setTimeout(() => reject(reasoningError()), 10_000);
+      });
+    },
+    close() { clearTimeout(timer); adapter.off('event', onEvent); adapter.off('state', onState); },
+  };
 }
 
 export class Application extends EventEmitter {
@@ -310,26 +348,56 @@ export class Application extends EventEmitter {
     return snapshot;
   }
 
-  async createSession({ title = '', cwd = '', modelRoute, managedPurpose } = {}) {
+  async createSession({ title = '', cwd = '', modelRoute, managedPurpose, assistantReasoningEffort, ...unsupported } = {}) {
+    if (Object.keys(unsupported).length) throw new Error('新建会话参数无效。');
     if (managedPurpose !== undefined && managedPurpose !== 'assistant') throw new Error('托管会话用途无效。');
+    if (assistantReasoningEffort !== undefined && (managedPurpose !== 'assistant' || !ASSISTANT_REASONING_EFFORTS.has(assistantReasoningEffort))) {
+      throw new Error('推理档位仅支持托管助手会话的 low 或 medium。');
+    }
     this.checkReady();
     await assertHermesPolicy(this.adapter);
     const route = modelRoute || await this.captureModelRoute();
     if (typeof route.provider !== 'string' || !route.provider || typeof route.model !== 'string' || !route.model) throw new Error('无效的 Hermes 会话模型。');
     const directory = this.workspace(cwd || this.preferences.defaultWorkspace);
-    const snapshot = await this.adapter.request('session.create', {
-      cwd: directory, source: 'tui', title: String(title || '新任务').slice(0, 120),
-      provider: route.provider, model: route.model,
-    });
-    await this.configureSession(snapshot, route);
-    this.checkReady();
-    const session = this.store.create({ title: String(title || '新任务').slice(0, 120), cwd: directory,
-      storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model: snapshot.info.model, provider: snapshot.info.provider });
-    try { this.sessionUsage?.registerNew(session.id); } catch { /* Observation only. */ }
-    this.observeUsage(session.id, snapshot.info.usage, 'session.create');
-    if (managedPurpose === 'assistant') this.store.db.prepare('INSERT OR IGNORE INTO application_model_sessions(id) VALUES(?)').run(session.id);
-    else this.publish('session.updated', session.id, session);
-    return session;
+    const observer = assistantReasoningEffort === undefined ? null : observeAssistantReasoning(this.adapter);
+    let snapshot;
+    try {
+      snapshot = await this.adapter.request('session.create', {
+        cwd: directory, source: 'tui', title: String(title || '新任务').slice(0, 120),
+        provider: route.provider, model: route.model,
+        ...(assistantReasoningEffort === undefined ? {} : { reasoning_effort: assistantReasoningEffort }),
+      });
+      const initialInfo = snapshot.info;
+      await this.configureSession(snapshot, route);
+      if (observer) {
+        const info = await observer.wait(snapshot.session_id, initialInfo);
+        if (info.provider !== route.provider || info.model !== route.model
+          || info.reasoning_effort !== assistantReasoningEffort || info.reasoning_effort_wire !== assistantReasoningEffort) throw reasoningError();
+        snapshot.info = info;
+        this.sessionInfo.set(snapshot.session_id, info);
+      }
+      this.checkReady();
+      const session = this.store.create({ title: String(title || '新任务').slice(0, 120), cwd: directory,
+        storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model: snapshot.info.model, provider: snapshot.info.provider });
+      try { this.sessionUsage?.registerNew(session.id); } catch { /* Observation only. */ }
+      this.observeUsage(session.id, snapshot.info.usage, 'session.create');
+      if (managedPurpose === 'assistant') this.store.db.prepare('INSERT OR IGNORE INTO application_model_sessions(id) VALUES(?)').run(session.id);
+      else this.publish('session.updated', session.id, session);
+      return { ...session, ...(observer ? { requestedReasoningEffort: assistantReasoningEffort } : {}),
+        ...(managedPurpose === 'assistant' && REASONING_EFFORTS.has(snapshot.info.reasoning_effort) ? { reasoningEffort: snapshot.info.reasoning_effort } : {}),
+        ...(managedPurpose === 'assistant' && REASONING_EFFORTS.has(snapshot.info.reasoning_effort_wire) ? { reasoningEffortWire: snapshot.info.reasoning_effort_wire } : {}) };
+    } catch (error) {
+      if (observer && snapshot?.session_id) {
+        this.sessionInfo.delete(snapshot.session_id);
+        // A rejected draft has never received a prompt. Release only its new
+        // live runtime; do not leave an unconfirmed agent occupying a slot.
+        if (this.adapter.state === 'ready') {
+          try { await this.adapter.request('session.close', { session_id: snapshot.session_id }, 1500); }
+          catch { /* The original confirmation failure remains authoritative. */ }
+        }
+      }
+      throw error;
+    } finally { observer?.close(); }
   }
 
   updateSession(id, changes) {
