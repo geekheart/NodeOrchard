@@ -20,6 +20,7 @@ import { WorkflowNodePresets } from './workflows/workflow-node-presets.mjs';
 import { WorkflowConversations } from './workflows/workflow-conversations.mjs';
 import { AppDiagnostics } from './app-diagnostics.mjs';
 import { ApplicationAssistant } from './application-assistant.mjs';
+import { AssistantPermissionSettings } from './assistant-permission-settings.mjs';
 import { createAppDiagnosticBrowser } from './app-diagnostic-browser.mjs';
 
 function infoView(info = {}) {
@@ -79,6 +80,7 @@ export class Application extends EventEmitter {
     this.assistantModel = new LearningModel(this, { purpose: 'assistant' });
     this.diagnostics = new AppDiagnostics(this);
     this.diagnosticBrowser = createAppDiagnosticBrowser({ dataDir: config.dataDir, chromePath: config.diagnosticChromePath, ffmpegPath: config.diagnosticFfmpegPath });
+    this.assistantPermissionSettings = new AssistantPermissionSettings(this);
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
   }

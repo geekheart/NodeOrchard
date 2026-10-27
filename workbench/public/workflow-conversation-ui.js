@@ -1,4 +1,4 @@
-import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
+import { documentFingerprint, applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { runArtifacts, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
 import { conversationTurnGroups, canRetryConversationTurn, parseConversationIssueResolution } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -252,7 +252,7 @@ export class WorkflowConversationUI {
     const context = this.getContext(), run = this.runtime?.runs?.get(context.runId), record = run?.nodes?.[context.nodeId], node = run?.document?.nodes?.find(item => item.id === context.nodeId);
     const review = node?.type === 'human' && record?.status === 'waiting_review' && (context.attempt === undefined || context.attempt === record.attempt)
       || this.state().pending.some(item => item.kind === 'review' && item.context?.runId === context.runId && item.context?.nodeId === context.nodeId && item.context?.attempt === context.attempt);
-    this.help.textContent = review ? '当前对象正在等待审核。回复“通过”继续，或“要求修改：具体意见”退回对应节点。' : (hints[this.state().intent] || hints.discuss) + ' 说“这个问题解决了”或“不用处理了”结束对应聊天事项。';
+    this.help.textContent = '独立助手 · 仅当前工作流与工作文件夹。' + (review ? '当前对象正在等待审核。回复“通过”继续，或“要求修改：具体意见”退回对应节点。' : (hints[this.state().intent] || hints.discuss) + ' 说“这个问题解决了”或“不用处理了”结束对应聊天事项。');
     this.input.placeholder = review ? '回复“通过”，或“要求修改：具体意见”…' : '描述任务、回复结果，或直接说“运行”…';
   }
   updateSendButton() { const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status)); this.sendButton.disabled = !state.loaded || state.sending || !this.input.value.trim() || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; }
@@ -447,8 +447,20 @@ export class WorkflowConversationUI {
     const id = this.workflowId, key = `${id}:${turn.id}`, busyKey = key + ':apply'; if (this.applied.has(key) || this.actionPending.has(busyKey) || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return;
     this.actionPending.add(busyKey); this.state(id).error = '';
     try {
+      const operations = clone(turn.assistant.operations);
       if (this.currentDocument().id !== id || documentFingerprint(this.currentDocument()) !== turn.assistant.baseFingerprint) throw new Error('画布已变化，请重新生成节点修改建议。');
-      const result = await this.editor.applyConversationOperations(turn.assistant.operations, { fingerprint: turn.assistant.baseFingerprint, turnId: turn.id });
+      const validation = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turn.id)}/validate-proposal`,
+        { method: 'POST', body: { planFingerprint: turn.assistant.baseFingerprint } });
+      if (validation?.valid !== true || validation.workflowId !== id || validation.turnId !== turn.id || validation.planFingerprint !== turn.assistant.baseFingerprint) throw new Error('节点修改权限校验未确认，请重新读取当前建议。');
+      if (this.workflowId !== id || this.currentDocument().id !== id) throw new Error('工作流已切换，未应用节点修改。');
+      if (documentFingerprint(this.currentDocument()) !== turn.assistant.baseFingerprint) throw new Error('画布已变化，请重新生成节点修改建议。');
+      if (this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) throw new Error('当前工作流只读或正在查看嵌入流程，未应用节点修改。');
+      const current = this.state(id).conversation.turns.find(item => item.id === turn.id);
+      if (current && (settled(current) || current.outcome || current.status !== 'proposed')) throw new Error('此修改事项已结束，请重新读取当前建议。');
+      let generated = 0;
+      const candidate = applyWorkflowOperations(this.currentDocument(), operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` }).document;
+      if (documentFingerprint(candidate) !== validation.resultFingerprint) throw new Error('节点修改内容与权限校验结果不一致，未应用修改。');
+      const result = await this.editor.applyConversationOperations(operations, { fingerprint: turn.assistant.baseFingerprint, turnId: turn.id });
       if (this.currentDocument().id !== id) throw new Error('工作流已切换，不能将修改记录写入其他工作流。');
       const receipt = { document: clone(result?.document || this.currentDocument()), planFingerprint: turn.assistant.baseFingerprint, resultFingerprint: documentFingerprint(result?.document || this.currentDocument()), unconfirmed: true }; this.applied.set(key, receipt); await this.recordApplied(turn, receipt, id);
     } catch (error) { this.state(id).error = `节点修改未完成：${error.message}`; }

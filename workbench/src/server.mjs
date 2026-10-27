@@ -39,7 +39,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.headers.origin && req.headers.origin !== origin) return json(res, 403, { error: '禁止跨站请求。' });
       const requestURL = new URL(req.url, origin);
       const path = requestURL.pathname;
-      if (req.method === 'POST') {
+      if (['POST', 'PUT'].includes(req.method)) {
         const token = Buffer.from(req.headers['x-workbench-token'] || '');
         const expected = Buffer.from(csrfToken);
         if (token.length !== expected.length || !timingSafeEqual(token, expected)) return json(res, 403, { error: '客户端校验失败，请刷新页面。' });
@@ -59,7 +59,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.method === 'GET' && path === '/api/app-assistant') return json(res, 200, application.applicationAssistant.get());
       if (req.method === 'POST' && path === '/api/app-assistant/messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000)));
       const assistantAction = path.match(/^\/api\/app-assistant\/turns\/([A-Za-z0-9_-]+)\/action$/);
-      if (req.method === 'POST' && assistantAction) return json(res, 200, application.applicationAssistant.action(assistantAction[1], await readJson(req, 4096)));
+      if (req.method === 'POST' && assistantAction) return json(res, 200, await application.applicationAssistant.action(assistantAction[1], await readJson(req, 4096)));
       const diagnosticCapture = path.match(/^\/api\/app-diagnostics\/captures\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
       if (req.method === 'GET' && diagnosticCapture) {
         const file = await application.applicationAssistant.captureFile(diagnosticCapture[1], diagnosticCapture[2]);
@@ -69,6 +69,8 @@ export function createWorkbenchServer(config, application = new Application(conf
       }
       if (req.method === 'GET' && path === '/api/settings') return json(res, 200, await application.settings());
       if (req.method === 'POST' && path === '/api/settings') return json(res, 200, await application.saveSettings(await readJson(req)));
+      if (req.method === 'GET' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.get());
+      if (req.method === 'PUT' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.save(await readJson(req, 4096)));
       if (req.method === 'GET' && path === '/api/models') return json(res, 200, await application.modelOptions());
       if (req.method === 'POST' && path === '/api/models') return json(res, 200, await application.selectModel(await readJson(req, 4096)));
       if (req.method === 'GET' && path === '/api/statistics') {
@@ -110,6 +112,11 @@ export function createWorkbenchServer(config, application = new Application(conf
           if (requestURL.search) return json(res, 400, { error: '保存预设不能包含查询参数。' });
           return json(res, 200, { preset: application.nodePresets.update(id, await readJson(req, 2 * 1024 * 1024 + 8192)) });
         }
+      }
+      const proposalValidation = path.match(/^\/api\/workflow-conversations\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/validate-proposal$/);
+      if (req.method === 'POST' && proposalValidation) {
+        if (requestURL.search) return json(res, 400, { error: '工作流对话不接受查询参数。' });
+        return json(res, 200, await application.conversations.validateProposal(proposalValidation[1], proposalValidation[2], await readJson(req, 4096)));
       }
       const conversationMatch = path.match(/^\/api\/workflow-conversations\/([^/]+)(?:\/(messages|turns\/([^/]+)\/action))?$/);
       if (conversationMatch) {
@@ -296,6 +303,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app.js': ['app.js', 'text/javascript'],
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
+        '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],
         '/style.css': ['style.css', 'text/css'],
         '/workflow-editor.js': ['workflow-editor.js', 'text/javascript'],

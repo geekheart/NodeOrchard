@@ -93,7 +93,7 @@ export class AssistantDiagnosticTurn {
   constructor({ scope, checkpoint, evidence, onProgress, onCheckpoint, maxDurationMs = ASSISTANT_DIAGNOSTIC_LIMITS.durationMs }) {
     this.started = Date.now(); this.onProgress = onProgress; this.onCheckpoint = onCheckpoint;
     this.maxDurationMs = maxDurationMs; this.modelCalls = 0; this.toolCalls = 0;
-    this.cache = new Map(); this.steps = []; this.evidence = [];
+    this.cache = new Map(); this.observations = []; this.steps = []; this.evidence = [];
     this.state = { version: 1, scope, createdAt: now(), updatedAt: now(), steps: this.steps, evidence: this.evidence, results: [] };
     this.admitCheckpoint(scope, checkpoint, evidence);
   }
@@ -156,16 +156,24 @@ export class AssistantDiagnosticTurn {
       })]);
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
-  record(tool, args, value, { cached = false, key, collectedAt } = {}) {
+  record(tool, args, value, { cached = false, key, collectedAt, cacheable = true } = {}) {
     const at = now(), result = safe(value);
     const failed = value?.executed === false && value?.proposed !== true;
+    const uncertain = ['unknown', 'partial'].includes(value?.status);
     const step = this.steps.at(-1);
     if (failed && step?.status === 'running') { step.status = 'error'; step.completedAt = at; step.elapsedMs = Date.now() - Date.parse(step.startedAt);
       step.error = sanitizeDiagnosticText(value.error || '工具检查未完成。').slice(0, 1600); }
-    this.evidence.push({ tool, status: failed ? 'error' : 'complete', at, ...(cached ? { cached: true, collectedAt } : {}), ...(value?.files ? { files: value.files } : {}) });
-    if (!cached && value?.executed !== false && result?.available !== false && !result?.restricted && !result?.partial) this.cache.set(key, { tool, arguments: safe(args), result, requestKey: key, collectedAt: at });
+    this.evidence.push({ tool, status: failed ? 'error' : uncertain ? value.status : 'complete', at, ...(cached ? { cached: true, collectedAt } : {}), ...(value?.files ? { files: value.files } : {}) });
+    const row = { tool, arguments: safe(args), result, requestKey: key, collectedAt: at };
+    if (!cacheable && typeof result?.operationId === 'string') {
+      const receipt = { tool, ...Object.fromEntries(['operationId', 'targetWorkflowId', 'status', 'revision', 'executed', 'recoverable']
+        .filter(name => result[name] !== undefined).map(name => [name, result[name]])), collectedAt: at };
+      this.state.mutationReceipts = [...(this.state.mutationReceipts || []).filter(item => item.operationId !== receipt.operationId), receipt].slice(-8);
+    }
+    if (!cacheable || uncertain) this.observations.push(row);
+    else if (!cached && value?.executed !== false && result?.available !== false && !result?.restricted && !result?.partial) this.cache.set(key, row);
     this.publish(); return result;
   }
-  transcript() { return [...this.cache.values()].map(({ tool, arguments: args, result, collectedAt, restored }) => ({ tool, arguments: args,
+  transcript() { return [...this.cache.values(), ...this.observations].map(({ tool, arguments: args, result, collectedAt, restored }) => ({ tool, arguments: args,
     result: compactDiagnosticContext(result), collectedAt, ...(restored ? { restored: true } : {}) })); }
 }

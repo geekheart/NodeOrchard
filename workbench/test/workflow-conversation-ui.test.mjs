@@ -16,6 +16,11 @@ function harness() {
   ui.state().loaded = true; return { ui, document, run };
 }
 const snapshot = (id, revision, turns = []) => ({ conversation: { workflowId: id, revision, turns }, pending: [] });
+const validProposal = (id, turn, document) => {
+  let generated = 0;
+  return { valid: true, workflowId: id, turnId: turn.id, planFingerprint: turn.assistant.baseFingerprint, permissionRevision: 1,
+    resultFingerprint: documentFingerprint(applyWorkflowOperations(document, turn.assistant.operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` }).document) };
+};
 
 test('a natural resolution message targets the focused issue and waits for the server to retire it', async () => {
   const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '采集失败', context: { runId: run.id } }, assistant: { text: '原始错误' } };
@@ -304,20 +309,57 @@ test('server-verified nested outcome can refresh the child without replacing the
 test('proposal apply passes the immutable turn ID, records exact action receipt and does not auto-run', async () => {
   const { ui, document } = harness(), operations = [{ op: 'set-title', title: '对话修改的标题' }], turn = { id: 'turn-one', assistant: { operations, baseFingerprint: documentFingerprint(document) }, actions: [{ id: 'apply-one', kind: 'mark-applied' }] }; let calls = 0, posted;
   ui.editor.applyConversationOperations = (commands, options) => { calls++; assert.equal(options.turnId, turn.id); let generated = 0; const result = applyWorkflowOperations(ui.editor.doc, commands, { idFactory: prefix => `${prefix}-${options.turnId}-${++generated}` }); ui.editor.doc = result.document; return result; };
-  ui.api = async (_path, options) => { posted = options.body; return snapshot(document.id, 1); }; await ui.applyProposal(turn); await ui.applyProposal(turn);
+  ui.api = async (path, options) => { if (path.endsWith('/validate-proposal')) { assert.equal(calls, 0); assert.deepEqual(options.body, { planFingerprint: turn.assistant.baseFingerprint }); return validProposal(document.id, turn, document); } posted = options.body; return snapshot(document.id, 1); }; await ui.applyProposal(turn); await ui.applyProposal(turn);
   assert.equal(calls, 1); assert.equal(ui.editor.doc.title, '对话修改的标题'); assert.equal(posted.action, 'mark-applied'); assert.equal(posted.actionId, 'apply-one'); assert.equal(posted.planFingerprint, turn.assistant.baseFingerprint); assert.equal(Object.hasOwn(posted, 'resultFingerprint'), false); assert.equal(ui.applied.get(`${document.id}:${turn.id}`).unconfirmed, false);
 });
 
 test('a failed receipt preserves applied changes and retries only saving the receipt', async () => {
   const { ui, document } = harness(), turn = { id: 'turn-failed-receipt', assistant: { operations: [{ op: 'set-title', title: '已应用' }], baseFingerprint: documentFingerprint(document) }, actions: [{ id: 'receipt-one', kind: 'mark-applied' }] }; let edits = 0, posts = 0;
   ui.editor.applyConversationOperations = commands => { edits++; const result = applyWorkflowOperations(ui.editor.doc, commands); ui.editor.doc = result.document; return result; };
-  ui.api = async () => { if (++posts === 1) throw new Error('超时'); return snapshot(document.id, 1); }; await ui.applyProposal(turn); const receipt = ui.applied.get(`${document.id}:${turn.id}`);
+  ui.api = async path => { if (path.endsWith('/validate-proposal')) return validProposal(document.id, turn, document); if (++posts === 1) throw new Error('超时'); return snapshot(document.id, 1); }; await ui.applyProposal(turn); const receipt = ui.applied.get(`${document.id}:${turn.id}`);
   assert.equal(receipt.unconfirmed, true); assert.match(ui.state().error, /不要重复应用/); await ui.applyProposal(turn); assert.equal(edits, 1); await ui.recordApplied(turn, receipt); assert.equal(receipt.unconfirmed, false); assert.equal(edits, 1); assert.equal(posts, 2);
 });
 
 test('stale plans and archived or nested workflows never invoke the editing command', async () => {
   const { ui, document } = harness(), turn = { id: 'turn-stale', assistant: { operations: [{ op: 'set-title', title: '错误覆盖' }], baseFingerprint: documentFingerprint(document) } }; let calls = 0; ui.editor.applyConversationOperations = () => { calls++; };
   ui.editor.doc.title = '手动修改'; await ui.applyProposal(turn); assert.match(ui.state().error, /画布已变化/); ui.editor.libraryReadOnly = true; await ui.applyProposal(turn); ui.editor.libraryReadOnly = false; ui.editor.nodeLibrary = { nested: {} }; await ui.applyProposal(turn); assert.equal(calls, 0);
+});
+
+test('a denied or uncertain proposal validation never edits the canvas or creates an application receipt', async () => {
+  for (const failure of ['当前助手权限未开放此工具', '连接超时']) {
+    const { ui, document } = harness(), turn = { id: 'blocked-proposal', assistant: { operations: [{ op: 'set-title', title: '不应修改' }], baseFingerprint: documentFingerprint(document) } };
+    let edits = 0, posts = 0;
+    ui.editor.applyConversationOperations = () => { edits++; };
+    ui.api = async path => { posts++; assert(path.endsWith('/validate-proposal')); throw Error(failure); };
+    await ui.applyProposal(turn);
+    assert.equal(edits, 0); assert.equal(posts, 1); assert.equal(ui.applied.size, 0);
+    assert.equal(documentFingerprint(ui.editor.doc), turn.assistant.baseFingerprint); assert.match(ui.state().error, new RegExp(failure));
+  }
+});
+
+test('proposal validation waits for admission and rechecks canvas and workflow selection before editing', async () => {
+  for (const changed of ['canvas', 'workflow', 'readonly', 'dismissed']) {
+    const { ui, document } = harness(), gate = deferred(), turn = { id: 'waiting-validation', status: 'proposed', assistant: { operations: [{ op: 'set-title', title: '候选' }], baseFingerprint: documentFingerprint(document) } };
+    let edits = 0; ui.editor.applyConversationOperations = () => { edits++; };
+    ui.api = async path => { assert(path.endsWith('/validate-proposal')); return gate.promise; };
+    const applying = ui.applyProposal(turn); assert.equal(edits, 0);
+    if (changed === 'canvas') ui.editor.doc.title = '人工改动';
+    if (changed === 'workflow') ui.workflowId = 'another-workflow';
+    if (changed === 'readonly') ui.editor.libraryReadOnly = true;
+    if (changed === 'dismissed') ui.state().conversation.turns = [{ ...turn, status: 'dismissed' }];
+    gate.resolve(validProposal(document.id, turn, document)); await applying;
+    assert.equal(edits, 0); assert.equal(ui.applied.size, 0); assert(ui.state(document.id).error);
+  }
+});
+
+test('a validation reply for another target or different candidate cannot authorize canvas changes', async () => {
+  for (const change of [value => ({ ...value, workflowId: 'foreign-workflow' }), value => ({ ...value, resultFingerprint: 'different-candidate' })]) {
+    const { ui, document } = harness(), turn = { id: 'mismatched-validation', assistant: { operations: [{ op: 'set-title', title: '不得应用' }], baseFingerprint: documentFingerprint(document) } };
+    let edits = 0; ui.editor.applyConversationOperations = () => { edits++; };
+    ui.api = async () => change(validProposal(document.id, turn, document));
+    await ui.applyProposal(turn); assert.equal(edits, 0); assert.equal(ui.applied.size, 0);
+    assert.equal(documentFingerprint(ui.editor.doc), turn.assistant.baseFingerprint);
+  }
 });
 
 test('a chat-initiated run keeps logs folded and exposes the run result, while preflight errors remain visible in chat', async () => {

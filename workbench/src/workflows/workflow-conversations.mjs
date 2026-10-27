@@ -517,7 +517,7 @@ export class WorkflowConversations {
       const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
       const page = this.readTurn(turn.workflowId, turn.id).privateValue.page;
-      const result = await this.planner(this.app, { text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
+      const result = await this.planner(this.app, { role: 'workflow', operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
         onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
           turn.assistant.text = message; if (progress) turn.assistant.progress = clone(progress);
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
@@ -566,6 +566,33 @@ export class WorkflowConversations {
     }
     if (found.size !== 1) fail(found.size > 1 ? '此产物对应多个可改进的 Skill，请先选择具体 Skill 节点再反馈学习。' : '未找到此产物唯一且明确允许改进的上游 Skill，请先选择具体 Skill 节点。', 409);
     return [...found];
+  }
+  async validateProposal(workflowId, turnId, input) {
+    this.assertOpen(workflowId, true);
+    object(input, ['planFingerprint'], '流程修改校验');
+    if (this.mutations.has(workflowId + ':' + turnId)) fail('此回复正在处理中，请稍候。', 409);
+    const { turn, privateValue } = this.readTurn(workflowId, turnId);
+    const pending = value => value.status === 'proposed' && !value.outcome
+      && value.actions?.some(card => card.kind === 'mark-applied')
+      && Array.isArray(value.assistant.operations) && value.assistant.operations.length;
+    if (!pending(turn)) fail('此事项已结束或没有可应用的流程修改。', 409);
+    const document = privateValue.document;
+    if (input.planFingerprint !== turn.assistant.baseFingerprint || documentFingerprint(document) !== turn.assistant.baseFingerprint) fail('流程修改计划版本不匹配。', 409);
+    let generated = 0;
+    const { document: candidate } = applyWorkflowOperations(document, turn.assistant.operations,
+      { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` });
+    const policy = this.app.applicationAssistant?.permissions;
+    if (!policy) fail('助手权限校验暂不可用，未应用节点修改。', 503);
+    const scope = await policy.bind({ role: 'workflow', workflowId, document });
+    await policy.admit('workflow.propose', { workflowId }, scope, { document });
+    await policy.document(candidate, scope, { baseDocument: document });
+    await policy.current(scope);
+    this.assertOpen(workflowId, true);
+    const latest = this.readTurn(workflowId, turnId).turn;
+    if (!pending(latest) || latest.assistant.baseFingerprint !== turn.assistant.baseFingerprint
+      || JSON.stringify(latest.assistant.operations) !== JSON.stringify(turn.assistant.operations)) fail('流程修改事项已变化，请重新读取当前建议。', 409);
+    return { valid: true, workflowId, turnId, planFingerprint: turn.assistant.baseFingerprint,
+      resultFingerprint: documentFingerprint(candidate), permissionRevision: scope.revision };
   }
   async action(workflowId, turnId, input) {
     this.assertOpen(workflowId, true);
@@ -619,6 +646,12 @@ export class WorkflowConversations {
       const expected = applied.document || applied;
       const actual = safeDocument(input.document, workflowId);
       if (documentFingerprint(expected) !== documentFingerprint(actual)) fail('画布内容与本轮操作计划不一致，请重新生成建议。', 409);
+      if (this.app.applicationAssistant?.permissions) {
+        const policy = this.app.applicationAssistant.permissions;
+        const scope = await policy.bind({ role: 'workflow', workflowId, document });
+        await policy.admit('workflow.propose', { workflowId }, scope, { document });
+        await policy.document(actual, scope, { baseDocument: document });
+      }
     }
     this.mutations.add(key);
     turn.outcome = { action: input.action, actionId: card.id, status: 'started', startedAt: now() }; turn.updatedAt = now(); this.update(turn);

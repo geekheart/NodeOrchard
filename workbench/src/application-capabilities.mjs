@@ -3,6 +3,7 @@ import { workflowCapabilityManifest, workflowNodeContract } from '../shared/work
 import { ApplicationAssistantSkills } from './application-assistant-skills.mjs';
 import { inspectCodeRuntime } from './application-runtime-inspector.mjs';
 import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
+import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -37,6 +38,9 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存；AI没有权限设置写工具。独立会话固定当前工作流与工作文件夹，双方均无源码或任意终端权限。' },
+  { id: 'supervisor-workflow-management', status: 'available', roles: ['supervisor'], tools: ['workflow.copy', 'workflow.create-test', 'workflow.delete'], note: '总控在人工授权范围内复制、新增测试草稿或移入回收站；不自动运行，无永久删除。' },
+  { id: 'application-logs', status: 'available', roles: ['supervisor'], tools: ['app.logs'], note: '当前进程保留的应用事件摘要及Hermes日志，有界脱敏，无完整持久历史。' },
   { id: 'diagnostics', status: 'available', tools: ['app.state', 'workflow.run', 'session.history', 'artifact.inspect', 'browser.capture'] },
   { id: 'conversation-lifecycle', status: 'available', channel: 'conversation-response', tools: [],
     note: '会话响应只读投影待处理状态；明确关联的成功重试接续旧聊天失败，审核按真实运行与尝试核对，不回写旧历史或业务状态。' },
@@ -67,7 +71,7 @@ export class ApplicationCapabilities {
   constructor(app, { skills = new ApplicationAssistantSkills(app.config?.appRoot) } = {}) { this.app = app; this.skills = skills; }
   tools() {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS)];
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS)];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }

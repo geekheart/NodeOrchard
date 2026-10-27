@@ -9,6 +9,7 @@ import { diagnosticDetails } from './diagnostic-events.js';
 import { HermesModelUI } from './hermes-model-ui.js';
 import { createAppDiagnosticClient } from './app-diagnostic-client.js';
 import { ApplicationConversationUI } from './application-conversation-ui.js';
+import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
 
 const $ = (id) => document.getElementById(id);
 let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, routeLoad = 0;
@@ -85,6 +86,7 @@ const hermesModels = new HermesModelUI({
   api, context: () => ({ backend: state.backend, connecting: state.connecting, csrfToken: state.csrfToken }), connect: connectBackend,
   changed: (_data, { applied = false } = {}) => { renderNewTaskState(); if (state.route?.page === 'settings') renderSettings(); if (applied) void Promise.allSettled([synchronize(), loadSettings()]); },
 });
+const assistantPermissions = new AssistantPermissionsUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
 function upsertSession(session) { if (!session?.id) return; const index = state.sessions.findIndex((item) => item.id === session.id); if (index < 0) state.sessions.unshift(session); else state.sessions[index] = { ...state.sessions[index], ...session }; }
 function taskURL(id, tab = 'workspace', panel = '') { return `#/task/${encodeURIComponent(id)}?tab=${tab}${panel ? `&panel=${panel}` : ''}`; }
 function readRoute() {
@@ -430,6 +432,7 @@ function renderNewTaskState() { const ready = state.backend.state === 'ready'; $
 function openNewTask() { state.newTaskError = ''; $('session-cwd').value = state.route.cwd || preferences().defaultWorkspace || state.backend.cwdDefault || ''; renderNewTaskState(); $('new-task-dialog').showModal(); $('session-title').focus(); }
 function applyPreferences(prefs) { document.documentElement.dataset.theme = ['light', 'dark'].includes(prefs.theme) ? prefs.theme : 'system'; document.documentElement.dataset.density = prefs.density === 'compact' ? 'compact' : 'comfortable'; try { localStorage.setItem('workbench-appearance', JSON.stringify({ theme: prefs.theme, density: prefs.density })); } catch {} }
 function renderSettings() {
+  assistantPermissions.render();
   const settings = state.settings; const runtime = settings?.runtime || {}; const prefs = preferences();
   if (!state.settingsDirty) { $('setting-theme').value = prefs.theme; $('setting-density').value = prefs.density; $('setting-workspace').value = prefs.defaultWorkspace; }
   $('save-preferences').disabled = state.saving || !state.csrfToken || !settings; $('save-preferences').textContent = state.saving ? '保存中…' : '保存偏好';
@@ -496,7 +499,7 @@ async function loadRouteData() {
   } else if (route.page === 'task') await Promise.allSettled([loadHistory(state.selectedId), loadRuns(state.selectedId)]);
   else if (route.page === 'skills') { await loadSkills(); await loadSkillDetail(route.name); }
   else if (route.page === 'statistics') await loadStatistics();
-  else if (route.page === 'settings') await loadSettings();
+  else if (route.page === 'settings') await Promise.allSettled([loadSettings(), assistantPermissions.refresh()]);
 }
 async function synchronize() {
   if (state.refreshing) return false; state.refreshing = true; renderBackend();
@@ -570,7 +573,7 @@ $('sidebar-connect').addEventListener('click', () => state.backend.state === 're
 $('notice-close').addEventListener('click', () => notify(''));
 $('connect-button').addEventListener('click', connectBackend);
 $('new-task-connect').addEventListener('click', connectBackend);
-$('refresh-button').addEventListener('click', async () => { const ok = await synchronize(); await Promise.allSettled([loadSettings(), hermesModels.refresh({ preserveSelection: true })]); if (ok && !state.source) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; openEvents(); } });
+$('refresh-button').addEventListener('click', async () => { const ok = await synchronize(); await Promise.allSettled([loadSettings(), assistantPermissions.refresh(), hermesModels.refresh({ preserveSelection: true })]); if (ok && !state.source) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; openEvents(); } });
 $('details-button').addEventListener('click', () => setTaskQuery({ panel: state.route.panel ? '' : 'execution' }));
 $('close-inspector').addEventListener('click', () => setTaskQuery({ panel: '' }));
 for (const tab of $('inspector-tabs').querySelectorAll('button')) tab.addEventListener('click', () => setTaskQuery({ panel: tab.dataset.inspector }));

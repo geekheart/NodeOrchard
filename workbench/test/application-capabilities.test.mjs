@@ -8,12 +8,20 @@ import { NODE_TYPES, createDocument, createNode, connectNodes, nodeConfiguration
 import { workflowCapabilityManifest, workflowNodeContract, codeRuntimeContract } from '../shared/workflow/workflow-capability-contract.mjs';
 import { applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { OPERATION_LIMITS } from '../src/workflows/workflow-operations.mjs';
+import { DEFAULT_ASSISTANT_PERMISSIONS } from '../src/application-assistant-permissions.mjs';
+import { APPLICATION_SUPERVISOR_TOOLS } from '../src/application-supervisor-tools.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function application(t) {
   const app = new EventEmitter(), db = new DatabaseSync(':memory:');
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'application-capability-permissions-'));
+  app.config = { workspaceRoot }; app.preferences = { defaultWorkspace: '.' };
+  app.assistantPermissionSettings = { get: () => ({ revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) }) };
   app.store = { db }; app.diagnostics = { tools: () => [], snapshot: async () => ({}) }; app.publish = () => {};
   app.captureModelRoute = async () => ({ provider: 'fixture', model: 'fixture' });
-  const assistant = new ApplicationAssistant(app); t.after(async () => { await assistant.close(); db.close(); });
+  const assistant = new ApplicationAssistant(app); t.after(async () => { await assistant.close(); db.close(); rmSync(workspaceRoot, { recursive: true, force: true }); });
   return { app, assistant, capabilities: assistant.capabilities };
 }
 
@@ -61,7 +69,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   const tools = f.assistant.tools();
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));
-  assert.deepEqual(tools.map(row => row.name), APPLICATION_ASSISTANT_TOOLS.map(row => row.name));
+  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS].map(row => row.name));
   assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 4);
   assert.match((await f.capabilities.read('assistant.skills.read', { name: 'author-code-node' })).instructions, /node.describe/);
 });

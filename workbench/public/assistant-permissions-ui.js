@@ -1,0 +1,83 @@
+const COMMON = [
+  ['workflowRead', '读取工作流与运行日志', '读取获准范围内的节点、运行与会话证据。'],
+  ['workflowEdit', '修改工作流与节点', '生成可审阅的业务修改；应用与运行仍分别进行。'],
+  ['customNodes', '派生自定义节点', '通过现有节点接口生成业务代码候选。'],
+  ['workspaceRead', '读取工作文件夹资料', '只读取服务端绑定的工作文件夹内资料。'],
+  ['capture', '截图与短录制', '读取受控隔离页面，辅助复现界面问题。'],
+];
+const GROUPS = [
+  ['workflow', '独立工作流助手', '仅当前工作流与当前工作文件夹。', COMMON],
+  ['supervisor', '总控助手', '管理跨工作流问题；每项能力可单独收回。', [...COMMON,
+    ['crossWorkflowRead', '跨工作流读取', '读取任意工作流的状态、运行与日志。'],
+    ['manageWorkflows', '管理工作流', '复制、新增测试工作流，或将指定工作流移入可恢复的回收站。'],
+    ['appLogs', '读取软件日志', '读取脱敏的软件诊断日志。'],
+  ]],
+];
+const clone = value => JSON.parse(JSON.stringify(value));
+
+function configuration(data) {
+  if (!data || !Number.isInteger(data.revision) || data.revision < 0) throw new Error('权限版本无效，请刷新后重试。');
+  const result = { revision: data.revision };
+  if (typeof data.workspaceRoot === 'string' && data.workspaceRoot.length <= 4000) result.workspaceRoot = data.workspaceRoot;
+  for (const [role, , , flags] of GROUPS) {
+    result[role] = {};
+    for (const [flag] of flags) {
+      if (typeof data[role]?.[flag] !== 'boolean') throw new Error('权限配置不完整，请刷新后重试。');
+      result[role][flag] = data[role][flag];
+    }
+  }
+  return result;
+}
+
+// Only the settings form calls this controller. It is not an assistant tool.
+export class AssistantPermissionsUI {
+  constructor({ api, context, readOnly = false }) {
+    Object.assign(this, { api, context, readOnly });
+    this.data = null; this.draft = null; this.loading = false; this.saving = false; this.error = ''; this.message = '';
+    this.nodes = Object.fromEntries(['form', 'groups', 'status', 'save', 'refresh', 'folder'].map(name => [name, document.getElementById(`assistant-permissions-${name}`)]));
+    this.inputs = new Map();
+    for (const [role, title, description, flags] of GROUPS) {
+      const group = document.createElement('fieldset'), legend = document.createElement('legend'), help = document.createElement('p');
+      group.className = 'assistant-permission-group'; legend.textContent = title; help.className = 'helper'; help.textContent = description; group.append(legend, help);
+      for (const [flag, label, description] of flags) {
+        const row = document.createElement('label'), text = document.createElement('span'), hint = document.createElement('span'), input = document.createElement('input');
+        row.className = 'setting-row assistant-permission-row'; text.textContent = label; hint.textContent = description; text.append(hint);
+        input.type = 'checkbox'; input.setAttribute('aria-label', `${title}：${label}`);
+        input.addEventListener('change', () => {
+          if (!this.draft || this.loading || this.saving || this.readOnly) return;
+          this.draft[role][flag] = input.checked; this.error = ''; this.message = ''; this.render();
+        });
+        this.inputs.set(`${role}.${flag}`, input); row.append(text, input); group.append(row);
+      }
+      this.nodes.groups.append(group);
+    }
+    this.nodes.form.addEventListener('submit', event => { event.preventDefault(); void this.save(); });
+    this.nodes.refresh.addEventListener('click', () => this.refresh({ discardDraft: true }));
+    this.render();
+  }
+  dirty() { return Boolean(this.data && this.draft && GROUPS.some(([role]) => JSON.stringify(this.data[role]) !== JSON.stringify(this.draft[role]))); }
+  async refresh({ discardDraft = false } = {}) {
+    if (this.loading || this.saving || (this.dirty() && !discardDraft)) return;
+    this.loading = true; this.error = ''; this.message = ''; this.render();
+    try { const data = configuration(await this.api('/api/assistant-permissions')); this.data = data; this.draft = clone(data); }
+    catch (error) { this.error = `权限读取失败：${error.message}`; }
+    finally { this.loading = false; this.render(); }
+  }
+  async save() {
+    if (this.readOnly || this.loading || this.saving || !this.context().csrfToken || !this.dirty()) return;
+    const body = { expectedRevision: this.data.revision, ...Object.fromEntries(GROUPS.map(([role]) => [role, clone(this.draft[role])])) };
+    this.saving = true; this.error = ''; this.message = ''; this.render();
+    try { const data = configuration(await this.api('/api/assistant-permissions', { method: 'PUT', body })); this.data = data; this.draft = clone(data); this.message = '权限已保存；后续工具调用按新权限校验。'; }
+    catch (error) { this.error = `保存失败：${error.message}。选择“重新读取”可载入当前配置。`; }
+    finally { this.saving = false; this.render(); }
+  }
+  render() {
+    this.nodes.folder.textContent = this.data?.workspaceRoot || '尚未读取';
+    const disabled = this.readOnly || !this.draft || this.loading || this.saving || !this.context().csrfToken;
+    for (const [key, input] of this.inputs) { const [role, flag] = key.split('.'); input.checked = this.draft?.[role]?.[flag] === true; input.disabled = disabled; }
+    this.nodes.save.disabled = disabled || !this.dirty(); this.nodes.save.textContent = this.saving ? '保存中…' : '保存助手权限';
+    this.nodes.refresh.disabled = this.loading || this.saving; this.nodes.refresh.textContent = this.loading ? '读取中…' : '重新读取';
+    this.nodes.status.textContent = this.error || this.message || (this.readOnly ? '诊断页面只读。' : this.loading ? '正在读取权限…' : this.dirty() ? '有未保存的权限更改' : this.data ? `权限版本 ${this.data.revision} · 仅可由你在设置中修改` : '权限尚未读取。');
+    this.nodes.status.className = this.error ? 'error-text' : 'helper'; this.nodes.status.setAttribute('role', this.error ? 'alert' : 'status');
+  }
+}

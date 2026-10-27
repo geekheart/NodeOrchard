@@ -3,9 +3,18 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { ApplicationAssistant } from '../src/application-assistant.mjs';
+import { DEFAULT_ASSISTANT_PERMISSIONS } from '../src/application-assistant-permissions.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function fixture(t, replies, options) {
   const app = new EventEmitter(), prompts = [], reads = [];
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'assistant-efficiency-permissions-'));
+  app.config = { workspaceRoot }; app.preferences = { defaultWorkspace: '.' };
+  app.assistantPermissionSettings = { get: () => ({ revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) }) };
+  app.workflows = { get: id => ({ id, workflowId: 'wf' }) };
+  app.workflowLibrary = { get: id => ({ id, revision: 1, document: { id, schemaVersion: 2, nodes: [], edges: [], settings: { outputDirectory: '' } } }) };
   app.store = { db: new DatabaseSync(':memory:') }; app.publish = () => {};
   app.diagnostics = {
     tools: () => [{ name: 'workflow.run', description: '读取运行', inputSchema: { properties: { runId: {}, nodeId: {} } } }],
@@ -15,7 +24,7 @@ function fixture(t, replies, options) {
   app.captureModelRoute = async () => ({ model: 'fixture', provider: 'fixture' });
   app.assistantModel = { generate: async (prompt, opts) => { prompts.push(prompt); return JSON.stringify(await replies.shift()(opts)); } };
   const assistant = new ApplicationAssistant(app, options);
-  t.after(async () => { await assistant.close(); app.store.db.close(); });
+  t.after(async () => { await assistant.close(); app.store.db.close(); rmSync(workspaceRoot, { recursive: true, force: true }); });
   return { app, assistant, prompts, reads };
 }
 

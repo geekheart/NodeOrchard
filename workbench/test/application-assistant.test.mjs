@@ -3,9 +3,17 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { ApplicationAssistant } from '../src/application-assistant.mjs';
+import { DEFAULT_ASSISTANT_PERMISSIONS } from '../src/application-assistant-permissions.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function fixture(t, replies) {
   const app = new EventEmitter(), calls = [], reads = [];
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'assistant-unit-permissions-'));
+  app.config = { workspaceRoot }; app.preferences = { defaultWorkspace: '.' };
+  app.assistantPermissionSettings = { get: () => ({ revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) }) };
+  app.workflows = { get: id => ({ id, workflowId: 'wf' }) };
   app.store = { db: new DatabaseSync(':memory:') }; app.publish = () => {};
   app.diagnostics = {
     tools: () => [{ name: 'workflow.run', description: '读取运行证据', inputSchema: { properties: { runId: { type: 'string' } } } }],
@@ -15,7 +23,7 @@ function fixture(t, replies) {
   app.assistantModel = { generate: async (prompt, options) => { calls.push({ prompt, options }); return JSON.stringify(replies.shift()); } };
   app.captureModelRoute = async () => ({ model: 'fixed-model', provider: 'fixed-provider' });
   const assistant = new ApplicationAssistant(app);
-  t.after(async () => { await assistant.close(); app.store.db.close(); });
+  t.after(async () => { await assistant.close(); app.store.db.close(); rmSync(workspaceRoot, { recursive: true, force: true }); });
   return { app, assistant, calls, reads };
 }
 

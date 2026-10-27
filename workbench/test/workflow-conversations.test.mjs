@@ -49,6 +49,72 @@ const message = (document, text, extra = {}) => ({ clientMessageId: 'message-' +
 const context = (run, nodeId = 'review') => ({ runId: run.id, nodeId, attempt: run.nodes[nodeId].attempt, attemptId: run.nodes[nodeId].attemptId,
   artifactIds: (run.nodes[nodeId].artifacts || []).map(item => item.id), artifactHashes: (run.nodes[nodeId].artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) });
 
+test('proposal permission validation is read-only and confirms the exact pending candidate before canvas editing', async t => {
+  const f = await fixture(t), document = graph(), operations = [{ op: 'set-title', title: '权限验证后的候选' }];
+  const saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  f.app.conversations.planner = async () => ({ text: '生成候选', operations, baseFingerprint: documentFingerprint(document) });
+  const response = await f.app.conversations.message(document.id, message(document, '修改工作流标题', { intent: 'workflow' }));
+  const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'proposed'));
+  const before = f.app.conversations.get(document.id);
+  const result = await f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint });
+  assert.equal(result.valid, true); assert.equal(result.workflowId, document.id); assert.equal(result.turnId, turn.id);
+  assert.equal(result.permissionRevision, f.app.assistantPermissionSettings.get().revision);
+  assert.equal(result.resultFingerprint, documentFingerprint(applyWorkflowOperations(document, operations).document));
+  assert.deepEqual(f.app.conversations.get(document.id), before);
+  assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: 'stale' }), /计划版本/);
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint, role: 'supervisor' }), /字段无效/);
+  const other = graph(); other.id += '-other'; f.app.workflowLibrary.save({ document: other, expectedRevision: 0 });
+  await assert.rejects(f.app.conversations.validateProposal(other.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /没有该对话轮次/);
+});
+
+test('revoked edit permissions reject an old proposal before any canvas receipt or workflow mutation', async t => {
+  const f = await fixture(t), document = graph(), saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  f.app.conversations.planner = async () => ({ text: '旧候选', operations: [{ op: 'set-title', title: '不应应用' }], baseFingerprint: documentFingerprint(document) });
+  const response = await f.app.conversations.message(document.id, message(document, '修改工作流标题', { intent: 'workflow' }));
+  const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'proposed'));
+  const permissions = f.app.assistantPermissionSettings.get();
+  f.app.assistantPermissionSettings.save({ expectedRevision: permissions.revision, workflow: { ...permissions.workflow, workflowEdit: false }, supervisor: permissions.supervisor });
+  const before = f.app.conversations.get(document.id);
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /权限未开放/);
+  assert.deepEqual(f.app.conversations.get(document.id), before); assert.equal(before.conversation.turns[0].outcome, undefined);
+  assert.deepEqual(f.app.workflowLibrary.get(document.id), saved); assert.deepEqual(f.app.workflows.list(), []);
+});
+
+test('proposal validation HTTP reuses authentication, scope and current permission checks without applying', async t => {
+  const f = await fixture(t, { http: true }), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  f.app.conversations.planner = async () => ({ text: 'HTTP候选', operations: [{ op: 'set-title', title: 'HTTP候选标题' }], baseFingerprint: documentFingerprint(document) });
+  const response = await f.app.conversations.message(document.id, message(document, '修改工作流标题', { intent: 'workflow' }));
+  const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'proposed'));
+  const path = `/api/workflow-conversations/${document.id}/turns/${turn.id}/validate-proposal`, body = { planFingerprint: turn.assistant.baseFingerprint };
+  const before = f.app.conversations.get(document.id), saved = f.app.workflowLibrary.get(document.id);
+  assert.equal((await f.request(path, body, { 'X-Workbench-Token': 'wrong-token' })).status, 403);
+  assert.equal((await f.request(path, { ...body, role: 'supervisor' })).status, 400);
+  const valid = await f.request(path, body); assert.equal(valid.status, 200); assert.equal(valid.body.valid, true);
+  assert.equal(valid.body.permissionRevision, f.app.assistantPermissionSettings.get().revision);
+  const permissions = f.app.assistantPermissionSettings.get();
+  f.app.assistantPermissionSettings.save({ expectedRevision: permissions.revision, workflow: { ...permissions.workflow, workflowEdit: false }, supervisor: permissions.supervisor });
+  assert.equal((await f.request(path, body)).status, 403);
+  assert.deepEqual(f.app.conversations.get(document.id), before); assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+  assert.deepEqual(f.app.workflows.list(), []);
+});
+
+test('proposal validation rejects newly forbidden custom code, ended items and archived workflows', async t => {
+  const f = await fixture(t), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  f.app.conversations.planner = async () => ({ text: '代码候选', operations: [{ op: 'update-node', nodeId: 'trim', config: { executionMode: 'code', language: 'javascript', code: 'return input;' } }], baseFingerprint: documentFingerprint(document) });
+  const response = await f.app.conversations.message(document.id, message(document, '修改工具节点代码', { intent: 'workflow' }));
+  const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'proposed'));
+  const permissions = f.app.assistantPermissionSettings.get();
+  f.app.assistantPermissionSettings.save({ expectedRevision: permissions.revision, workflow: { ...permissions.workflow, customNodes: false }, supervisor: permissions.supervisor });
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /业务代码节点/);
+  await f.app.conversations.action(document.id, turn.id, { action: 'dismiss-turn' });
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /已结束/);
+  const saved = f.app.workflowLibrary.get(document.id);
+  f.app.workflowLibrary.transition(document.id, 'archive', { expectedRevision: saved.revision });
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /归档/);
+});
+
 test('failed diagnosis retains completed evidence and its failed stage across restart and offers it to the next request', async t => {
   const f = await fixture(t), document = graph();
   const saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });

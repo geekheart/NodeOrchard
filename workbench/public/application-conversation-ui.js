@@ -9,12 +9,12 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
     const facade = { root: host, doc: { id: 'global-application', title: '当前应用', nodes: [], edges: [] }, selection: new Set(), settings: { propertiesClosed: true } };
     const mappedApi = (path, options) => api(path.replace('/api/workflow-conversations/global-application', '/api/app-assistant'), options);
     super(facade, { api: mappedApi, getBackend, getPageDiagnostics });
-    this.panel.setAttribute('aria-label', '应用对话'); this.panel.querySelector('h2').textContent = '对话';
-    this.input.setAttribute('aria-label', '给应用 AI 的消息'); this.runButton.hidden = true;
+    this.panel.setAttribute('aria-label', '总控助手对话'); this.panel.querySelector('h2').textContent = '总控助手';
+    this.input.setAttribute('aria-label', '给总控助手的消息'); this.runButton.hidden = true;
   }
   describeContext() { return ['当前应用']; }
   getContext() { return {}; }
-  renderComposerHelp() { if (this.help) { this.help.textContent = '直接描述问题；AI 会按需读取应用状态、运行记录及页面证据。说“这个问题解决了”或“不用处理了”结束对应聊天事项。'; this.input.placeholder = '例如：帮我检查最近一次运行为什么失败…'; } }
+  renderComposerHelp() { if (this.help) { this.help.textContent = '总控助手会按当前权限读取跨工作流状态、运行记录及页面证据。说“这个问题解决了”或“不用处理了”结束对应聊天事项。'; this.input.placeholder = '例如：帮我检查最近一次运行为什么失败…'; } }
   onEvent(event) { if (event.type === 'application.conversation') { try { this.accept(event.payload); } catch {} } }
   async startRun() { this.state().error = '请说明要运行的工作流，或从看板打开它后直接说“运行”。'; this.renderNotice(); return false; }
   render() {

@@ -51,38 +51,49 @@ export function diagnosticSteps(steps = []) {
 // Chromium's proxy applies to workers, popups and new targets as well as the
 // main page. A fresh diagnostic profile cannot bypass the read-only boundary
 // by opening another target before a page-level CDP interception is attached.
-export async function createReadOnlyAppProxy(origin) {
+export async function createReadOnlyAppProxy(origin, { requestPolicy, responseProject } = {}) {
+  if (requestPolicy !== undefined && typeof requestPolicy !== 'function' || responseProject !== undefined && typeof responseProject !== 'function') throw fail('诊断浏览器权限回调无效。');
   origin = appOrigin(origin); let blockedRequests = 0; const networkFailures = [];
   const failure = item => { networkFailures.push(item); if (networkFailures.length > 30) networkFailures.shift(); };
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     let target;
     try { target = new URL(req.url, origin); } catch {}
     if (!target || target.origin !== origin || req.method !== 'GET' || target.username || target.password || !(target.pathname.startsWith('/api/') ? READ_API.test(target.pathname) : READ_ASSET.test(target.pathname))) {
       blockedRequests++; failure({ method: req.method, status: 403, blocked: true }); res.writeHead(403, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('Read-only diagnostic browser: request blocked.'); return;
     }
+    if (requestPolicy) {
+      let admitted = false;
+      try { admitted = await requestPolicy(new URL(target.href)) === true; } catch {}
+      if (!admitted) { blockedRequests++; failure({ method: req.method, status: 403, blocked: true }); res.writeHead(403, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }); res.end('Read-only diagnostic browser: scope blocked.'); return; }
+    }
+    if (req.destroyed || res.destroyed) return;
     const headers = { host: target.host, accept: req.headers.accept || '*/*', 'x-nodeorchard-diagnostic': 'readonly' };
     if (req.headers['last-event-id']) headers['last-event-id'] = req.headers['last-event-id'];
     const upstream = request(target, { method: 'GET', headers }, response => {
       if (response.statusCode >= 400) failure({ method: 'GET', path: target.pathname.slice(0, 200), status: response.statusCode });
-      // Buffer only bounded run/queue JSON. EventSource and assets remain
-      // streaming; training/validation run payloads never reach this browser.
-      if (/^\/api\/(?:workflow-runs(?:\/|$)|workflow-v2\/)/.test(target.pathname) && String(response.headers['content-type']).includes('application/json')) {
+      // Scoped API responses are projected before any bytes reach Chrome.
+      // Training/validation evidence stays private even after projection.
+      if ((responseProject && target.pathname.startsWith('/api/') || /^\/api\/(?:workflow-runs(?:\/|$)|workflow-v2\/)/.test(target.pathname)) && String(response.headers['content-type']).includes('application/json')) {
         const chunks = []; let bytes = 0, rejected = false;
-        const deny = () => { if (rejected) return; rejected = true; blockedRequests++; failure({ method: 'GET', path: target.pathname.slice(0, 200), status: 403, blocked: true }); if (!res.headersSent) res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end('{"error":"Learning evidence is private in diagnostic captures."}'); };
+        const deny = () => { if (rejected) return; rejected = true; blockedRequests++; failure({ method: 'GET', path: target.pathname.slice(0, 200), status: 403, blocked: true }); if (!res.headersSent) res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end('{"error":"Diagnostic response is outside the permitted scope."}'); };
+        if (Number(response.headers['content-length']) > 8 * 1024 * 1024) { deny(); upstream.destroy(); return; }
         response.on('data', chunk => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) { deny(); upstream.destroy(); } else chunks.push(chunk); });
-        response.on('end', () => {
+        response.on('end', async () => {
           if (rejected) return;
           try {
-            const original = JSON.parse(Buffer.concat(chunks).toString('utf8')), clean = withoutLearningRuns(original);
+            const original = JSON.parse(Buffer.concat(chunks).toString('utf8')); let clean = withoutLearningRuns(original);
             if (clean === undefined || original?.run && clean.run === undefined) { deny(); return; }
-            const body = JSON.stringify(clean), outgoing = { ...response.headers, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }; delete outgoing.etag;
+            if (responseProject) clean = withoutLearningRuns(await responseProject(new URL(target.href), clean));
+            if (clean === undefined || res.destroyed) { deny(); return; }
+            const body = JSON.stringify(clean); if (body === undefined || Buffer.byteLength(body) > 8 * 1024 * 1024) { deny(); return; }
+            const outgoing = { ...response.headers, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }; delete outgoing.etag; delete outgoing['transfer-encoding'];
             res.writeHead(response.statusCode || 200, outgoing); res.end(body);
           } catch { deny(); }
         }); return;
       }
       res.writeHead(response.statusCode || 502, response.headers); response.pipe(res);
     });
-    upstream.on('error', () => { failure({ method: 'GET', path: target.pathname.slice(0, 200), status: 502 }); if (!res.headersSent) res.writeHead(502); res.end(); });
+    upstream.on('error', () => { if (res.writableEnded || res.destroyed) return; failure({ method: 'GET', path: target.pathname.slice(0, 200), status: 502 }); if (!res.headersSent) res.writeHead(502); res.end(); });
     res.on('close', () => upstream.destroy()); upstream.end();
   });
   // Chrome may reset a rejected CONNECT/upgrade socket while shutting down.
@@ -124,9 +135,9 @@ class CDP {
   close() { this.signal.removeEventListener('abort', this.abort); this.rejectAll(fail('诊断已结束。')); this.socket.close(); }
 }
 
-async function launchSession({ chromePath, browserRoot, origin, signal }) {
+async function launchSession({ chromePath, browserRoot, origin, signal, requestPolicy, responseProject }) {
   await mkdir(browserRoot, { recursive: true, mode: 0o700 });
-  const profile = await mkdtemp(join(browserRoot, 'session-')), proxy = await createReadOnlyAppProxy(origin);
+  const profile = await mkdtemp(join(browserRoot, 'session-')), proxy = await createReadOnlyAppProxy(origin, { requestPolicy, responseProject });
   const child = spawn(chromePath, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-extensions', '--disable-default-apps', '--disable-features=MediaRouter', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--window-size=1440,960', '--proxy-server=http://127.0.0.1:' + proxy.port, '--proxy-bypass-list=<-loopback>', '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore' });
   let launchError, cdp, closing; child.on('error', error => { launchError = error; });
   const close = async () => {
@@ -229,17 +240,18 @@ export function createAppDiagnosticBrowser({ dataDir, chromePath, ffmpegPath, se
       const info = await stat(path); if (!info.isFile() || info.size > 80 * 1024 * 1024) throw fail('诊断附件不可读取。');
       return { path, size: info.size, mimeType: filename.endsWith('.png') ? 'image/png' : filename.endsWith('.mp4') ? 'video/mp4' : 'application/json' };
     },
-    async capture({ route = '/#/board', mode = 'screenshot', durationSeconds = 3, steps = [], signal } = {}) {
+    async capture({ route = '/#/board', mode = 'screenshot', durationSeconds = 3, steps = [], signal, requestPolicy, responseProject } = {}) {
       if (!origin) throw fail('应用监听地址尚未就绪。');
       if (closed) throw fail('诊断浏览器已关闭。');
       if (!['screenshot', 'recording'].includes(mode)) throw fail('只支持真实截图或短录制。');
+      if (requestPolicy !== undefined && typeof requestPolicy !== 'function' || responseProject !== undefined && typeof responseProject !== 'function') throw fail('诊断浏览器权限回调无效。');
       const url = diagnosticRoute(origin, route), checked = diagnosticSteps(steps);
       if (!Number.isFinite(durationSeconds) || durationSeconds < 0.1 || durationSeconds > 10) throw fail('短录制时长须在 0.1 至 10 秒之间。');
       const controller = new AbortController(), bounded = AbortSignal.any([controller.signal, AbortSignal.timeout(50000), ...(signal ? [signal] : [])]); bounded.throwIfAborted();
       const capability = await capabilities(); if (!capability.available && sessionFactory === launchSession) throw fail(capability.reason);
       const id = randomUUID(), directory = join(root, 'captures', id); await mkdir(directory, { recursive: true, mode: 0o700 });
       active.add(controller); let session;
-      try { session = await sessionFactory({ chromePath: capability.chromePath, browserRoot: join(root, 'browser'), origin, signal: bounded }); }
+      try { session = await sessionFactory({ chromePath: capability.chromePath, browserRoot: join(root, 'browser'), origin, signal: bounded, requestPolicy, responseProject }); }
       catch (error) { active.delete(controller); throw error; }
       sessions.add(session);
       try {
