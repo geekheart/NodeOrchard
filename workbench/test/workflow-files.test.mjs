@@ -136,6 +136,24 @@ test('opaque artifact registrations survive restart and hash-bind previews and a
   await assert.rejects(files.readArtifact(join(directory, 'unregistered.txt')));
 });
 
+test('imported file history can open existing nodes but cannot create versions, register artifacts or publish', async t => {
+  const { files, db, opened } = await setup(t), runId = randomUUID();
+  await files.prepareRun({ document: graph([]), input: {}, runId });
+  const folder = await files.nodeDirectory({ runId, nodeId: 'draw' }), path = join(folder, 'result.png'); await writeFile(path, png);
+  const artifact = await files.registerArtifact({ runId, nodeId: 'draw', path });
+  const run = { ...files.run(runId), importedArchive: true };
+  db.prepare('UPDATE workflow_file_runs SET value=? WHERE id=?').run(JSON.stringify(run), runId);
+  const before = db.prepare('SELECT value FROM workflow_file_runs WHERE id=?').get(runId).value;
+  await files.openRunDirectory({ runId, nodeId: 'draw' }); assert.deepEqual(opened, [folder]);
+  assert.deepEqual((await files.readArtifact(artifact.id)).data, png);
+  await assert.rejects(files.nodeDirectory({ runId, nodeId: 'draw', attempt: 2 }), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  await assert.rejects(stat(join(run.outputDirectory, 'draw', '版本-2')), { code: 'ENOENT' });
+  await assert.rejects(files.registerArtifact({ runId, nodeId: 'draw', path }), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  await assert.rejects(files.publishRun(runId), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  assert.equal(db.prepare('SELECT value FROM workflow_file_runs WHERE id=?').get(runId).value, before);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workflow_artifacts').get().count, 1);
+});
+
 test('missing generated artifacts identify the output filename without registering a phantom artifact', async t => {
   const { files, db } = await setup(t);
   const runId = randomUUID(); await files.prepareRun({ document: graph([]), input: {}, runId });

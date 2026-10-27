@@ -104,6 +104,7 @@ export function nodeThumbnailArtifact(run, nodeId) {
   return items.find(item => item.previewUrl && /\.png$/i.test(artifactName(item))) || items.find(item => item.previewUrl) || null;
 }
 export function canRerunNode(run, nodeId) {
+  if (run?.importedArchive) return false;
   const node = run?.document?.nodes?.find(node => node.id === nodeId), state = run?.nodes?.[nodeId];
   if (run?.document?.schemaVersion !== 2 || !node || !state || node.type === 'input') return false;
   if (['complete', 'error', 'interrupted', 'unknown'].includes(run.status)) return true;

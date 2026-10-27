@@ -22,8 +22,8 @@ flowchart LR
   ENGINE --> TOOLS["工具 / 代码 / HDK 能力"]
   ENGINE --> HERMES["Python gateway → Hermes"]
   HERMES --> MODEL["Hermes 配置的模型提供商"]
-  ENGINE --> ORIGINALS["本机执行原件"]
-  ORIGINALS --> DELIVERY["workflow/outputs 或自定义交付副本"]
+  ENGINE --> ORIGINALS["工作流文件夹 / runs 执行原件"]
+  ORIGINALS --> DELIVERY["工作流文件夹 / outputs 或自定义交付副本"]
 ```
 
 当前 schema2 使用 DAG 依赖调度：独立分支可并行，汇总等待真实依赖，循环通过有界控制节点和子流程表达；schema1 仅保留旧线性链兼容。页面位置与节点数组顺序不决定执行顺序。
@@ -39,6 +39,7 @@ flowchart LR
 | `src/hermes-models.mjs`、`python/hermes_models.py` | Hermes 受限模型目录、原生全局选择与保存、严格读回确认 | 本地模型覆盖、认证文件或独立回退配置 |
 | `shared/workflow/workflow-capability-contract.mjs`、`src/application-capabilities.mjs` | 共享真实能力契约、当前可用性、节点与运行时说明 | 以提示词代替处理器、虚构依赖就绪或扩大执行权限 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
+| 工作流文件夹、便携包与 ZIP 模块 | 目录归集、迁移、包校验与原子导入；目录为完整可携副本，数据库保留运行索引 | 打包全局认证、重跑导入历史或改写原审核 |
 | `shared/workflow/` | 纯模型、端口、规划、校验、数据集、时间及协议 | Node/DOM、数据库、网络或文件副作用 |
 | `public/` | 页面、画布、输入表单和交互状态 | 可信授权、伪造服务端运行状态 |
 | `python/` | Hermes JSON-RPC、Skill 冻结、学习记忆 scope、代码 worker | 工作流业务编排 |
@@ -61,7 +62,7 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 
 - 项目根目录 `workflow/` 是默认 cwd，启动时创建 `artifacts/`、`outputs/`。默认相对目录 `.` 直接指向该根。
 - `workbench/.local/` 保留现有 SQLite、依赖和私有快照；旧 `workspaces/` 保留原路径，确保旧运行和 SHA 引用可读。显式配置优先。
-- 新运行原件位于本机应用数据目录，节点回执、预览、输入输出与审核哈希绑定原件。用户输出目录只接收独立且经过 SHA 校验的交付副本。
+- 每个工作流使用工作区内固定目录，新运行原件与默认交付分别进入自身 `runs/` 和 `outputs/`，节点回执、预览、输入输出与审核哈希继续绑定原件。旧外部原件保留；迁移、完整对话与素材归集、`.workflow` 包和导入历史只读规则见[工作流文件夹与便携包](workflow-packages.md)。
 - 交付失败可单独重试；副本变化生成新交付修订。复制不会触发节点或模型重跑。
 - 现代 DAG 的交付范围由已完成输出节点明确声明的文件及节点自身保存结果决定；继承的产物索引只用于核对，不作为整批复制清单。每份成果须匹配本次生产节点的当前尝试、登记 SHA 与大小，复制前后复核；编译依赖、历史版本和未声明中间文件保留在原件目录。
 - 显式资料包按同一生产节点登记的包清单展开，成员受清单 SHA、相对路径、大小和当前版本约束，不能借包清单复制运行根或其它目录。子流程对外声明的成果先核验、归集至父节点当前尝试，再以父运行文件引用继续传递，保留原始来源。

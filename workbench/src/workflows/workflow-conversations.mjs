@@ -128,10 +128,11 @@ export class WorkflowConversations {
       this.db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,1) ON CONFLICT(workflow_id) DO UPDATE SET revision=revision+1').run(turn.workflowId);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    this.app.workflowFolders?.syncConversation(turn.workflowId);
   }
   emit(workflowId) {
     if (this.closed) return;
-    try { this.app.publish?.('workflow.conversation', null, { workflowId, ...this.get(workflowId) }); }
+    try { this.app.workflowFolders?.syncConversation(workflowId); this.app.publish?.('workflow.conversation', null, { workflowId, ...this.get(workflowId) }); }
     catch (error) { if (![409, 410].includes(error.httpStatus)) throw error; }
   }
   get(workflowId) {
@@ -238,7 +239,7 @@ export class WorkflowConversations {
   pending(workflowId) {
     const runs = [], seen = new Set();
     const visit = (run, path = '', depth = 0) => {
-      if (depth > 8 || seen.has(run.id) || run.learningId || run.memoryScopeId) return;
+      if (depth > 8 || seen.has(run.id) || run.importedArchive || run.learningId || run.memoryScopeId) return;
       seen.add(run.id); runs.push({ run, path });
       for (const node of run.document?.nodes || []) if (['subflow', 'foreach', 'loop'].includes(node.type)) {
         for (const childId of this.childIds(run.nodes?.[node.id])) {
@@ -273,6 +274,7 @@ export class WorkflowConversations {
     }
     const run = this.app.workflows.get(context.runId);
     this.assertRunScope(workflowId, run);
+    if (run.importedArchive && (exact || review)) fail('导入的历史运行只供查看，请从当前工作流新建运行。', 409);
     if (run.learningId || run.memoryScopeId || run.document?.mode === 'learn') fail('学习样例不能带入普通工作流对话，请使用学习面板。', 409);
     if (!context.nodeId) {
       if (exact || context.artifactIds?.length || context.artifactHashes?.length) fail('请明确选择对应节点。', 409);
@@ -292,7 +294,7 @@ export class WorkflowConversations {
       artifactIds: [...(context.artifactIds || [])], artifactHashes: artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) }, run, node, record };
   }
   feedbackRuns(workflowId, context) {
-    return this.app.workflows.list(workflowId).filter(run => TERMINAL.has(run.status) && !run.learningId && !run.memoryScopeId
+    return this.app.workflows.list(workflowId).filter(run => TERMINAL.has(run.status) && !run.importedArchive && !run.learningId && !run.memoryScopeId
       && run.document?.mode === 'execute' && (!context.nodeId || run.document.nodes.some(node => node.id === context.nodeId)));
   }
   learningTargets(document, context, requestText) {
@@ -358,6 +360,10 @@ export class WorkflowConversations {
     turn.actions = [{ id: 'action-' + randomUUID(), kind: 'mark-applied', label: '应用任务配置', context }];
   }
   prepareFeedback(turn, document, bound, intent, automatic = false) {
+    if (bound.run?.importedArchive) {
+      turn.status = 'complete'; turn.actions = [];
+      turn.assistant = { text: '导入的历史运行只供查看。请从当前工作流新建运行，再反馈或改进新的结果。' }; return;
+    }
     if (!bound.run || !TERMINAL.has(bound.run.status)) {
       if (intent === 'skill') this.prepareLearningScope(turn, document, bound.context);
       else { turn.status = 'complete'; turn.actions = []; turn.assistant = { text: '当前还没有可关联的已结束结果。请先在这里点击“运行当前流程”；结果出现后，直接回复这段对话即可提出反馈。' }; }
@@ -741,6 +747,7 @@ export class WorkflowConversations {
     const document = privateValue.document;
     const checkedContext = input.action === 'mark-applied' ? Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'documentRevision')) : context;
     const bound = input.action === 'mark-applied' ? { context } : this.bindContext(workflowId, checkedContext, document, { exact: input.action.startsWith('review-') || input.action === 'rerun', review: input.action.startsWith('review-') });
+    if (bound.run?.importedArchive) fail('导入的历史运行只供查看，请从当前工作流新建运行。', 409);
     if (input.action === 'select-run' || input.action === 'select-learning-target') {
       turn.selection = { context: bound.context, selectedAt: now() };
       if (input.action === 'select-learning-target') this.prepareLearningScope(turn, document, bound.context);

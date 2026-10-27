@@ -351,7 +351,7 @@ test('inactive opening does not parse or replace a corrupt browser draft, and no
 test('read-only core rejects graph mutation and run preparation while camera, export and history remain available without persistence', t => {
   const original = doc(), raw = JSON.stringify({ version: 1, document: original }), { values, writes } = storage(t, [[PREFIX + original.id, raw]]);
   const instance = editor(original, { cached: true }); instance.history = [{ document: doc('old-id'), label: '旧历史' }]; instance.selection.add('input');
-  let callbacks = 0, exports = 0; instance.onPersist = () => callbacks++; instance.download = () => exports++;
+  let callbacks = 0, exports = 0; instance.onPersist = () => callbacks++; instance.packages = { exportCurrent: () => { exports++; return Promise.resolve(true); } };
   instance.setLibraryLifecycle('trashed'); const before = copy(instance.doc), history = copy(instance.history);
   instance.commit({ ...instance.doc, title: '禁止更名' }, '更名'); instance.undo(); instance.undo(true); instance.deleteSelection(); instance.addNode('tool');
   instance.clipboard = { nodes: [createNode('tool', { x: 0, y: 0 })], edges: [] }; instance.pasteSelection(); instance.createMinimalFlow(); instance.loadExample();

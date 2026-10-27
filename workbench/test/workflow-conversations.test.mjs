@@ -197,6 +197,42 @@ test('conversation feedback persists without a model or Skill and never changes 
   assert.deepEqual(f.adapter.calls, []);
 });
 
+test('imported archive contexts remain readable but never enter review or feedback action selection', async t => {
+  const f = await fixture(t), document = graph(true); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const run = { schemaVersion: 2, id: 'run-imported-readonly', workflowId: document.id, document, status: 'complete', importedArchive: true,
+    nodes: Object.fromEntries(document.nodes.map(node => [node.id, { status: node.type === 'human' ? 'waiting_review' : 'complete',
+      attempt: 1, attemptId: 'attempt-' + node.id, artifacts: [] }])) };
+  f.app.store.db.prepare('INSERT INTO workflow_runs(id,value) VALUES(?,?)').run(run.id, JSON.stringify(run));
+  const manager = f.app.conversations, selected = context(run, 'trim');
+  assert.equal(manager.bindContext(document.id, selected, document).run.importedArchive, true);
+  assert.throws(() => manager.bindContext(document.id, selected, document, { exact: true }), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  assert.deepEqual(manager.feedbackRuns(document.id, {}), []); assert.deepEqual(manager.pending(document.id), []);
+  const turn = { user: { text: '请记录这个历史结果的修改意见' } };
+  manager.prepareFeedback(turn, document, manager.bindContext(document.id, selected, document), 'feedback', false);
+  assert.equal(turn.status, 'complete'); assert.deepEqual(turn.actions, []); assert.match(turn.assistant.text, /导入.*历史/);
+  f.app.conversations.planner = async () => ({ text: '可以读取并解释历史，未执行修改。' });
+  const read = await settledMessage(f, document.id, message(document, '解释这份历史结果', { intent: 'discuss', context: selected }));
+  assert.equal(read.turn.status, 'complete'); assert.match(read.turn.assistant.text, /读取/);
+  assert.deepEqual(f.app.workflows.get(run.id), run); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('an old record-feedback card cannot append an outcome after its run becomes an imported archive', async t => {
+  const f = await fixture(t), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const run = { schemaVersion: 2, id: 'run-archived-card', workflowId: document.id, document, status: 'complete',
+    nodes: Object.fromEntries(document.nodes.map(node => [node.id, { status: 'complete', attempt: 1, attemptId: 'attempt-' + node.id, artifacts: [] }])) };
+  const write = value => f.app.store.db.prepare('INSERT OR REPLACE INTO workflow_runs(id,value) VALUES(?,?)').run(value.id, JSON.stringify(value));
+  write(run);
+  const response = await f.app.conversations.message(document.id, message(document, '这个结果需要调整', { intent: 'feedback', context: context(run, 'trim') }));
+  const card = response.turn.actions.find(card => card.kind === 'record-feedback'); assert(card);
+  run.importedArchive = true; write(run);
+  const before = f.app.conversations.get(document.id);
+  await assert.rejects(f.app.conversations.action(document.id, response.turn.id, { action: card.kind, actionId: card.id }),
+    error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  assert.deepEqual(f.app.conversations.get(document.id), before);
+  assert.equal(f.app.conversations.readTurn(document.id, response.turn.id).turn.outcome, undefined);
+  assert.deepEqual(f.app.workflows.get(run.id), run); assert.deepEqual(f.adapter.calls, []);
+});
+
 test('chat can configure an existing fixed task, confirm its receipt and run without entering the same input again', async t => {
   const f = await fixture(t), document = graph();
   f.app.workflowLibrary.save({ document, expectedRevision: 0 });

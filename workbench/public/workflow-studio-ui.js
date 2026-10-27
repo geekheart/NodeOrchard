@@ -438,7 +438,7 @@ export class WorkflowStudioUI {
     select.id = `wf-inspect-version-${id}`; label.htmlFor = select.id; select.setAttribute('aria-label', '查看节点版本');
     for (const version of versions) { const option = element('option', '', version.label); option.value = version.key; select.append(option); }
     select.value = selected.key; select.addEventListener('change', () => { this.inspectionVersions.set(key, select.value); this.renderInspectorData(id); }); picker.append(label, select); section.append(picker);
-    section.append(element('p', selected.historical ? 'wf-studio-history-notice' : 'wf-field-help', selected.historical ? '历史版本 · 只读' : '运行快照'));
+    section.append(element('p', selected.historical || run.importedArchive ? 'wf-studio-history-notice' : 'wf-field-help', run.importedArchive ? '导入历史 · 只读' : selected.historical ? '历史版本 · 只读' : '运行快照'));
     if (!selected.historical && canRerunNode(run, id)) {
       this.rerunDrafts ||= new Map(); const controls = element('div', 'wf-studio-rerun');
       const feedback = element('textarea'); feedback.value = this.rerunDrafts.get(key) || ''; feedback.maxLength = 8000; feedback.placeholder = '可选：说明这次重跑需要满足的要求'; feedback.setAttribute('aria-label', '本次重跑补充要求'); feedback.addEventListener('input', () => this.rerunDrafts.set(key, feedback.value));
@@ -624,7 +624,7 @@ export class WorkflowStudioUI {
       if (run.delivery?.status === 'error') {
         locations.append(element('p', 'wf-studio-input-error', `交付副本保存失败：${display(run.delivery.error || '请检查输出目录是否可访问。')} 执行原件已保留，可从原件目录取回。`));
       } else locations.append(element('p', 'wf-field-help', run.delivery?.status === 'complete' ? '交付副本已保存；预览与审核继续使用本机执行原件。' : run.delivery?.status === 'publishing' ? '正在保存交付副本，执行原件已保存在本机。' : '执行原件保存在本机，运行完成后再保存交付副本。'));
-      if (['error', 'complete'].includes(run.delivery?.status)) {
+      if (!run.importedArchive && ['error', 'complete'].includes(run.delivery?.status)) {
         const retry = button(run.delivery.status === 'error' ? '重试保存交付副本' : '检查并补齐交付副本', async () => {
           if (retry.disabled) return; retry.disabled = true;
           try { const result = await this.api(`/api/workflow-runs/${encodeURIComponent(run.id)}/publish`, { method: 'POST', body: {} }); this.runtime.storeRun(result.run || result, { allowReopen: true }); this.runtime.render(); }

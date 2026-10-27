@@ -105,6 +105,7 @@ export class WorkflowDAGRuns {
     this.maxActiveRuns = 2;
     for (const row of this.db.prepare("SELECT value FROM workflow_runs WHERE json_extract(value,'$.schemaVersion')=2 AND json_extract(value,'$.status') NOT IN ('complete','error','interrupted','unknown')").all()) {
       const run = JSON.parse(row.value);
+      if (run.importedArchive) continue;
       if (!run.modelRoute && this.app.recoverModelRoute) {
         run.modelRoute = this.app.recoverModelRoute(Object.values(run.nodes).map(node => node.sessionId));
       }
@@ -179,8 +180,9 @@ export class WorkflowDAGRuns {
     plan = planWorkflow(frozen);
     let value = validateDAGInput(input, plan);
     const id = randomUUID();
+    const folderWorkflowId = parent ? parent.run.folderWorkflowId || parent.run.workflowId : plan.document.id;
     const prepared = this.app.workflowFiles?.prepareRun ? await this.app.workflowFiles.prepareRun({ document: plan.document, input: value, runId: id,
-      outputDirectory: requestedDirectory || plan.document.settings.outputDirectory }) : null;
+      folderWorkflowId, outputDirectory: requestedDirectory || plan.document.settings.outputDirectory }) : null;
     if (prepared?.ok === false) throw fail('输入尚未准备好，请按清单补齐资料。', 400, prepared.errors);
     if (prepared) value = validateDAGInput(prepared.input, plan);
     // Pin the main model once per admitted graph, including later/revised nodes
@@ -199,7 +201,7 @@ export class WorkflowDAGRuns {
     if (!isAbsolute(outputDirectory)) throw fail('输出目录必须是绝对路径。');
     await mkdir(outputDirectory, { recursive: true });
     checkLifecycle();
-    const run = { schemaVersion: 2, id, workflowId: plan.document.id, title: plan.document.title, status: 'queued', document: plan.document,
+    const run = { schemaVersion: 2, id, workflowId: plan.document.id, folderWorkflowId, title: plan.document.title, status: 'queued', document: plan.document,
       nodeOrder: plan.nodeOrder, currentNodeId: null, activeNodeIds: [], input: value, output: null, outputs: {}, outputText: '', partialText: '', error: '',
       outputDirectory, ...(prepared?.deliveryDirectory && prepared.deliveryDirectory !== outputDirectory ? { storageVersion: 2, deliveryDirectory: prepared.deliveryDirectory } : {}),
       sourceManifest: prepared?.manifest || [], settings: plan.document.settings, skills: plan.skillNodes.map(node => ({ nodeId: node.id, name: node.config.skillRef, revision: node.config.version, source: details[node.id].source })),
@@ -375,7 +377,9 @@ export class WorkflowDAGRuns {
     finally { this.publications.delete(id); this.mutations.delete(id); }
   }
   async publishStoredDelivery(id) {
-      const run = this.get(id); this.app.workflowLibrary?.assertRunnable?.(run.workflowId);
+      const run = this.get(id);
+      if (run.importedArchive) throw fail('导入的历史运行只供查看，请从当前工作流新建运行。', 409);
+      this.app.workflowLibrary?.assertRunnable?.(run.workflowId);
       if (!run.deliveryDirectory || !this.app.workflowFiles?.publishRun) throw fail('历史运行没有独立交付副本，仍可打开原输出目录。', 409);
       if (Object.values(run.nodes).some(record => !['complete', 'skipped'].includes(record.status))) throw fail('请先完成全部节点及人工审核。', 409);
       for (const record of Object.values(run.nodes)) await this.verifyArtifacts(record.artifacts || []);
@@ -585,6 +589,7 @@ export class WorkflowDAGRuns {
     }
   }
   async approve(id, { nodeId, action, feedback = '', targetNodeId, expectedAttempt, expectedAttemptId, expectedArtifactHashes } = {}) {
+    if (this.get(id).importedArchive) throw fail('导入的历史审核只供查看，请从当前工作流新建运行。', 409);
     if (this.mutations.has(id)) throw fail('此运行正在处理审核或重跑，请稍候。', 409);
     this.mutations.add(id);
     try {
@@ -653,6 +658,7 @@ export class WorkflowDAGRuns {
     this.mutations.add(id);
     try {
     let state = this.active.get(id); const run = state?.run || this.get(id);
+    if (run.importedArchive) throw fail('导入的历史运行只供查看，请从当前工作流新建运行。', 409);
     this.app.workflowLibrary?.assertRunnable?.(run.workflowId);
     const wasActive = !!state;
     if (run.learningId) throw fail('学习中的局部重跑由学习控制器管理，请勿改变样例执行。', 409);

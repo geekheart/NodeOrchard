@@ -143,7 +143,7 @@ export class WorkflowFiles {
     return target;
   }
 
-  async preflight({ document, input, runId, outputDirectory } = {}) {
+  async preflight({ document, input, runId, outputDirectory } = {}, { folderWorkflowId } = {}) {
     if (!document || !Array.isArray(document.nodes)) throw failure('缺少工作流。');
     const nodes = document.nodes.filter(node => node.type === 'input');
     const errors = [], entries = [], normalized = {};
@@ -183,17 +183,18 @@ export class WorkflowFiles {
       }
       normalized[name] = result;
     }
+    const workflowDirectory = this.app.workflowFolders?.directory(folderWorkflowId || document.id);
     let root, executionRoot;
-    try { root = await this.writableRoot(outputDirectory || document.settings?.outputDirectory || join(this.app.config.workspaceRoot, 'outputs')); }
+    try { root = await this.writableRoot(outputDirectory || document.settings?.outputDirectory || (workflowDirectory ? join(workflowDirectory, 'outputs') : join(this.app.config.workspaceRoot, 'outputs'))); }
     catch (error) { errors.push({ nodeId: null, key: 'outputDirectory', label: '输出目录', code: 'invalid', message: error.message }); }
-    try { executionRoot = this.managedRunRoot ? await this.writableRoot(this.managedRunRoot) : root; }
+    try { executionRoot = workflowDirectory ? await this.writableRoot(join(workflowDirectory, 'runs')) : this.managedRunRoot ? await this.writableRoot(this.managedRunRoot) : root; }
     catch (error) { errors.push({ nodeId: null, key: 'workflowRunRoot', label: '本机运行目录', code: 'invalid', message: error.message }); }
     if (entries.some(entry => entry.kind === 'folder' && [root, executionRoot].filter(Boolean).some(output => inside(entry.path, output)))) {
       errors.push({ nodeId: null, key: 'outputDirectory', label: '输出目录', code: 'overlap', message: '输出目录位于输入资料文件夹内，会改变本次输入；请选择其它输出位置或更具体的输入目录。' });
     }
     const manifest = { version: 1, workflowId: document.id, preparedAt: new Date().toISOString(), entries };
     manifest.sha256 = digest(Buffer.from(JSON.stringify(entries)));
-    const suffix = [slug(document.title || document.id), runId || '本次运行'];
+    const suffix = workflowDirectory ? [runId || '本次运行'] : [slug(document.title || document.id), runId || '本次运行'];
     const executionDirectory = executionRoot ? join(executionRoot, ...suffix) : null;
     const deliveryDirectory = root ? join(root, ...suffix) : null;
     if (executionDirectory && deliveryDirectory && executionDirectory !== deliveryDirectory
@@ -204,12 +205,21 @@ export class WorkflowFiles {
       outputDirectory: executionDirectory, deliveryDirectory, outputRoot: root || null };
   }
 
-  async prepareRun({ document, input, runId, outputDirectory } = {}) {
+  async prepareRun({ document, input, runId, outputDirectory, folderWorkflowId } = {}) {
     if (!UUID.test(runId || '')) throw failure('无效的运行 ID。');
     const existing = this.db.prepare('SELECT value FROM workflow_file_runs WHERE id=?').get(runId);
     if (existing) throw failure('此运行的输入快照已存在，不能覆盖。', 409);
-    const result = await this.preflight({ document, input, runId, outputDirectory });
+    const result = await this.preflight({ document, input, runId, outputDirectory }, { folderWorkflowId });
     if (!result.ok) return result;
+    if (this.app.workflowFolders) {
+      const owner = folderWorkflowId || document.id;
+      const captured = await this.app.workflowFolders.captureInputs(owner, result.manifest.entries);
+      const paths = new Map([...captured.mappings, ...captured.directories].map(item => [item.source, join(this.app.workflowFolders.directory(owner), item.path)]));
+      const relocate = value => typeof value === 'string' ? paths.get(value) || value : Array.isArray(value) ? value.map(relocate)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, relocate(item)])) : value;
+      result.input = relocate(result.input); result.manifest.entries = captured.entries;
+      result.manifest.sha256 = digest(Buffer.from(JSON.stringify(captured.entries)));
+    }
     result.bindingInput = copy(result.input);
     for (const entry of result.manifest.entries.filter(item => item.selection)) {
       const definition = document.nodes.find(node => node.id === entry.nodeId);
@@ -230,8 +240,15 @@ export class WorkflowFiles {
 
   async nodeDirectory({ runId, nodeId, attempt = 1 }) {
     if (!IDENTIFIER.test(nodeId || '') || !Number.isInteger(attempt) || attempt < 1 || attempt > 10000) throw failure('节点或修改次数无效。');
-    const root = this.run(runId).outputDirectory;
+    const run = this.run(runId), root = run.outputDirectory;
     const path = join(root, nodeId, '版本-' + attempt);
+    if (run.importedArchive) {
+      try {
+        const actual = await this.permitted(path);
+        if (!inside(await realpath(root), actual) || !(await stat(actual)).isDirectory()) throw failure('历史节点目录无效。');
+        return actual;
+      } catch { throw failure('导入的历史目录只供查看，不能创建新的节点版本。', 409); }
+    }
     await this.permitted(path, { existing: false });
     await mkdir(path, { recursive: true });
     const actual = await realpath(path);
@@ -260,6 +277,7 @@ export class WorkflowFiles {
 
   async registerArtifact({ runId, nodeId, attempt = 1, path, label, role, kind } = {}) {
     const run = this.run(runId);
+    if (run.importedArchive) throw failure('导入的历史运行只供查看，不能新增产物登记。', 409);
     if (!IDENTIFIER.test(nodeId || '') || !Number.isInteger(attempt) || attempt < 1 || attempt > 10000) throw failure('产物所属节点或版本无效。');
     let details;
     try {
@@ -433,6 +451,7 @@ export class WorkflowFiles {
 
   async publishRun(runId) {
     const run = this.run(runId);
+    if (run.importedArchive) throw failure('导入的历史运行只供查看，请从当前工作流新建运行后再交付。', 409);
     if (!run.deliveryDirectory || run.deliveryDirectory === run.outputDirectory) return null;
     if (this.publishing.has(runId)) throw failure('本次交付正在发布，请稍候。', 409);
     this.publishing.add(runId);

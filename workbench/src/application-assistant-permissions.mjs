@@ -12,7 +12,7 @@ export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
   supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true }),
 });
 const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
-const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
+const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
 const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.probe']);
@@ -26,11 +26,11 @@ async function canonical(path) {
     catch (error) { if (error.code !== 'ENOENT' || dirname(ancestor) === ancestor) throw error; ancestor = dirname(ancestor); }
   }
 }
-async function workingFolder(app) {
+async function workingFolder(app, workflowId) {
   const workspace = app.config?.workspaceRoot;
   if (typeof workspace !== 'string' || !isAbsolute(workspace)) fail('助手工作文件夹未配置。', 409);
   const configured = resolve(workspace), root = await canonical(configured);
-  const folder = resolve(configured, app.preferences?.defaultWorkspace || '.');
+  const folder = workflowId && app.workflowFolders ? app.workflowFolders.directory(workflowId) : resolve(configured, app.preferences?.defaultWorkspace || '.');
   const actual = await canonical(folder);
   if ((!inside(configured, folder) && !inside(root, folder)) || !inside(root, actual)) fail('助手工作文件夹越过已配置的工作区。');
   return actual;
@@ -68,7 +68,7 @@ export class ApplicationAssistantPermissions {
     if (role === 'workflow' && !workflowId) fail('独立会话必须绑定当前工作流。');
     if (document && document.id !== workflowId) fail('助手草稿与当前工作流不一致。', 409);
     const settings = settingsValue(await this.readSettings());
-    const actual = await workingFolder(this.app);
+    const actual = await workingFolder(this.app, role === 'workflow' ? workflowId : undefined);
     if (typeof readOnly !== 'boolean') fail('助手诊断模式无效。');
     const scope = Object.freeze({ role, readOnly, workflowId: workflowId || null, workingFolder: actual,
       revision: settings.revision, permissions: Object.freeze(settings[role]), baseDocument: document ? structuredClone(document) : null });
@@ -82,7 +82,7 @@ export class ApplicationAssistantPermissions {
     this.check(scope);
     const settings = settingsValue(await this.readSettings());
     if (settings.revision !== scope.revision || JSON.stringify(settings[scope.role]) !== JSON.stringify(scope.permissions)) fail('助手权限已变化，请重新发送消息。', 409);
-    if (await workingFolder(this.app) !== scope.workingFolder) fail('助手工作文件夹已变化，请重新发送消息。', 409);
+    if (await workingFolder(this.app, scope.role === 'workflow' ? scope.workflowId : undefined) !== scope.workingFolder) fail('助手工作文件夹已变化，请重新发送消息。', 409);
     return scope;
   }
   allowed(name, scope) {
@@ -101,12 +101,21 @@ export class ApplicationAssistantPermissions {
     return READ.has(name) && p.workflowRead;
   }
   tools(descriptors, scope) { return descriptors.filter(tool => this.allowed(tool.name, scope)).map(tool => structuredClone(tool)); }
-  async path(path, scope, { access = 'read' } = {}) {
+  async path(path, scope, { access = 'read', material = {} } = {}) {
     await this.current(scope);
     if (access !== 'read') fail('助手没有任意文件或源码写权限；业务代码只能通过节点候选接口修改。');
     if (!scope.permissions.workspaceRead) fail('当前助手未获准读取工作文件夹。');
     if (typeof path !== 'string' || !path || path.includes('\0') || !isAbsolute(path)) fail('资料必须使用当前工作文件夹内的绝对路径。');
-    const target = await canonical(resolve(path));
+    let target = await canonical(resolve(path));
+    if (!inside(scope.workingFolder, target) && this.app.workflowFolders?.resolveMaterial) {
+      const workflowId = scope.workflowId || material.workflowId;
+      if (workflowId) {
+        this.workflow(workflowId, scope);
+        const { workflowId: ignored, ...identity } = material;
+        const cached = await this.app.workflowFolders.resolveMaterial(workflowId, path, identity);
+        if (cached) target = await canonical(cached.path);
+      }
+    }
     if (!inside(scope.workingFolder, target)) fail('资料超出当前助手工作文件夹。');
     if (this.app.config?.appRoot) {
       const sourceRoot = await canonical(this.app.config.appRoot);
@@ -127,7 +136,15 @@ export class ApplicationAssistantPermissions {
   }
   run(runId, scope) {
     if (!id(runId)) fail('运行编号无效。', 400);
-    const run = this.app.workflows.get(runId); this.workflow(run.workflowId, scope); return run;
+    const run = this.app.workflows.get(runId); this.workflow(this.ownerWorkflow(run), scope); return run;
+  }
+  ownerWorkflow(run) {
+    const visited = new Set();
+    while (run.parentRunId) {
+      if (!id(run.parentRunId) || visited.has(run.parentRunId) || visited.size > 32) fail('运行的父级归属无效。', 409);
+      visited.add(run.parentRunId); run = this.app.workflows.get(run.parentRunId);
+    }
+    return run.workflowId;
   }
   session(sessionId, scope) {
     if (!id(sessionId)) fail('会话编号无效。', 400);
@@ -137,9 +154,9 @@ export class ApplicationAssistantPermissions {
     if (db?.prepare && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_runs'").get()) {
       owners = db.prepare("SELECT runs.value FROM workflow_runs AS runs WHERE json_valid(runs.value) AND (json_extract(runs.value,'$.sessionId')=? OR EXISTS "
         + "(SELECT 1 FROM json_each(runs.value,'$.nodes') AS node WHERE json_extract(node.value,'$.sessionId')=?))").all(sessionId, sessionId).map(row => JSON.parse(row.value));
-    } else owners = (this.app.workflows?.list?.(scope.workflowId) || []).filter(run => run.sessionId === sessionId
+    } else owners = (this.app.workflows?.list?.() || []).filter(run => run.sessionId === sessionId
       || Object.values(run.nodes || {}).some(node => node.sessionId === sessionId));
-    if (!owners?.length || owners.some(run => run.workflowId !== scope.workflowId)) fail('此会话不属于当前工作流。');
+    if (!owners?.length || owners.some(run => this.ownerWorkflow(run) !== scope.workflowId)) fail('此会话不属于当前工作流。');
   }
   async document(document, scope, { baseDocument = scope?.baseDocument, allowNewWorkflow = false } = {}) {
     await this.current(scope);
@@ -150,24 +167,39 @@ export class ApplicationAssistantPermissions {
       const previous = codeNodes(baseDocument);
       if ([...codeNodes(document)].some(([nodeId, code]) => previous.get(nodeId) !== code)) fail('当前助手未获准派生或修改业务代码节点。');
     }
-    const visit = async (current, depth = 0) => {
+    const result = structuredClone(document), material = { workflowId: document.id };
+    const visit = async (current, previous, depth = 0) => {
       if (depth > 8) fail('嵌入工作流层级过深。', 400);
-      if (current.settings?.outputDirectory) await this.path(current.settings.outputDirectory, scope);
+      if (current.settings?.outputDirectory) {
+        try { current.settings.outputDirectory = await this.path(current.settings.outputDirectory, scope, { material }); }
+        catch (error) {
+          // A legacy delivery preference is not permission to write there.
+          // Keep its frozen value in the DB; planning uses the owned default.
+          if (!this.app.workflowFolders || error.httpStatus !== 403 || !/超出当前/.test(error.message)
+            || previous?.settings?.outputDirectory !== current.settings.outputDirectory) throw error;
+          current.settings.outputDirectory = await this.path(join(this.app.workflowFolders.directory(document.id), 'outputs'), scope);
+        }
+      }
       for (const node of current.nodes || []) {
         if (node.config?.workflowRef) this.workflow(node.config.workflowRef, scope);
         if (node.type === 'input') {
           const fields = workflowInputFields(node), value = workflowInputValue(current, undefined, node);
           for (const field of fields.filter(field => ['file', 'folder', 'image'].includes(field.kind))) {
             const path = fields.length === 1 && (typeof value !== 'object' || value === null) ? value : value?.[field.key];
-            if (typeof path === 'string' && path.trim()) await this.path(path, scope);
+            if (typeof path === 'string' && path.trim()) {
+              const local = await this.path(path, scope, { material: { ...material, kind: 'input' } });
+              const slot = Object.hasOwn(node.config, 'defaultValue') ? 'defaultValue' : 'value';
+              if (node.config[slot] && typeof node.config[slot] === 'object') node.config[slot][field.key] = local;
+              else if (fields.length === 1 && Object.hasOwn(node.config, slot)) node.config[slot] = local;
+            }
           }
-          if (['file', 'folder', 'image'].includes(node.config?.sourceKind) && node.config?.path) await this.path(node.config.path, scope);
+          if (['file', 'folder', 'image'].includes(node.config?.sourceKind) && node.config?.path) node.config.path = await this.path(node.config.path, scope, { material: { ...material, kind: 'input' } });
         }
-        if (node.config?.document) await visit(node.config.document, depth + 1);
+        if (node.config?.document) await visit(node.config.document, previous?.nodes?.find(item => item.id === node.id)?.config?.document, depth + 1);
       }
     };
-    await visit(document);
-    return document;
+    await visit(result, baseDocument);
+    return result;
   }
   async admit(name, args = {}, scope, context = {}) {
     await this.current(scope);
@@ -182,7 +214,7 @@ export class ApplicationAssistantPermissions {
       if (context.workflowId && context.workflowId !== scope.workflowId || context.document && context.document.id !== scope.workflowId) fail('调用上下文越过当前工作流。');
       if (args.workflowId) this.workflow(args.workflowId, scope);
       context.workflowId = scope.workflowId;
-      if (['workflow.inspect', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
+      if (['workflow.inspect', 'workflow.folder', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
       if (name === 'assistant.diagnose' && scope.workflowId && !args.conversationId) args.workflowId = scope.workflowId;
     }
     const runId = args.runId || (!['session.history', 'tools.catalog'].includes(name) ? context.runId : null);
@@ -191,13 +223,14 @@ export class ApplicationAssistantPermissions {
     if (name === 'artifact.inspect') {
       const artifact = this.app.workflowFiles.getArtifact(args.artifactId);
       if (artifact.runId !== args.runId || artifact.nodeId !== args.nodeId) fail('产物不属于指定运行节点。');
-      await this.path(artifact.path, scope);
+      context.artifactPath = await this.path(artifact.path, scope, { material: { workflowId: this.ownerWorkflow(this.app.workflows.get(artifact.runId)),
+        sha256: artifact.sha256, size: artifact.size, kind: 'artifact', runId: artifact.runId, nodeId: artifact.nodeId, artifactId: artifact.id } });
     }
     if (name === 'workflow.preflight' || name === 'workflow.propose') {
       const workflowId = args.workflowId || context.workflowId;
       this.workflow(workflowId, scope);
       const document = context.document?.id === workflowId ? context.document : this.app.workflowLibrary.get(workflowId).document;
-      await this.document(document, scope, { baseDocument: document });
+      context.documentView = await this.document(document, scope, { baseDocument: document });
     }
     if (name === 'workbench.inspect' && scoped && !['models', 'schedules', 'statistics'].includes(args.section)) fail('独立会话只可读取当前流程统计、定时任务或模型身份。');
     if (name === 'workbench.inspect' && scoped && args.section === 'statistics' && !args.workflowId) fail('统计读取必须绑定当前工作流。');
@@ -215,8 +248,8 @@ export class ApplicationAssistantPermissions {
     const scoped = scope.role === 'workflow' || !scope.permissions.crossWorkflowRead;
     const ownedRun = run => {
       if (!run || typeof run !== 'object') return false;
-      if (run.workflowId) return run.workflowId === scope.workflowId;
-      try { return this.run(run.id || run.runId, scope).workflowId === scope.workflowId; } catch { return false; }
+      if (run.workflowId === scope.workflowId) return true;
+      try { this.run(run.id || run.runId, scope); return true; } catch { return false; }
     };
     const ownedSession = sessionId => { try { this.session(sessionId, scope); return true; } catch { return false; } };
     const route = value => /^\/?#\/workflows\/([A-Za-z0-9_-]+)$/.exec(value || '')?.[1] === scope.workflowId;

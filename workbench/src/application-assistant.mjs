@@ -349,7 +349,7 @@ export class ApplicationAssistant {
       }
       const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2 }), activeSignal), permissionScope);
       check(activeSignal);
-      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflows.list']);
+      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.folder', 'workflows.list']);
       const tools = this.tools(permissionScope).filter(tool => decision?.intent !== 'discuss' || discussionTools.has(tool.name));
       turn.admitCheckpoint(diagnosticScope({ selection: { ...selection, role, readOnly, sourceConversationId, permissionRevision: permissionScope.revision }, evidence, modelRoute, capabilities, config: this.app.config, tools }), checkpoint, evidence);
       const source = { userMessage: sanitizeDiagnosticText(text), selection: Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'document')),
@@ -539,7 +539,7 @@ export class ApplicationAssistant {
       const workflowId = args.workflowId || context.workflowId;
       if (!workflowId) fail('需要明确具体工作流；可先读取全局工作流列表。');
       const saved = context.document?.id === workflowId ? null : this.app.workflowLibrary.get(workflowId);
-      const document = saved?.document || context.document;
+      const document = context.documentView || saved?.document || context.document;
       return this.app.workflowFiles.preflight({ document });
     }
     return this.app.diagnostics.read(name, args, context);
@@ -550,7 +550,7 @@ export class ApplicationAssistant {
     const workflowId = args.workflowId || context.workflowId;
     if (!workflowId) fail('需要明确具体工作流；可先读取全局工作流列表。');
     const saved = context.document?.id === workflowId ? null : this.app.workflowLibrary.get(workflowId);
-    const document = saved?.document || context.document;
+    const originalDocument = saved?.document || context.document, document = context.documentView || originalDocument;
     if (typeof args.request !== 'string' || !args.request.trim() || args.request.length > 12000) fail('修复要求无效。');
     const original = sanitizeDiagnosticText(context.text || ''), requested = sanitizeDiagnosticText(args.request);
     const text = !original || original.trim() === requested.trim() ? requested : original + '\n处理要求：' + requested;
@@ -573,7 +573,7 @@ export class ApplicationAssistant {
         })),
         model: this.app.assistantModel, modelRoute: context.modelRoute });
       if (proposal.operations?.length) await this.permissions.document(applyWorkflowOperations(document, proposal.operations).document, permissionScope, { baseDocument: document });
-    return { ...proposal, ...(saved ? { targetWorkflowId: saved.id, expectedRevision: saved.revision } : {}) };
+    return { ...proposal, baseFingerprint: documentFingerprint(originalDocument), ...(saved ? { targetWorkflowId: saved.id, expectedRevision: saved.revision } : {}) };
   }
   capturePolicy(scope, sourceConversationId) {
     const restricted = scope.role === 'workflow' || !scope.permissions.crossWorkflowRead || !scope.permissions.appLogs;

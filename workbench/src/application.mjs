@@ -21,6 +21,8 @@ import { WorkflowSchedules } from './workflows/workflow-schedules.mjs';
 import { WorkflowLibrary } from './workflows/workflow-library.mjs';
 import { WorkflowFeedback } from './workflows/workflow-feedback.mjs';
 import { WorkflowFiles } from './workflows/workflow-files.mjs';
+import { WorkflowFolders } from './workflows/workflow-folders.mjs';
+import { WorkflowPackages } from './workflows/workflow-packages.mjs';
 import { WorkflowNodePresets } from './workflows/workflow-node-presets.mjs';
 import { WorkflowConversations } from './workflows/workflow-conversations.mjs';
 import { AppDiagnostics } from './app-diagnostics.mjs';
@@ -120,6 +122,7 @@ export class Application extends EventEmitter {
     adapter.on('request', frame => this.onRequest(frame));
     this.learnedSkills = new LearnedSkills(this);
     this.workflowFiles = new WorkflowFiles(this);
+    this.workflowFolders = new WorkflowFolders(this);
     this.workflows = new WorkflowRuns(this);
     this.feedback = new WorkflowFeedback(this);
     this.learningModel = new LearningModel(this);
@@ -133,6 +136,8 @@ export class Application extends EventEmitter {
     this.assistantPermissionSettings = new AssistantPermissionSettings(this);
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
+    this.workflowPackages = new WorkflowPackages(this);
+    this.workflowFoldersReady = this.workflowFolders.migrate();
     this.historicalUsage = new HistoricalUsage(this);
     this.logEvents.write('info', 'application.started', { component: 'application', status: 'ready' });
   }
@@ -646,6 +651,7 @@ export class Application extends EventEmitter {
 
   async close() {
     if (this.closed) return;
+    await this.workflowFoldersReady;
     this.logEvents.write('info', 'application.stopping', { component: 'application' });
     this.historicalUsage?.close?.();
     await this.conversations.close();
@@ -656,6 +662,7 @@ export class Application extends EventEmitter {
     await this.learning.close();
     await this.learningModel.close();
     await this.workflows.close();
+    await this.workflowFolders.close();
     await Promise.allSettled(this.store.list().filter(s => s.runtimeSessionId && !this.historyOnlyRuntimes.has(s.runtimeSessionId)
       && ['running', 'waiting'].includes(s.status))
       .map(s => this.adapter.request('session.interrupt', { session_id: s.runtimeSessionId }, 1500)));

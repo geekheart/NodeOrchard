@@ -41,13 +41,14 @@
 | 位置 | 用途 | Git |
 | --- | --- | --- |
 | 项目根目录 `workflow/` | 默认 cwd，首次启动自动创建 | 忽略 |
+| `workflow/workflows/<id>/` | 每个工作流的定义、完整 AI 对话、素材与运行文件 | 忽略 |
 | `workflow/artifacts/` | 普通会话产物 | 忽略 |
-| `workflow/outputs/` | 默认交付副本 | 忽略 |
+| `workflow/outputs/` | 保留旧交付副本 | 忽略 |
 | `workflow/config/` | 本机资源覆盖与当前板卡配置 | 忽略 |
 | `workflow/workflow-sessions/` | 各节点的隔离 Skill 会话与冻结 bundle | 忽略 |
 | `workbench/.local/` | 现有 SQLite、Skill 快照、依赖与缓存 | 忽略，保留历史 |
 | `workbench/workspaces/` | 旧会话和交付目录 | 忽略，保留历史 |
-| 本机应用数据目录 `…/PersonalAgentWorkbench/runs/` | 权威执行原件、回执、节点版本 | 仓库外 |
+| 本机应用数据目录 `…/PersonalAgentWorkbench/runs/` | 保留旧执行原件、回执、节点版本 | 仓库外 |
 | `skills/` | 内置 Skill、固件模板和 schema | 源码 |
 | `hdk/learning/` 中的案例与答案 | 私人学习记录 | 忽略，通用 schema／说明除外 |
 
@@ -55,7 +56,7 @@
 
 迁移已有流程时，在软件的“运行前准备”中选择 `workflow/config/` 下的当前配置，清空旧的输出根目录即可继承新默认值。复制配置先校验内容 SHA，保留配置内已核验的资料路径；不要全局替换历史目录。已有学习合同与旧门禁仍可能被兼容能力引用，应保留其本机原件，不能为了清理目录重写哈希或删除学习记录。
 
-权威原件与交付副本分离。复制失败或副本后来被删改，可使用“重试保存交付副本”或“检查并补齐交付副本”，只保存副本，不重跑节点或人工审核。macOS 原件默认位于 `~/Library/Application Support/PersonalAgentWorkbench/runs/`，Windows 使用 Local AppData，Linux 使用 XDG state。
+每个工作流使用独立文件夹，编辑器可直接打开；新运行的原件与默认交付分别保存在自身 `runs/` 和 `outputs/`。`.workflow` 是包含目录内容的标准 ZIP 包，导入创建新副本。已有外部原件保留原路径、冻结记录和 SHA，迁移只复制归集；目录布局、资料完整性及导入历史只读规则统一见[工作流文件夹与便携包](docs/workflow-packages.md)。交付复制失败仍可单独重试，不重跑节点或人工审核。
 
 ## 代码边界
 
@@ -93,7 +94,7 @@ npm run check:git
 | `WORKBENCH_PORT` | `4318`，仅监听 `127.0.0.1` |
 | `WORKBENCH_WORKSPACE_ROOT` | 项目根目录 `workflow/`；显式指定工作环境 |
 | `WORKBENCH_DATA_DIR` | `workbench/.local/`；SQLite 与私有状态 |
-| `WORKBENCH_RUN_ROOT` | 本机应用数据目录；权威执行原件 |
+| `WORKBENCH_RUN_ROOT` | 旧运行原件目录准入与兼容 |
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 安装内 `venv/bin/python` |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
@@ -114,7 +115,7 @@ npm run check:git
 
 右侧对话可主动发现真实应用能力，按需读取节点契约、执行环境、全局状态、运行错误、Hermes 工具记录和页面证据，并截图或短录制复现。无需手动复制应用已有说明或日志；流程修复及获准的业务代码配置在同一对话生成可审阅候选，应用和运行分别确认。截图使用专用只读浏览器，模型没有修改软件源码的工具。
 
-在“设置 → 助手权限”分别分配独立会话和总控助手的能力。独立会话固定在当前工作流与工作文件夹；总控可按开关取得跨工作流日志、软件日志和复制／新建测试流程／移入回收站能力。权限设置只由用户手动保存，AI 不能修改。工作文件夹来自服务端工作区与默认工作目录，业务输出目录不会扩大助手范围；这些是助手接口限制，代码执行器不是 OS 沙箱。
+在“设置 → 助手权限”分别分配独立会话和总控助手的能力。独立会话固定在当前工作流及自身文件夹；总控可按开关取得跨工作流日志、软件日志和复制／新建测试流程／移入回收站能力。权限设置只由用户手动保存，AI 不能修改。目录与便携包权限见[工作流文件夹与便携包](docs/workflow-packages.md)，业务输出位置不会扩大助手范围；这些是助手接口限制，代码执行器不是 OS 沙箱。
 
 诊断先使用紧凑摘要和已有证据，再补查详情；重复读取会去重，独立只读检查可批量请求。当前气泡显示实际阶段与耗时，失败和重启保留已完成诊断进度，按有效期和上下文校验复用证据，不自动重放操作。具体限制见 [上下文、进度与中断](docs/application-diagnostics.md#上下文进度与中断)。
 

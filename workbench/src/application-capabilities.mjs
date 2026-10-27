@@ -33,11 +33,12 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     route: { type: 'string' }, mode: { enum: ['screenshot', 'recording'] }, durationSeconds: { type: 'number', minimum: 0.1, maximum: 10 },
     steps: { type: 'array', maxItems: 12, description: '受限应用路由导航、click/scroll；禁止业务提交、输入和任意脚本' } }),
   definition('workflow.preflight', '检查工作流默认输入及文件准备；不编译或试跑 Python，不证明依赖可用或业务产物成功。', { workflowId: text }),
+  definition('workflow.folder', '只读获取指定工作流的独立文件夹、资料归集状态、保存版本与 .workflow 下载入口；不打开本机窗口、不解包、不执行。', { workflowId: text }),
   definition('workflow.propose', '生成编辑器已校验的业务流程/代码修改候选，在原聊天应用；代码模式无需注册工具。此调用结束本轮等待应用，不自动执行。', {
     workflowId: text, request: { type: 'string', maxLength: 12000 } }, 'proposal'),
 ]);
 
-const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect']);
+const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
@@ -70,6 +71,8 @@ const FEATURES = [
   { id: 'models-and-settings', status: 'ui-only', inspect: 'workbench.inspect', note: '可读取当前设置；模型、提供商和认证由Hermes原生入口管理。' },
   { id: 'keyboard-shortcuts', status: 'ui-only', inspect: 'workbench.inspect', tools: [],
     note: '设置中的快捷键操作表由用户录制、禁用、恢复和保存，跨页面生效并检查冲突；工作流、总控和任务对话共用发送组合。助手可读当前偏好，但没有快捷键设置写工具，快捷键不增加执行或审核权限。' },
+  { id: 'workflow-folders', status: 'available', tools: ['workflow.folder'], note: '每个工作流在工作区 workflows/<id> 保存定义、完整聊天、素材和运行资料；读取目录不触发本机打开或执行。' },
+  { id: 'workflow-packages', status: 'ui-only', inspect: 'workflow.folder', tools: [], note: '用户导出完整文件夹为 .workflow ZIP，导入解包为独立副本；历史只读，不恢复执行、审核或认证。选择本机文件、下载和打开文件夹由界面完成。' },
   { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '可读预设目录，创建与版本保存使用已有界面。' },
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '现有聊天可准备明确目标的学习候选；训练答案和验证样本不开放给全局诊断模型。' },
   { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },
@@ -112,6 +115,14 @@ export class ApplicationCapabilities {
     if (name === 'assistant.skills.read') return this.skills.read(args.name);
     if (name === 'runtime.inspect') return inspectCodeRuntime(this.app, args, { signal: context.signal });
     if (name === 'workbench.inspect') return this.inspectWorkbench(args);
+    if (name === 'workflow.folder') {
+      const workflowId = args.workflowId || context.workflowId || context.document?.id;
+      const record = this.app.workflowLibrary.get(workflowId);
+      return { workflowId: record.id, directory: this.app.workflowFolders.directory(record.id), revision: record.revision,
+        ...this.app.workflowFolders.status(record.id),
+        layout: ['workflow.json', 'conversation.json', 'inputs/', 'outputs/', 'runs/', 'history/', 'skills/'],
+        export: { format: '.workflow', url: `/api/workflow-library/${record.id}/export?expectedRevision=${record.revision}` } };
+    }
     if (name === 'node.describe') return workflowNodeContract(args.type, { schemaVersion: args.schemaVersion ?? context.document?.schemaVersion ?? 2 });
     const schemaVersion = args.schemaVersion ?? context.document?.schemaVersion ?? 2, section = args.section || 'overview';
     if (section === 'skills') return { skills: await this.skills.list() };

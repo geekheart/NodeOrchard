@@ -32,6 +32,7 @@ NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 
 | 能力 | 当前行为 |
 | --- | --- |
 | 节点编排 | 拖拽、具名端口连线、属性配置、撤销／重做、导入／导出，支持深浅主题 |
+| 工作流文件夹 | 每条流程独立存放定义、AI 对话、素材和运行文件；编辑器直接打开目录，以 `.workflow` ZIP 包导出并导入为新副本 |
 | 基础节点 | 输入与校验、Skill、工具／代码、子流程、数据整理、控制、人工审核、产物输出与学习支线 |
 | 依赖调度 | DAG 独立分支并行，按依赖汇合；多个运行排队，并受资源和并发限额约束 |
 | AI 对话 | 统一描述任务、配置固定需求、运行和反馈；自动判断意图，修改提案经审阅应用，旧问答可折叠 |
@@ -157,7 +158,7 @@ npm --prefix workbench start
 
 ### 5. 先跑一个本地流程
 
-1. 从看板新建工作流，在编辑器导入 [publication-review.workflow.json](workbench/examples/publication-review.workflow.json)。此示例由软件界面搭建并导出，只使用 JavaScript。
+1. 从看板新建工作流，在编辑器导入界面选择“兼容 JSON 草稿”，载入 [publication-review.workflow.json](workbench/examples/publication-review.workflow.json)。此定义示例只使用 JavaScript。
 2. 切换到运行视图，将下面的 JSON 填入输入框，检查后运行。
 3. 工作流会清理标题、摘要和重复标签，然后停在“确认文稿与标签”。核对结果后通过审核，继续保存 `发布摘要.json`。
 4. 在运行记录中查看各节点的输入、输出和日志；再按需加入 Skill 节点与 AI 对话。
@@ -166,7 +167,7 @@ npm --prefix workbench start
 {"title":"  NodeOrchard 发布指南  ","summary":" 用节点编排个人 AI 工作流。 ","tags":["workflow","skills","workflow"]}
 ```
 
-想尝试 Python 节点，可导入 [local-data.workflow.json](workbench/examples/local-data.workflow.json)，输入 `{"items":["Draft","Review","Publish"],"active":false,"retries":0}`；先按下文设置可用的 Python 解释器。
+想尝试 Python 节点，可通过“兼容 JSON 草稿”载入 [local-data.workflow.json](workbench/examples/local-data.workflow.json)，输入 `{"items":["Draft","Review","Publish"],"active":false,"retries":0}`；先按下文设置可用的 Python 解释器。
 
 纯本地工具和 JavaScript 节点无需 Hermes。Python 节点需要可用的 Python 解释器，可通过 `WORKBENCH_HERMES_PYTHON` 指定；调用外部命令的代码还需要对应本机工具。
 
@@ -207,13 +208,14 @@ npm --prefix workbench start
 | 位置 | 用途 |
 | --- | --- |
 | `workflow/artifacts/` | 普通会话产物 |
-| `workflow/outputs/` | 工作流交付副本，也可在流程中自定义输出位置 |
+| `workflow/workflows/<id>/` | 单个工作流的完整可携副本、输入、执行原件及默认交付；详见[工作流文件夹与便携包](workbench/docs/workflow-packages.md) |
+| `workflow/outputs/` | 保留旧交付副本；流程仍可自定义交付位置 |
 | `workflow/config/` | 本机资源位置与专业工具配置，按需创建 |
 | `workflow/workflow-sessions/` | Skill 节点会话与本次冻结的能力副本 |
 | `workbench/.local/` | SQLite、偏好、Skill 快照、缓存与本机依赖 |
-| 本机应用数据目录中的 `runs/` | 权威执行原件、回执与节点历史版本 |
+| 本机应用数据目录中的 `runs/` | 保留旧执行原件、回执与节点历史版本 |
 
-macOS 的默认原件目录为 `~/Library/Application Support/PersonalAgentWorkbench/runs/`；Windows 使用 Local AppData，Linux 使用 XDG state。保留 `PersonalAgentWorkbench` 名称是为了兼容已有本地数据。
+旧原件目录在 macOS 为 `~/Library/Application Support/PersonalAgentWorkbench/runs/`，Windows 使用 Local AppData，Linux 使用 XDG state；这些历史路径继续保留。新运行使用所属工作流目录，迁移与便携包规则见[工作流文件夹与便携包](workbench/docs/workflow-packages.md)。
 
 预览、审核与节点交接绑定执行原件。交付只复制输出节点明确声明的成果；副本保存失败可单独重试，副本被删改可检查补齐，无需重新调用模型或重复人工审核。
 
@@ -224,7 +226,7 @@ macOS 的默认原件目录为 `~/Library/Application Support/PersonalAgentWorkb
 | `WORKBENCH_PORT` | `4318`；监听地址固定为本机回环地址 |
 | `WORKBENCH_WORKSPACE_ROOT` | 项目根目录 `workflow/` |
 | `WORKBENCH_DATA_DIR` | `workbench/.local/` |
-| `WORKBENCH_RUN_ROOT` | 本机应用数据目录中的执行原件根 |
+| `WORKBENCH_RUN_ROOT` | 兼容旧原件根；新工作流运行使用自身文件夹 |
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 安装内的 `venv/bin/python`，也用于 Python 代码节点 |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
@@ -238,7 +240,7 @@ WORKBENCH_WORKSPACE_ROOT="$PWD/workflow/demo-workspace" \
 npm --prefix workbench start
 ```
 
-显式指定数据目录或工作区时，默认运行根也在该隔离环境内派生；如需单独指定原件位置，设置 `WORKBENCH_RUN_ROOT`。环境变量须在服务启动前设置，应用不会自动加载 `.env` 文件。
+`WORKBENCH_WORKSPACE_ROOT` 决定工作流文件夹所在空间，`WORKBENCH_RUN_ROOT` 继续用于旧原件目录准入与兼容。环境变量须在服务启动前设置，应用不会自动加载 `.env` 文件。
 
 ### 定时运行与代码边界
 
@@ -334,7 +336,7 @@ Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人�
 
 **升级、迁移前需要备份什么？**
 
-保留 `workbench/.local/`、`workflow/`、执行原件根及 Hermes 状态；工作流 JSON 导出可作为定义备份，但不包含完整运行、审核和记忆。不要只复制源码就删除旧数据。
+单条工作流通过 `.workflow` 包备份，范围与导入后的历史行为见[工作流文件夹与便携包](workbench/docs/workflow-packages.md)。整体应用升级仍应保留 `workbench/.local/`、工作区、旧执行原件根及 Hermes 状态；包不包含全局偏好或模型认证。兼容 JSON 仅保存定义，不能替代完整备份。
 
 ## 文档与示例
 
@@ -343,6 +345,7 @@ Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人�
 | [完整操作指南](workbench/docs/user-guide.md) | 页面、编辑、运行、定时、学习与结果反馈 |
 | [节点体系](workbench/docs/workflow-node-system.md) | 基础节点、预设、组合与当前限制 |
 | [工作流对话](workbench/docs/workflow-conversation.md) | AI 修改、产物反馈与回复对象 |
+| [工作流文件夹与便携包](workbench/docs/workflow-packages.md) | 独立目录、迁移、`.workflow` ZIP 导入导出及历史只读 |
 | [输入与恢复](workbench/docs/workflow-inputs-and-recovery.md) | 输入预检、原件、审核与重启恢复 |
 | [版本与生命周期](workbench/docs/workflow-versioning.md) / [回收站与删除](workbench/docs/workflow-lifecycle.md) | 另存新版、移入回收站、恢复与删除 |
 | [学习协议](workbench/docs/learning-protocol.md) | 多样例评估、候选版本与记忆隔离 |

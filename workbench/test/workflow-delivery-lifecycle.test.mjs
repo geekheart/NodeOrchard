@@ -110,3 +110,21 @@ test('a failed delivery copy can be retried without executing capabilities or re
   assert.equal(calls(), 1); assert.deepEqual(recovered.nodes, run.nodes);
   assert.equal(await readFile(join(recovered.delivery.directory, 'produce', '版本-1', 'result.txt'), 'utf8'), 'locally generated and reviewed');
 });
+
+test('imported archives bypass restart recovery and every delivery or execution mutation entry point', async t => {
+  const { app, db, manager, replaceManager, run, calls } = await fixture(t);
+  await manager.close();
+  const archived = { ...structuredClone(run), importedArchive: true, delivery: { ...run.delivery, status: 'publishing' } };
+  db.prepare('UPDATE workflow_runs SET value=? WHERE id=?').run(JSON.stringify(archived), run.id);
+  const replacement = replaceManager(), before = db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(run.id).value;
+  assert.equal(replacement.dag.active.has(run.id), false); assert.equal(replacement.locks.has(run.workflowId), false);
+  assert.throws(() => replacement.publishDelivery(run.id), error => error.httpStatus === 409);
+  await assert.rejects(replacement.dag.publishDelivery(run.id), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  await assert.rejects(replacement.dag.publishStoredDelivery(run.id), error => error.httpStatus === 409 && /导入.*历史/.test(error.message));
+  await assert.rejects(replacement.rerun(run.id, { nodeIds: ['produce'] }), error => error.httpStatus === 409);
+  await assert.rejects(replacement.approve(run.id, { nodeId: 'review', action: 'approve' }), error => error.httpStatus === 409);
+  await replacement.interrupt(run.id);
+  assert.equal(db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(run.id).value, before);
+  assert.deepEqual((await app.workflowFiles.readArtifact(run.nodes.produce.artifacts[0].id)).data.toString(), 'locally generated and reviewed');
+  assert.equal(calls(), 1);
+});

@@ -69,7 +69,7 @@ test('a real workflow broker prompt contains only its workflow evidence, never f
     for (const privateValue of [f.documents[1].id, f.sessions[1].id, f.runs[1].id, 'FOREIGN_WORKFLOW_PRIVATE', 'FOREIGN_SESSION_PRIVATE',
       'FOREIGN_RUN_PRIVATE', 'FOREIGN_NODE_PRIVATE', 'GLOBAL_SOFTWARE_LOG_PRIVATE']) assert.equal(prompt.includes(privateValue), false, privateValue);
     const source = sourceOf(prompt); assert.equal(source.permissionScope.role, 'workflow');
-    assert.equal(source.permissionScope.workingFolder, await realpath(f.config.workspaceRoot));
+    assert.equal(source.permissionScope.workingFolder, f.app.workflowFolders.directory(f.documents[0].id));
     assert.equal(source.selection.workflowId, f.documents[0].id);
   }
   assert.deepEqual(business(f.app), before);

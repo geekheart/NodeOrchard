@@ -482,7 +482,7 @@ export class WorkflowConversationUI {
   }
   renderPending(groups) {
     this.pendingHost.replaceChildren(); const state = this.state(), pending = state.pending || [], other = groups.unresolved.filter(turn => turn.id !== groups.latest?.id && !['thinking', 'queued'].includes(turn.status) && !coveredReview(turn, pending));
-    const failedRun = this.runtime?.currentRun?.(), failure = failedRun?.workflowId === this.currentDocument()?.id && ['error', 'interrupted', 'unknown'].includes(failedRun.status) ? failedRun : null;
+    const failedRun = this.runtime?.currentRun?.(), failure = !failedRun?.importedArchive && failedRun?.workflowId === this.currentDocument()?.id && ['error', 'interrupted', 'unknown'].includes(failedRun.status) ? failedRun : null;
     this.pendingHost.hidden = !pending.length && !other.length && !failure; if (this.pendingHost.hidden) return;
     const reviewCount = pending.filter(item => item.kind === 'review').length, contentId = `wf-conversation-pending-${this.workflowId}`;
     const title = button(`待处理 · ${pending.length + other.length + Number(Boolean(failure))}${reviewCount ? ` · 审核 ${reviewCount}` : ''}`, () => {

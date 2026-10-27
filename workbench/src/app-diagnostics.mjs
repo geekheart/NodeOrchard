@@ -2,7 +2,8 @@ import { redact } from './hermes-adapter.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { workflowCapabilityManifest } from '../shared/workflow/workflow-capability-contract.mjs';
 import { extname } from 'node:path';
-import { stat } from 'node:fs/promises';
+import { stat, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 // Evidence collection is deliberately separate from execution. None of these
 // readers creates/resumes sessions, changes documents, or retries a workflow.
@@ -172,7 +173,7 @@ export class AppDiagnostics {
     if (name === 'workflow.inspect') return boundedEvidence(this.workflow(args, context));
     if (name === 'workflow.run') return boundedEvidence(this.run(args, context));
     if (name === 'session.history') return boundedEvidence(await this.history(args));
-    if (name === 'artifact.inspect') return boundedEvidence(await this.artifact(args));
+    if (name === 'artifact.inspect') return boundedEvidence(await this.artifact(args, context));
     return boundedEvidence(this.catalog(args));
   }
 
@@ -313,7 +314,7 @@ export class AppDiagnostics {
     note: '注册工具只是工具节点的一种模式；code模式支持Python/JavaScript，不要求注册工具。目录未证明依赖或外部服务可用。' };
   }
 
-  async artifact({ runId, nodeId, artifactId, includeContent = true }) {
+  async artifact({ runId, nodeId, artifactId, includeContent = true }, context = {}) {
     identifier(runId, 'runId'); identifier(nodeId, '节点 ID'); identifier(artifactId, '产物 ID');
     if (typeof includeContent !== 'boolean') fail('includeContent 必须是布尔值。');
     const run = this.app.workflows.get(runId);
@@ -328,15 +329,22 @@ export class AppDiagnostics {
     if (artifact.runId !== runId || artifact.nodeId !== nodeId || artifact.attempt !== record.attempt
       || reference.sha256 !== artifact.sha256 || (reference.attempt !== undefined && reference.attempt !== artifact.attempt)) fail('产物归属或版本与当前运行节点不一致。', 409);
     if (/(?:training|learning|evaluation|sample|memory)/i.test([artifact.kind, artifact.role].filter(Boolean).join(' '))) fail('不能读取学习、训练或记忆产物。', 403);
-    const metadata = { id: artifact.id, runId, nodeId, attempt: artifact.attempt, name: artifact.name, path: artifact.path,
+    const artifactPath = context.permissionScope ? context.artifactPath : artifact.path;
+    if (context.permissionScope && typeof artifactPath !== 'string') fail('产物缺少已核对的助手文件范围。', 403);
+    const metadata = { id: artifact.id, runId, nodeId, attempt: artifact.attempt, name: artifact.name, path: artifactPath,
       size: artifact.size, sha256: artifact.sha256, mimeType: artifact.mimeType, createdAt: artifact.createdAt, modifiedAt: artifact.modifiedAt };
     if (!Number.isSafeInteger(artifact.size) || artifact.size < 0 || artifact.size > APP_DIAGNOSTIC_LIMITS.artifactBytes) return {
       available: true, verified: false, metadata, contentAvailable: false, reason: '超过诊断读取上限，仅返回已登记元数据；尚未重新校验文件内容。' };
     if (files.permitted) {
-      const path = await files.permitted(artifact.path), current = await stat(path);
-      if (path !== artifact.path || !current.isFile() || current.size !== artifact.size) fail('产物位置或大小已变化，已停止诊断读取。', 409);
+      const path = await files.permitted(artifactPath), current = await stat(path);
+      if (path !== artifactPath || !current.isFile() || current.size !== artifact.size) fail('产物位置或大小已变化，已停止诊断读取。', 409);
     }
-    const checked = await files.readArtifact(artifactId);
+    let checked;
+    if (context.permissionScope) {
+      const data = await readFile(artifactPath);
+      if (data.length !== artifact.size || createHash('sha256').update(data).digest('hex') !== artifact.sha256) fail('产物副本哈希发生变化，已停止诊断读取。', 409);
+      checked = { record: artifact, data };
+    } else checked = await files.readArtifact(artifactId);
     const readable = ['.txt', '.md', '.json', '.csv', '.tsv', '.log', '.yaml', '.yml', '.xml'].includes(extname(artifact.path || '').toLowerCase())
       || ['text/plain', 'application/json'].includes(artifact.mimeType);
     if (!includeContent || !readable) return { available: true, verified: true, metadata, contentAvailable: false,

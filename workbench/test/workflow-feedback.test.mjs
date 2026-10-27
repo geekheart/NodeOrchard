@@ -136,6 +136,21 @@ test('active runs and isolated learning samples remain ineligible for feedback',
   }
 });
 
+test('imported archives remain readable but reject feedback and feedback learning without writes', async t => {
+  const f = await fixture(t), saved = f.manager.save(f.run.id, submit());
+  f.put({ ...f.run, importedArchive: true });
+  const before = f.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(f.run.id).value;
+  const events = f.events.length, view = f.manager.get(f.run.id);
+  assert.equal(view.canReview, false); assert.match(view.reason, /导入.*历史.*只供查看/);
+  assert.deepEqual(f.manager.getRevision(f.run.id, 1), saved);
+  throws(() => f.manager.save(f.run.id, submit('不能追加', 1)), 409, /导入.*历史/);
+  throws(() => f.manager.saveScoped(f.run.id, { ...submit('不能定向学习', 1), targetNodeIds: ['extract'] }), 409, /导入.*历史/);
+  throws(() => f.manager.learningRequest(f.run.id, { feedbackRevision: 1 }), 409, /导入.*历史/);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM workflow_feedback').get().count, 1);
+  assert.equal(f.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(f.run.id).value, before);
+  assert.equal(f.events.length, events);
+});
+
 test('missing, changed or duplicate actual Skill versions are never bound into comprehensive feedback', async t => {
   const f = await fixture(t);
   for (const mutate of [

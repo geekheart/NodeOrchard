@@ -20,6 +20,7 @@ const PATHS = {
   save: 'M4 3h13l4 4v14H3V3zM7 3v6h10V3M7 21v-8h10v8',
   download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
   upload: 'M12 16V4m-5 5 5-5 5 5M4 16v5h16v-5',
+  folder: 'M3 6h7l2 2h9v12H3zM3 6V4h7l2 2',
   trash: 'M3 6h18M8 6V3h8v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
   copy: 'M8 8h13v13H8zM16 8V3H3v13h5',
   help: 'M9 8a3 3 0 0 1 6 0c0 2-3 2-3 5m0 4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',

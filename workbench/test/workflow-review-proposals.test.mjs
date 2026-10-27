@@ -59,6 +59,7 @@ test('proposal binding rejects stale reviews, incomplete hashes and a different 
     f => { f.run.parentRunId = 'parent-run'; },
     f => { f.run.learningId = 'learning-batch'; },
     f => { f.run.memoryScopeId = 'learning-memory'; },
+    f => { f.run.importedArchive = true; },
     f => { f.run.document.mode = 'learn'; },
     f => { f.document.mode = 'learn'; },
     f => { f.run.nodes.review.status = 'complete'; },

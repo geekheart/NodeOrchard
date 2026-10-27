@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Application } from '../src/application.mjs';
 import { Store } from '../src/store.mjs';
 import { initializeWorkspace } from '../src/workspace-layout.mjs';
+import { DEFAULT_SHORTCUTS } from '../shared/keyboard-shortcuts.mjs';
 
 async function fixture(t) {
   const projectRoot = await mkdtemp(join(tmpdir(), 'workbench-project-layout-'));
@@ -50,7 +51,7 @@ test('the former default preference migrates once without moving historical file
   const session = state.create({ title: 'history', cwd: oldWorkspace, storedSessionId: 'history', runtimeSessionId: null });
 
   const preferences = initializeWorkspace(config, state);
-  assert.deepEqual(preferences, { theme: 'dark', density: 'compact', defaultModel: '', defaultWorkspace: '.' });
+  assert.deepEqual(preferences, { theme: 'dark', density: 'compact', defaultModel: '', defaultWorkspace: '.', shortcuts: DEFAULT_SHORTCUTS });
   assert.deepEqual(state.preferences(), preferences);
   assert.equal(state.get(session.id).cwd, oldWorkspace);
   assert.equal(await readFile(oldArtifact, 'utf8'), 'previous immutable result');

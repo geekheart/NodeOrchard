@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
 import { prepareSkillRun } from './workflow-skill.mjs';
@@ -149,6 +151,7 @@ export class WorkflowRuns {
     this.dag = new WorkflowDAGRuns(this);
     for (const row of this.db.prepare("SELECT value FROM workflow_runs WHERE coalesce(json_extract(value,'$.schemaVersion'),1)=1 AND json_extract(value,'$.status') IN ('preparing','running','waiting')").all()) {
       const run = normalize(JSON.parse(row.value));
+      if (run.importedArchive) continue;
       this.commitFailure(run, 'unknown', '应用重启；请恢复会话核对，未自动重放工作流。', run.currentNodeId, false);
     }
     this.onEvent = event => this.handleEvent(event);
@@ -157,6 +160,7 @@ export class WorkflowRuns {
 
   save(run, publish = true) {
     this.write.run(run.id, JSON.stringify(run));
+    this.app.workflowFolders?.syncRun?.(run);
     if (publish && !this.closed) this.app.publish('workflow.run', run.sessionId || null, clone(run));
   }
 
@@ -242,13 +246,17 @@ export class WorkflowRuns {
         throw failure('学习批次已停止，未创建新的流程运行。', 409);
       }
       checkAdmission();
-      const cwd = planned.operationNodes.some(node => node.type !== 'skill')
-        ? this.app.workspace(this.app.preferences?.defaultWorkspace || '.') : null;
+      const runId = randomUUID(), folder = this.app.workflowFolders?.ensure(workflowId);
+      const ownedDirectory = folder && this.app.workflowFolders.safePath(folder, join(folder, 'runs', runId));
+      if (ownedDirectory) await mkdir(ownedDirectory, { recursive: true });
+      const cwd = ownedDirectory || (planned.operationNodes.some(node => node.type !== 'skill')
+        ? this.app.workspace(this.app.preferences?.defaultWorkspace || '.') : null);
       modelRoute ||= await this.app.captureModelRoute?.({ optional: !planned.skillNodes.length });
       checkAdmission();
       const now = new Date().toISOString();
       const run = {
-        id: randomUUID(), workflowId, title: planned.document.title, status: 'preparing',
+        id: runId, workflowId, title: planned.document.title, status: 'preparing',
+        ...(ownedDirectory ? { folderWorkflowId: workflowId, outputDirectory: ownedDirectory } : {}),
         document: planned.document, nodeOrder: planned.nodeOrder, currentNodeId: planned.operationNodes[0].id,
         skills: planned.skillNodes.map(node => {
           const skill = details.get(node.id);
@@ -406,6 +414,7 @@ export class WorkflowRuns {
       if (!this.isCurrent(state, step, epoch) || state.stopRequested) return;
       const result = await this.executeOperation({ node: step.node, input, cwd: state.cwd,
         context: { runId: state.run.id, workflowId: state.run.workflowId, nodeId: step.node.id,
+          ...(state.run.outputDirectory ? { outputDirectory: state.run.outputDirectory } : {}),
           ...(state.run.learningId ? { learningId: state.run.learningId } : {}) },
         signal: step.controller.signal, pythonPath: this.app.config?.hermesPython,
         onLog: log => {
@@ -634,7 +643,7 @@ export class WorkflowRuns {
 
   approve(id, request) { return this.dag.approve(id, request); }
   rerun(id, request) { return this.dag.rerun(id, request); }
-  publishDelivery(id) { return this.dag.publishDelivery(id); }
+  publishDelivery(id) { if (this.get(id).importedArchive) throw failure('导入的历史运行只供查看，请从当前工作流新建运行。', 409); return this.dag.publishDelivery(id); }
   queueStatus() { return this.dag.queueStatus(); }
 }
 

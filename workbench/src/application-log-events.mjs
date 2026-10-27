@@ -99,8 +99,9 @@ export class ApplicationLogEvents {
 
 const STATIC_ROUTES = new Set(['/', '/api/bootstrap', '/api/app-capabilities', '/api/app-assistant', '/api/conversation-hub', '/api/app-assistant/conversations', '/api/app-assistant/messages',
   '/api/settings', '/api/assistant-permissions', '/api/models', '/api/statistics', '/api/statistics/history', '/api/skills', '/api/events', '/api/connect',
-  '/api/workflow-node-presets', '/api/workflow-library', '/api/workflow-runs', '/api/workflow-schedules', '/api/workflow-v2/queue', '/api/sessions']);
+  '/api/workflow-node-presets', '/api/workflow-library', '/api/workflow-packages/import', '/api/workflow-runs', '/api/workflow-schedules', '/api/workflow-v2/queue', '/api/sessions']);
 const ROUTES = [
+  [/^\/api\/workflow-library\/[^/]+\/(folder(?:\/open)?|export)$/, '/api/workflow-library/:workflowId'],
   [/^\/api\/workflow-library\/[^/]+(?:\/(archive|unarchive|trash|restore|purge))?$/, '/api/workflow-library/:workflowId'],
   [/^\/api\/workflow-runs\/[^/]+(?:\/(rerun|stop|review|feedback))?$/, '/api/workflow-runs/:runId'],
   [/^\/api\/workflow-conversations\/[^/]+(?:\/(messages|pending|turns\/[^/]+\/action))?$/, '/api/workflow-conversations/:workflowId'],

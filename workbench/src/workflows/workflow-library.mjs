@@ -115,7 +115,9 @@ export class WorkflowLibrary {
     const previous = this.read.get(document.id);
     // A lost response can safely retry an identical document. This path never
     // writes, including when a different window already saved the same content.
-    if (previous?.document === serialized && previous.origin === 'saved') return this.record(previous);
+    if (previous?.document === serialized && previous.origin === 'saved') {
+      const saved = this.record(previous); this.app.workflowFolders?.syncDocument(saved); this.app.workflowFolders?.scheduleInputs?.(saved); return saved;
+    }
     if (previous ? request.expectedRevision !== previous.revision : (request.expectedRevision !== undefined && request.expectedRevision !== 0)) {
       fail('工作流文档已变化，请重新打开最新版本后再保存。', 409);
     }
@@ -134,6 +136,8 @@ export class WorkflowLibrary {
       }
     }
     const saved = this.get(document.id);
+    this.app.workflowFolders?.syncDocument(saved);
+    this.app.workflowFolders?.scheduleInputs?.(saved);
     this.app.publish?.('workflow.document', null, { workflow: this.summary(saved, this.activities()) });
     return saved;
   }
@@ -215,6 +219,7 @@ export class WorkflowLibrary {
     // No network work is allowed in the scheduler hook: it only fences pending
     // in-memory admissions after their durable schedules have been paused.
     if (TRANSITIONS[action][1] === 'trashed') this.app.schedules?.onWorkflowArchived?.(workflow, schedules);
+    if (action !== 'purge') this.app.workflowFolders?.syncDocument(this.get(workflow));
     for (const schedule of schedules) this.app.publish?.('workflow.schedule', null, { schedule });
     this.app.publish?.('workflow.document', null, result);
     this.app.publish?.('workflow.lifecycle', null, result);

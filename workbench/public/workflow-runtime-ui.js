@@ -21,7 +21,7 @@ function node(tag, className = '', value) { const item = document.createElement(
 function button(label, handler, className = 'wf-button') { const item = node('button', className, label); item.type = 'button'; item.addEventListener('click', handler); return item; }
 function date(value) { const parsed = new Date(value); return Number.isNaN(parsed.valueOf()) ? '' : parsed.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); }
 function display(value) { if (typeof value === 'string') return text(value); if (value === undefined) return ''; try { return text(JSON.stringify(value, null, 2)); } catch { return text(value); } }
-function runLabel(run) { return `${date(run.startedAt) || '时间未记录'}${run.trigger?.type === 'schedule' ? ' · 定时' : ''} · ${STATUS[run.status] || '状态待确认'}`; }
+function runLabel(run) { return `${date(run.startedAt) || '时间未记录'}${run.importedArchive ? ' · 导入历史（只读）' : run.trigger?.type === 'schedule' ? ' · 定时' : ''} · ${STATUS[run.status] || '状态待确认'}`; }
 const own = (value, key) => value != null && Object.hasOwn(value, key);
 
 export function runtimeRunCountLabel(run, { summary = false } = {}) {

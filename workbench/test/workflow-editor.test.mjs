@@ -10,6 +10,14 @@ import { planWorkflow } from '../shared/workflow/workflow-plan.mjs';
 const STORAGE_KEY = 'workbench.workflow-editor.v1';
 const MAX_BYTES = 2 * 1024 * 1024;
 
+test('workflow file actions use the package module and an empty editor can open import without resurrecting a draft', () => {
+  const instance=editor(), calls=[]; instance.packages={exportCurrent:()=>calls.push('export'),openImportDialog:()=>calls.push('import'),openFolder:()=>calls.push('folder')};
+  instance.exportDocument(); instance.openImport(); assert.deepEqual(calls,['export','import']);
+  instance.documentLoaded=false; const target={closest:()=>({dataset:{action:'import'}})}; instance.onClick({target});
+  assert.deepEqual(calls,['export','import','import']);
+  delete instance.packages; let downloaded=false; instance.download=()=>{downloaded=true;}; assert.equal(instance.exportDocument(),false); assert.equal(downloaded,false);
+});
+
 class FakeElement {
   constructor(tag = 'div') {
     this.tag = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.attributes = {}; this.style = { setProperty(name, value) { this[name] = value; } };

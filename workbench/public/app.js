@@ -13,6 +13,7 @@ import { createAppDiagnosticClient } from './app-diagnostic-client.js';
 import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
+import { WorkflowPackageUI } from './workflow-package-ui.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
 
@@ -90,6 +91,22 @@ async function api(path, { method = 'GET', body } = {}) {
     appDiagnosticClient.recordRequest(path, response.status, error.message, requestId);
     if (typeof requestId === 'string' && /^(?:req-)?[a-f0-9-]{36}$/i.test(requestId)) error.requestId = requestId;
     throw error; } return result;
+}
+async function binaryRequest(path, { method = 'GET', body, headers: supplied = {} } = {}) {
+  const headers = { Accept: 'application/zip, application/json', ...supplied };
+  if (method !== 'GET') {
+    if (!state.csrfToken) throw Error('工作台尚未就绪，请刷新后重试。');
+    headers['X-Workbench-Token'] = state.csrfToken; headers['Content-Type'] = 'application/octet-stream';
+  }
+  let response;
+  try { response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', ...(body === undefined ? {} : { body }) }); }
+  catch (error) { appDiagnosticClient.recordRequest(path, 0, error.message); throw error; }
+  if (!response.ok) {
+    let result; try { result = await response.json(); } catch { result = {}; }
+    const error = new Error(safeText(result.error || `工作流文件请求失败（HTTP ${response.status}）。`)); error.httpStatus = response.status;
+    appDiagnosticClient.recordRequest(path, response.status, error.message, response.headers.get('X-Request-Id')); throw error;
+  }
+  return response;
 }
 const hermesModels = new HermesModelUI({
   api, context: () => ({ backend: state.backend, connecting: state.connecting, csrfToken: state.csrfToken }), connect: connectBackend,
@@ -244,6 +261,9 @@ function ensureWorkflowEditor() {
       if (state.route.id !== id) { history.replaceState(null, '', `#/workflows/${encodeURIComponent(id)}`); state.route = readRoute(); }
       renderShell();
     },
+  });
+  workflowEditor.packages = new WorkflowPackageUI(workflowEditor, { api, binaryRequest, libraryClient: workflowLibraryClient,
+    onOpened: id => navigate(`#/workflows/${encodeURIComponent(id)}`),
   });
   workflowEditor.versioning = new WorkflowVersioningUI(workflowEditor, { api,
     onCreated(record, options = {}) {

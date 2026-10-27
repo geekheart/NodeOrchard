@@ -128,12 +128,12 @@ export class WorkflowEditor {
     this.contextMenu = find('.wf-context-menu'); this.dialog = find('.wf-dialog');
     find('.wf-empty-mark').append(icon('workflow'));
     find('.wf-unloaded-mark').append(icon('workflow'));
-    find('.wf-unloaded-actions').append(control('新建工作流', 'new', 'plus', { primary: true }), control('返回工作流看板', 'board', 'board'));
+    find('.wf-unloaded-actions').append(control('新建工作流', 'new', 'plus', { primary: true }), control('导入工作流', 'import', 'upload'), control('返回工作流看板', 'board', 'board'));
     const header = find('.wf-header-actions');
     header.append(toolbarControl('返回工作流看板', 'board', 'board'));
     for (const [label, action, glyph] of [['重做', 'redo', 'redo'], ['撤销', 'undo', 'undo']]) header.prepend(toolbarControl(label, action, glyph));
     for (const button of header.querySelectorAll('[data-mode]')) setToolbarControl(button, { label: button.dataset.mode === 'learn' ? '学习模式' : '执行模式', icon: button.dataset.mode === 'learn' ? 'book' : 'workflow' });
-    header.append(toolbarControl('新建工作流', 'new', 'plus'), toolbarControl('导入工作流', 'import', 'upload'), toolbarControl('导出工作流', 'export', 'download'), toolbarControl('保存工作流', 'save', 'save'), toolbarControl('定时任务', 'schedules', 'clock'));
+    header.append(toolbarControl('新建工作流', 'new', 'plus'), toolbarControl('导入工作流', 'import', 'upload'), toolbarControl('导出工作流', 'export', 'download'), toolbarControl('保存工作流', 'save', 'save'), toolbarControl('打开工作流文件夹', 'open-folder', 'folder'), toolbarControl('定时任务', 'schedules', 'clock'));
     const run = toolbarControl('运行当前流程', 'run', 'play', { primary: true }); run.disabled = true; header.append(run);
     header.append(toolbarControl('隐藏画布', 'toggle-canvas', 'canvas'));
     const libraryToggle = toolbarControl('打开节点库', 'toggle-library', 'library'); libraryToggle.classList.add('wf-library-toggle'); header.append(libraryToggle);
@@ -166,7 +166,7 @@ export class WorkflowEditor {
     find('.wf-file-input').addEventListener('change', async event => {
       const file = event.target.files[0]; if (!file) return;
       if (file.size > MAX_FILE_BYTES) { this.toast('JSON 文件不能超过 2 MB。', true); return; }
-      try { this.openImport(await file.text()); } catch { this.toast('文件无法读取。', true); }
+      try { this.openLegacyImport(await file.text()); } catch { this.toast('文件无法读取。', true); }
       event.target.value = '';
     });
     this.renderRecovery();
@@ -284,6 +284,7 @@ export class WorkflowEditor {
     this.conversation?.syncWorkflow();
     this.versioning?.syncHeader();
     this.updateShortcutHints();
+    this.packages?.renderControls();
   }
 
   updateShortcutHints() {
@@ -890,12 +891,13 @@ export class WorkflowEditor {
     if (this.documentLoaded === false) {
       const action = event.target.closest?.('button')?.dataset.action;
       if (action === 'new') this.onCreateWorkflow?.();
+      else if (action === 'import') this.openImport();
       else if (action === 'board') this.onReturnToBoard?.();
       return;
     }
     if (event.target !== this.titleInput) { try { if (!this.flushTitleDraft()) return; } catch (error) { this.toast(error.message, true); return; } }
     const button = event.target.closest('button');
-    if (this.nodeLibrary?.nested && ['new', 'example', 'import', 'export', 'run', 'schedules', 'board'].includes(button?.dataset.action)) { this.toast('请先应用或取消子流程内部修改，再操作主流程。', true); return; }
+    if (this.nodeLibrary?.nested && ['new', 'example', 'import', 'export', 'open-folder', 'run', 'schedules', 'board'].includes(button?.dataset.action)) { this.toast('请先应用或取消子流程内部修改，再操作主流程。', true); return; }
     if (this.libraryReadOnly && (button?.dataset.mode || ['undo', 'redo', 'new', 'example', 'add-input', 'save', 'import', 'run', 'schedules', 'delete', 'duplicate', 'remove-edge', 'reset-properties'].includes(button?.dataset.action))) return;
     if (performance.now() < (this.suppressClickUntil || 0) && button?.matches('.wf-library-item, .wf-port')) return;
     if (button?.classList.contains('wf-port')) { if (event.detail === 0) this.activatePort(this.portDescriptor(button)); return; }
@@ -909,6 +911,7 @@ export class WorkflowEditor {
       case 'example': this.loadExample(); break;
       case 'add-input': this.addNode('input'); break;
       case 'save': this.saveDraft(); break; case 'export': this.exportDocument(); break; case 'import': this.openImport(); break;
+      case 'open-folder': void this.packages?.openFolder(); break;
       case 'run': void this.runtime?.start(); break;
       case 'schedules': this.studio?.syncRawInput(); void this.runtime?.schedules?.open(); break;
       case 'board': this.onReturnToBoard?.(); break;
@@ -1158,18 +1161,18 @@ export class WorkflowEditor {
       } else this.toast('草稿尚未保存，请查看提示或导出 JSON。', true);
     } catch (error) { this.toast(`属性未应用：${error.message}`, true); }
   }
-  prepareRun() {
+  prepareRun({ operation = '运行' } = {}) {
     if (this.documentLoaded === false) throw new Error('未加载工作流，请先从看板打开或新建工作流。');
-    if (this.validationDraftErrors?.size) throw new Error('校验规则有无效的 JSON 或字段配置，请修正后运行。');
+    if (this.validationDraftErrors?.size) throw new Error(`校验规则有无效的 JSON 或字段配置，请修正后${operation}。`);
     if (this.nodeLibrary?.nested) throw new Error('请先应用或取消子流程内部编辑，再从主流程运行。');
     if (this.libraryReadOnly) throw new Error('此工作流为只读，请先回看板恢复。');
     this.cancelGesture(); this.cancelConnection();
-    if (!this.flushTitleDraft()) throw new Error('请填写工作流名称后再运行。');
+    if (!this.flushTitleDraft()) throw new Error(`请填写工作流名称后再${operation}。`);
     this.studio?.flushRunSettings();
-    if (this.runtime?.isSkillSelectionPending?.()) throw new Error('正在读取 Skill 固定版本，编辑已保留，请稍候再运行。');
+    if (this.runtime?.isSkillSelectionPending?.()) throw new Error(`正在读取 Skill 固定版本，编辑已保留，请稍候再${operation}。`);
     let next = this.doc;
     for (const [id, patch] of this.propertyDrafts) next = updateNode(next, id, patch);
-    if (this.propertyDrafts.size) { this.commit(next, '应用运行配置'); this.propertyDrafts.clear(); this.renderProperties(); this.renderHeader(); }
+    if (this.propertyDrafts.size) { this.commit(next, `应用${operation}配置`); this.propertyDrafts.clear(); this.renderProperties(); this.renderHeader(); }
     return clone(validateDocument(this.doc));
   }
   applyLearningDocument(document, { baseDocument, trainableNodeIds } = {}) {
@@ -1267,23 +1270,33 @@ export class WorkflowEditor {
         try { const raw = localStorage.getItem(this.storageKey || STORAGE_KEY); if (!raw) throw new Error('另一份草稿已移除。'); const data = JSON.parse(raw), next = validateDocument(data.document); this.storageConflict = false; this.storageValue = raw; this.canvasSize = null; this.recordCanvasSize(data.ui?.canvasSize || {}); this.propertyDrafts.clear(); this.commit(next, '载入另一标签页草稿'); this.onCanvasResize(); this.renderRecovery(); }
         catch (error) { this.toast(error.message, true); }
       });
-      const exportButton = el('button', 'wf-button', '导出当前版本'); exportButton.type = 'button'; exportButton.addEventListener('click', () => this.exportDocument()); banner.append(load, exportButton);
+      const exportButton = el('button', 'wf-button', '导出 JSON 备份'); exportButton.type = 'button'; exportButton.addEventListener('click', () => this.exportLegacyDocument()); banner.append(load, exportButton);
     }
   }
   exportDocument() {
+    if (this.packages) return this.packages.exportCurrent();
+    this.toast('工作流打包功能尚未就绪，请稍后重试。', true); return false;
+  }
+  exportLegacyDocument() {
     try { this.download(serializeDocument(this.doc), `${this.doc.title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 80)}.json`); this.toast(this.propertyDrafts.size ? '已导出已应用的草稿；另有属性尚未应用。' : '已导出当前流程草稿。'); }
     catch (error) { this.toast(error.message, true); }
   }
-  download(text, filename) { const blob = new Blob([text], { type: 'application/json;charset=utf-8' }), url = URL.createObjectURL(blob), anchor = el('a'); anchor.href = url; anchor.download = filename; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+  download(text, filename) { return this.downloadBlob(new Blob([text], { type: 'application/json;charset=utf-8' }), filename); }
+  downloadBlob(blob, filename) { const url = URL.createObjectURL(blob), anchor = el('a'); anchor.href = url; anchor.download = filename; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
   openDialog(title, description) {
     this.cancelGesture(); this.cancelConnection(); this.contextMenu.hidden = true; if (this.dialog.open) this.dialog.close(); this.dialog.replaceChildren();
     const heading = el('div', 'wf-dialog-header'); heading.append(el('h2', '', title));
     const close = control('关闭对话框', 'dialog-close', 'close', { compact: true }); close.addEventListener('click', () => this.dialog.close()); heading.append(close);
     this.dialog.append(heading); if (description) this.dialog.append(el('p', '', description)); this.dialog.showModal(); return this.dialog;
   }
-  openImport(raw = '') {
+  openImport(raw) {
+    if (raw !== undefined) return this.openLegacyImport(raw);
+    if (this.packages) return this.packages.openImportDialog();
+    this.toast('工作流导入功能尚未就绪，请稍后重试。', true); return false;
+  }
+  openLegacyImport(raw = '') {
     if (this.libraryReadOnly) return;
-    const dialog = this.openDialog('导入工作流草稿', '导入将替换当前画布。'), area = el('textarea'); area.setAttribute('aria-label', '工作流 JSON'); area.placeholder = '粘贴工作流 JSON，或选择文件'; area.value = raw;
+    const dialog = this.openDialog('兼容 JSON 草稿', '仅导入流程定义，将替换当前画布。'), area = el('textarea'); area.setAttribute('aria-label', '工作流 JSON'); area.placeholder = '粘贴工作流 JSON，或选择文件'; area.value = raw;
     const feedback = el('p', 'wf-import-feedback'); feedback.setAttribute('role', 'status');
     const footer = el('div', 'wf-dialog-actions'), choose = el('button', 'wf-button', '选择 JSON 文件'), cancel = el('button', 'wf-button', '取消'), submit = el('button', 'wf-button primary', '导入并替换草稿');
     for (const b of [choose, cancel, submit]) b.type = 'button';

@@ -5,8 +5,16 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { applicationHttpRoute, applicationResponseTrace, applicationErrorLocation } from './application-log-events.mjs';
 import { Application } from './application.mjs';
 import { redact } from './hermes-adapter.mjs';
+import { WORKFLOW_ZIP_LIMITS } from './workflows/workflow-zip.mjs';
 
 const PUBLIC_REVIEW_ERROR_CODES = new Set(['REVISION_REQUIRES_PROPOSAL']);
+
+async function readPackage(req) {
+  const chunks = []; let length = 0, oversized = false;
+  for await (const chunk of req) { length += chunk.length; if (length > WORKFLOW_ZIP_LIMITS.maxCompressedBytes) oversized = true; if (!oversized) chunks.push(chunk); }
+  if (oversized) throw Object.assign(new Error('工作流包不能超过 256 MB。'), { httpStatus: 413 });
+  return Buffer.concat(chunks);
+}
 
 async function readJson(req, limit = 1000000) {
   const chunks = []; let bytes = 0, oversized = false;
@@ -63,7 +71,10 @@ export function createWorkbenchServer(config, application = new Application(conf
         const token = Buffer.from(req.headers['x-workbench-token'] || '');
         const expected = Buffer.from(csrfToken);
         if (token.length !== expected.length || !timingSafeEqual(token, expected)) return json(res, 403, { error: '客户端校验失败，请刷新页面。' });
-        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: '需要 application/json。' });
+        const mediaType = req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
+        if (path === '/api/workflow-packages/import' && req.method === 'POST') {
+          if (!['application/octet-stream', 'application/zip'].includes(mediaType)) return json(res, 415, { error: '工作流导入需要二进制 ZIP 文件。' });
+        } else if (mediaType !== 'application/json') return json(res, 415, { error: '需要 application/json。' });
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { ...application.bootstrap(), eventCursor: application.sequence, csrfToken });
       if (req.method === 'GET' && path === '/api/app-capabilities') {
@@ -176,6 +187,31 @@ export function createWorkbenchServer(config, application = new Application(conf
       }
       if (req.method === 'GET' && path === '/api/workflow-library') return json(res, 200, { workflows: application.workflowLibrary.list({ lifecycle: requestURL.searchParams.get('lifecycle') ?? 'active' }) });
       if (req.method === 'POST' && path === '/api/workflow-library') return json(res, 200, { workflow: application.workflowLibrary.save(await readJson(req, 2 * 1024 * 1024 + 65536)) });
+      if (req.method === 'POST' && path === '/api/workflow-packages/import') {
+        if ([...requestURL.searchParams.keys()].some(key => key !== 'filename') || requestURL.searchParams.getAll('filename').length !== 1) return json(res, 400, { error: '工作流导入参数无效。' });
+        return json(res, 201, await application.workflowPackages.import(await readPackage(req), {
+          filename: requestURL.searchParams.get('filename'), operationId: req.headers['x-workflow-import-id'],
+        }));
+      }
+      const folderMatch = path.match(/^\/api\/workflow-library\/([A-Za-z0-9_-]+)\/folder(?:\/(open))?$/);
+      if (folderMatch) {
+        if (requestURL.search) return json(res, 400, { error: '工作流文件夹不接受路径或查询参数。' });
+        const workflowId = folderMatch[1]; application.workflowLibrary.get(workflowId);
+        if (req.method === 'GET' && !folderMatch[2]) return json(res, 200, { workflowId, directory: application.workflowFolders.directory(workflowId), ...application.workflowFolders.status(workflowId) });
+        if (req.method === 'POST' && folderMatch[2]) {
+          const body = await readJson(req, 4096);
+          if (!body || Array.isArray(body) || Object.keys(body).length) return json(res, 400, { error: '打开工作流文件夹只接受空对象。' });
+          return json(res, 200, await application.workflowFolders.open(workflowId));
+        }
+      }
+      const exportMatch = path.match(/^\/api\/workflow-library\/([A-Za-z0-9_-]+)\/export$/);
+      if (req.method === 'GET' && exportMatch) {
+        if ([...requestURL.searchParams.keys()].some(key => key !== 'expectedRevision') || requestURL.searchParams.getAll('expectedRevision').length !== 1) return json(res, 400, { error: '工作流导出版本参数无效。' });
+        const result = await application.workflowPackages.export(exportMatch[1], { expectedRevision: Number(requestURL.searchParams.get('expectedRevision')) });
+        const encoded = encodeURIComponent(result.filename).replace(/['()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+        res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="workflow.workflow"; filename*=UTF-8''${encoded}`,
+          'Content-Length': result.data.length, 'Cache-Control': 'no-store' }); return res.end(result.data);
+      }
       const lifecycleMatch = path.match(/^\/api\/workflow-library\/([^/]+)\/(archive|unarchive|trash|restore|purge)$/);
       if (req.method === 'POST' && lifecycleMatch) {
         let id;
@@ -375,6 +411,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-board.js': ['workflow-board.js', 'text/javascript'],
         '/workflow-board.css': ['workflow-board.css', 'text/css'],
         '/workflow-library-client.js': ['workflow-library-client.js', 'text/javascript'],
+        '/workflow-package-ui.js': ['workflow-package-ui.js', 'text/javascript'],
       };
       // Browser-safe domain modules are explicit assets; no repository browsing.
       const sharedAssets = {

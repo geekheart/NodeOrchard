@@ -119,6 +119,26 @@ test('HTTP active and learning samples remain readable but cannot receive feedba
   }
 });
 
+test('HTTP imported histories are readable and reject feedback, learning, review, rerun and delivery without dispatch', async t => {
+  const f = await fixture(t);
+  await f.api(f.path, payload());
+  f.app.workflows.save({ ...f.run, importedArchive: true }, false);
+  const before = f.app.workflows.get(f.run.id), calls = [];
+  f.app.learning.startFeedback = async input => { calls.push(input); throw new Error('Archived learning must not dispatch'); };
+  const view = await f.api(f.path); assert.equal(view.status, 200); assert.equal(view.body.canReview, false);
+  assert.equal(view.body.feedback.revision, 1);
+  for (const [path, body] of [
+    [f.path, payload({ expectedRevision: 1 })], [f.path + '/learn', { feedbackRevision: 1 }],
+    [`/api/workflow-runs/${f.run.id}/review`, { nodeId: 'skill', action: 'approve' }],
+    [`/api/workflow-runs/${f.run.id}/rerun`, { nodeIds: ['skill'] }],
+    [`/api/workflow-runs/${f.run.id}/publish`, {}],
+  ]) {
+    const response = await f.api(path, body); assert.equal(response.status, 409); assert.match(response.body.error, /导入.*历史/);
+  }
+  assert.deepEqual(f.app.workflows.get(f.run.id), before);
+  assert.equal(f.app.feedback.current(f.run.id).revision, 1); assert.deepEqual(calls, []); assert.deepEqual(f.adapter.requests, []);
+});
+
 test('HTTP applies feedback candidates only through their separate explicit empty-body endpoint', async t => {
   const f = await fixture(t);
   const calls = [];

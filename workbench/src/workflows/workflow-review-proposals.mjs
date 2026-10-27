@@ -53,6 +53,7 @@ export function bindArtifactRevisionProposal(app, workflowId, document, request)
   if (!validIdentifier(workflowId)) fail('工作流 ID 无效。');
   request = proposalRequest(request);
   const run = app.workflows.get(request.runId);
+  if (run?.importedArchive) fail('导入的历史审核只供查看，请从当前工作流新建运行后再修改产物。', 409);
   if (document?.id !== workflowId || run?.id !== request.runId || run.workflowId !== workflowId || run.document?.id !== workflowId
     || run.parentRunId || run.learningId || run.memoryScopeId || run.document.mode === 'learn' || document.mode === 'learn') {
     fail('修改候选只能绑定当前工作流的普通顶层运行。', 409);

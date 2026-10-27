@@ -80,6 +80,18 @@ test('ownership checks use all persisted workflow runs, not only a bounded recen
   await assert.rejects(f.policy.admit('session.history', { sessionId: 'foreign-session' }, f.scope), /不属于/);
 });
 
+test('nested executions belong only to their verified root workflow for reads and projection', async t => {
+  const f = await fixture(t), child = { id: 'child-run', workflowId: 'embedded-document', parentRunId: 'run-a', sessionId: 'child-session', nodes: {} };
+  f.runs.push(child, { id: 'foreign-child', workflowId: 'embedded-document', parentRunId: 'run-b', nodes: {} });
+  await f.policy.admit('workflow.run', { runId: child.id }, f.scope);
+  await f.policy.admit('session.history', { sessionId: 'child-session' }, f.scope);
+  await assert.rejects(f.policy.admit('workflow.run', { runId: 'foreign-child' }, f.scope), /当前工作流/);
+  const projected = f.policy.project({ run: child, runs: [child, { id: 'foreign-child', workflowId: 'embedded-document' }] }, f.scope);
+  assert.equal(projected.run.id, child.id); assert.deepEqual(projected.runs.map(row => row.id), [child.id]);
+  f.runs.push({ id: 'cycle-a', workflowId: 'workflow-a', parentRunId: 'cycle-b' }, { id: 'cycle-b', workflowId: 'workflow-a', parentRunId: 'cycle-a' });
+  await assert.rejects(f.policy.admit('workflow.run', { runId: 'cycle-a' }, f.scope), /父级归属/);
+});
+
 test('canonical folder checks reject traversal, sibling prefixes and symlink escapes', async t => {
   const f = await fixture(t);
   await writeFile(join(f.folder, 'result.txt'), 'ok');

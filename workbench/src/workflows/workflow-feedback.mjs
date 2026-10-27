@@ -70,7 +70,8 @@ export class WorkflowFeedback {
   get(runId) {
     const run = this.run(runId);
     const targets = this.targets(run);
-    const reason = !TERMINAL.has(run.status) ? '请等待运行结束后再评价 Skill。'
+    const reason = run.importedArchive ? '导入的历史运行只供查看，请从当前工作流新建运行后再评价。'
+      : !TERMINAL.has(run.status) ? '请等待运行结束后再评价 Skill。'
       : run.learningId || run.memoryScopeId || run.document?.mode !== 'execute' ? '学习样例不能作为普通执行反馈，请评价执行模式的运行。'
         : !targets.some(target => target.status === 'complete') ? '此运行没有已完成且版本可核对的 Skill 节点。' : '';
     return { feedback: this.current(runId), targets, canReview: !reason, reason };
@@ -85,6 +86,7 @@ export class WorkflowFeedback {
   }
 
   assertEvaluable(run) {
+    if (run.importedArchive) fail('导入的历史运行只供查看，请从当前工作流新建运行后再评价或学习。', 409);
     if (!TERMINAL.has(run.status)) fail('请等待运行结束后再评价 Skill。', 409);
     if (run.learningId || run.memoryScopeId || run.document?.mode !== 'execute') fail('学习样例不能作为普通执行反馈，请评价执行模式的运行。', 409);
   }
