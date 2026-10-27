@@ -9,9 +9,10 @@ const COMPONENT = /^[a-z][a-z0-9.-]{0,63}$/;
 const EVENT = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const BOOT = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const IDS = ['workflowId', 'runId', 'parentRunId', 'nodeId', 'sessionId', 'conversationId', 'turnId', 'requestId', 'operationId', 'learningId', 'scheduleId', 'attemptId'];
-const LABELS = ['stage', 'phase', 'status', 'code', 'errorType', 'errorName', 'errorCode', 'model', 'provider', 'tool', 'mode', 'source', 'reason', 'functionName'];
+const LABELS = ['stage', 'phase', 'status', 'code', 'errorType', 'errorName', 'errorCode', 'model', 'provider', 'tool', 'mode', 'source', 'reason', 'functionName', 'timeoutKind'];
 const NUMBERS = ['durationMs', 'elapsedMs', 'count', 'revision', 'attempt', 'httpStatus', 'modelCalls', 'toolCalls', 'historyRuns',
-  'completed', 'failed', 'interrupted', 'unknown', 'queued', 'active', 'matched', 'imported', 'missing', 'unavailable', 'line', 'column'];
+  'completed', 'failed', 'interrupted', 'unknown', 'queued', 'active', 'matched', 'imported', 'missing', 'unavailable', 'line', 'column',
+  'waitMs', 'outputMs', 'promptCharacters', 'outputCharacters', 'firstResponseTimeoutMs', 'outputIdleTimeoutMs', 'maxDurationMs'];
 const BOOLEANS = ['success', 'cacheHit', 'cancelled', 'timedOut', 'retryable', 'readOnly', 'partial'];
 const FILTERS = ['limit', 'afterId', 'minLevel', 'component', 'workflowId', 'runId', 'nodeId', 'sessionId', 'conversationId', 'turnId', 'requestId', 'operationId', 'from', 'to'];
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;

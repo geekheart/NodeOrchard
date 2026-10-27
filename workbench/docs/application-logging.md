@@ -20,6 +20,8 @@
 
 高频文本delta和Token快照不逐条持久；状态与诊断阶段变化去重后记录。日志写入或观察失败不改变业务结果，不递归发布日志事件，不因日志故障重试模型或工作流。
 
+助手模型新增 `assistant.model.state` 事件，保存会话身份、阶段、调用总耗时、等待／输出耗时、字符数量和超时分类；流块不逐块持久。对应 `application_model_calls` 保存数字调用快照，供按归属聚合诊断，旧快照的 running 不证明重启后仍在执行。`assistant.probe.started/completed/failed` 记录固定短探测结果；不保存探测正文。`assistant.turn.state.durationMs` 为轮次时长，原 `elapsedMs` 为进度观察值，不能用最后阶段耗时推算全轮。
+
 ## 全局助手读取
 
 `app.logs` 支持 `minLevel`、`component`、`from/to` 及 `workflowId/runId/nodeId/sessionId/conversationId/turnId/requestId/operationId`，同时支持 `limit` 和 `afterId`。优先读取warn以上，再按关联ID补充info阶段。HTTP响应的 `X-Request-Id` 由服务端生成；页面请求错误自动携带同一ID，助手通过 `page.inspect` 即可关联软件日志。

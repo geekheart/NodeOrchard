@@ -100,7 +100,7 @@ test('proposal validation HTTP reuses authentication, scope and current permissi
   assert.deepEqual(f.app.workflows.list(), []);
 });
 
-test('proposal validation rejects newly forbidden custom code, ended items and archived workflows', async t => {
+test('proposal validation rejects newly forbidden custom code, ended items and recycled workflows through the legacy archive alias', async t => {
   const f = await fixture(t), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
   f.app.conversations.planner = async () => ({ text: '代码候选', operations: [{ op: 'update-node', nodeId: 'trim', config: { executionMode: 'code', language: 'javascript', code: 'return input;' } }], baseFingerprint: documentFingerprint(document) });
   const response = await f.app.conversations.message(document.id, message(document, '修改工具节点代码', { intent: 'workflow' }));
@@ -112,7 +112,7 @@ test('proposal validation rejects newly forbidden custom code, ended items and a
   await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /已结束/);
   const saved = f.app.workflowLibrary.get(document.id);
   f.app.workflowLibrary.transition(document.id, 'archive', { expectedRevision: saved.revision });
-  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /归档/);
+  await assert.rejects(f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint }), /回收站/);
 });
 
 test('failed diagnosis retains completed evidence and its failed stage across restart and offers it to the next request', async t => {

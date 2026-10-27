@@ -144,12 +144,15 @@ export class AssistantDiagnosticTurn {
     this.state.status = error ? 'error' : 'complete'; this.publish();
   }
   async wait(promise, signal) {
+    // Callers may already have started an async operation before this budget
+    // check. Even an expired wait must observe its eventual rejection.
+    const pending = Promise.resolve(promise); pending.catch(() => {});
     const remaining = this.maxDurationMs - (Date.now() - this.started);
     const timeout = () => Object.assign(new Error(`整轮诊断达到总等待上限（${Math.round(this.maxDurationMs / 1000)} 秒），已保留诊断进度。`), { code: 'ASSISTANT_TURN_TIMEOUT' });
     if (remaining <= 0) throw timeout();
     let timer, abort;
     try {
-      return await Promise.race([promise, new Promise((_, reject) => {
+      return await Promise.race([pending, new Promise((_, reject) => {
         timer = setTimeout(() => reject(timeout()), remaining);
         abort = () => reject(Object.assign(new Error('诊断已停止。'), { code: 'ABORT_ERR' }));
         signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();

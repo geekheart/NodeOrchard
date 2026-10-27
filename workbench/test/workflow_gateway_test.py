@@ -239,7 +239,7 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.assertFalse(self.agent.skip_background_review)
         self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy"})
         self.assertEqual(set(self.server.methods), {"workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish", "workbench.learning.prepare",
-                                                   "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history",
+                                                   "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history", "workbench.assistant.diagnostics",
                                                    "workbench.usage.history",
                                                    "workbench.learning.memory.capture", "workbench.learning.memory.release", "workbench.learning.memory.restore"})
         self.assertIn("workbench.skill.prepare", self.server._LONG_HANDLERS)

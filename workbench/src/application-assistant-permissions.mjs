@@ -15,7 +15,7 @@ const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
-const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs']);
+const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.probe']);
 
 // Resolve even a not-yet-created path through its existing parent. A lexical
 // prefix alone admits symlinks and is insufficient for an assistant folder.
@@ -88,10 +88,11 @@ export class ApplicationAssistantPermissions {
   allowed(name, scope) {
     this.check(scope); const p = scope.permissions;
     if (!KNOWN.has(name)) return false;
-    if (scope.readOnly && (MANAGE.has(name) || ['workflow.propose', 'conversation.delegate'].includes(name))) return false;
+    if (scope.readOnly && (MANAGE.has(name) || ['workflow.propose', 'conversation.delegate', 'assistant.probe'].includes(name))) return false;
     if (CONVERSATIONS.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.crossWorkflowRead
       && (name !== 'conversation.delegate' || p.manageWorkflows);
     if (KNOWLEDGE.has(name)) return true;
+    if (name === 'assistant.diagnose' || name === 'assistant.probe') return p.workflowRead && (scope.role === 'workflow' || p.appLogs);
     if (name === 'app.logs') return scope.role === 'supervisor' && p.appLogs;
     if (MANAGE.has(name)) return scope.role === 'supervisor' && p.manageWorkflows;
     if (name === 'workflow.propose') return p.workflowRead && p.workflowEdit;
@@ -177,10 +178,12 @@ export class ApplicationAssistantPermissions {
     args = { ...args }; context = { ...context, role: scope.role, permissionScope: scope };
     const scoped = scope.role === 'workflow' || !scope.permissions.crossWorkflowRead;
     if (scoped) {
+      if (scope.role === 'workflow' && name === 'assistant.diagnose' && args.conversationId) fail('当前工作流助手不能读取总控会话。');
       if (context.workflowId && context.workflowId !== scope.workflowId || context.document && context.document.id !== scope.workflowId) fail('调用上下文越过当前工作流。');
       if (args.workflowId) this.workflow(args.workflowId, scope);
       context.workflowId = scope.workflowId;
       if (['workflow.inspect', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
+      if (name === 'assistant.diagnose' && scope.workflowId && !args.conversationId) args.workflowId = scope.workflowId;
     }
     const runId = args.runId || (!['session.history', 'tools.catalog'].includes(name) ? context.runId : null);
     if (runId) this.run(runId, scope);

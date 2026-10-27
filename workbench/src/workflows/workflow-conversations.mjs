@@ -549,7 +549,7 @@ export class WorkflowConversations {
       const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
       const page = privateValue.page;
-      const result = await this.planner(this.app, { role: 'workflow', readOnly, operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
+      const result = await this.planner(this.app, { role: 'workflow', readOnly, diagnosticTurnId: turn.id, operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
         onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
           turn.assistant.text = message; if (progress) turn.assistant.progress = clone(progress);
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);

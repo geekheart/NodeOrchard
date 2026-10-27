@@ -10,15 +10,20 @@ const scopeConfirmed = (policy, id) => policy?.memoryAllowed === true && policy.
 // tools or memory writes. Existing builtin memory context remains readable.
 // Only the controller can submit to these durable, inspectable sessions.
 export class LearningModel {
-  constructor(app, { timeoutMs = 180000, purpose = 'learning' } = {}) {
+  constructor(app, { timeoutMs = 180000, purpose = 'learning', outputIdleTimeoutMs = Math.min(timeoutMs, 60000),
+    maxDurationMs = purpose === 'assistant' ? Math.min(timeoutMs * 2, 360000) : timeoutMs } = {}) {
     if (!['learning', 'assistant'].includes(purpose)) throw fail('模型控制用途无效。');
+    if ([timeoutMs, outputIdleTimeoutMs, maxDurationMs].some(value => !Number.isSafeInteger(value) || value < 1 || value > 2147483647)) throw fail('模型等待时限无效。');
     this.purpose = purpose;
     this.subject = purpose === 'assistant' ? '应用助手' : '学习模型';
     this.sessionTable = purpose === 'assistant' ? 'application_model_sessions' : 'learning_model_sessions';
-    this.app = app; this.timeoutMs = timeoutMs; this.active = new Map(); this.pending = new Set(); this.closed = false;
+    this.app = app; this.timeoutMs = timeoutMs; this.outputIdleTimeoutMs = outputIdleTimeoutMs;
+    this.maxDurationMs = purpose === 'assistant' ? Math.min(maxDurationMs, 360000) : timeoutMs;
+    this.active = new Map(); this.pending = new Set(); this.closed = false;
     this.memoryScopes = new Set();
     this.db = app.store.db;
     this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.sessionTable} (id TEXT PRIMARY KEY)`);
+    if (this.purpose === 'assistant') this.db.exec('CREATE TABLE IF NOT EXISTS application_model_calls (session_id TEXT PRIMARY KEY, value TEXT NOT NULL)');
     this.onEvent = event => this.handleEvent(event);
     app.on('event', this.onEvent);
   }
@@ -84,32 +89,32 @@ export class LearningModel {
     this.memoryScopes.add(id);
     return { id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false, snapshot: { ...snapshot } };
   }
-  async generate(prompt, { signal, onSession, onProgress, memoryScopeId, modelRoute, images = [], title = '学习 · 评价 / 调整 Skill' } = {}) {
+  async generate(prompt, { signal, onSession, onProgress, memoryScopeId, modelRoute, deadlineAt, firstResponseTimeoutMs,
+    outputIdleTimeoutMs, images = [], title = '学习 · 评价 / 调整 Skill' } = {}) {
     if (this.purpose === 'assistant' && memoryScopeId !== undefined) throw fail('应用助手不能访问学习记忆。');
     if (!Array.isArray(images) || images.length > 4 || images.some(path => typeof path !== 'string') || images.length && this.purpose !== 'assistant') throw fail('模型图像输入无效。');
     if (this.closed || signal?.aborted) throw fail(`${this.subject}调用已停止。`);
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw fail(`${this.subject}指令超过长度限制。`);
     if (typeof title !== 'string' || !title.trim() || title.length > 120) throw fail('模型会话名称无效。');
+    if (deadlineAt !== undefined && (!Number.isSafeInteger(deadlineAt) || deadlineAt < 1 || deadlineAt > 8640000000000000)) throw fail('模型调用截止时间无效。');
+    if ([firstResponseTimeoutMs, outputIdleTimeoutMs].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 2147483647))) throw fail('模型等待时限无效。');
     if (memoryScopeId !== undefined && !UUID.test(memoryScopeId || '')) throw fail('无效的学习记忆范围标识。');
     let state;
     const result = new Promise((resolve, reject) => {
       state = { id: null, requestId: randomUUID(), signal, resolve, reject, done: false, terminal: false, submitting: false,
-        onProgress, startedAtMs: Date.now() };
+        onProgress, startedAtMs: Date.now(), promptCharacters: prompt.length, outputCharacters: 0,
+        firstResponseTimeoutMs: Math.min(this.timeoutMs, firstResponseTimeoutMs ?? this.timeoutMs),
+        outputIdleTimeoutMs: Math.min(this.outputIdleTimeoutMs, outputIdleTimeoutMs ?? this.outputIdleTimeoutMs) };
+      state.deadlineAtMs = Math.min(state.startedAtMs + this.maxDurationMs, deadlineAt ?? Infinity);
       this.pending.add(state);
-      state.abort = () => this.finish(state, fail(`${this.subject}调用已停止。`), true);
+      state.abort = () => this.finish(state, Object.assign(fail(`${this.subject}调用已停止。`), { code: 'MODEL_ABORTED' }), true);
       signal?.addEventListener('abort', state.abort, { once: true });
-      state.timer = setTimeout(() => {
-        const elapsedMs = Math.max(0, Date.now() - state.startedAtMs);
-        const message = this.purpose === 'assistant'
-          ? `应用助手调用累计等待 ${Math.ceil(elapsedMs / 1000)} 秒超时，停止在「${state.phaseLabel}」阶段。`
-          : '学习模型调用超时，已停止。';
-        this.finish(state, Object.assign(fail(message), { code: 'MODEL_TIMEOUT', phase: state.phase, phaseLabel: state.phaseLabel, elapsedMs }), true);
-      }, this.timeoutMs);
-      state.timer.unref?.();
       this.progress(state, 'create-session', '创建模型会话');
+      this.scheduleTimeout(state);
     });
     // Attach the rejection handler before awaiting preparation or the submit ACK.
     result.catch(() => {});
+    if (state.done) return result;
     void (async () => { try {
       const session = await this.app.createSession({ title, ...(this.purpose === 'assistant' ? { managedPurpose: 'assistant' } : {}), ...(modelRoute ? { modelRoute } : {}) });
       // Creation can outlive abort or close. Never touch a closed database; while
@@ -118,6 +123,7 @@ export class LearningModel {
       state.id = session.id;
       this.db.prepare(`INSERT OR IGNORE INTO ${this.sessionTable}(id) VALUES(?)`).run(session.id);
       if (state.done || signal?.aborted) { void this.app.interrupt(session.id).catch(() => {}); return; }
+      this.persistMetrics(state);
       this.active.set(session.id, state);
       onSession?.(session.id);
       if (signal?.aborted || this.closed || state.done) { state.abort(); return; }
@@ -141,6 +147,7 @@ export class LearningModel {
         if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
       }
       state.submitting = true;
+      state.submittedAtMs = Date.now();
       this.progress(state, 'submit-model', '提交模型请求');
       await this.app.submit(session.id, prompt, { [this.purpose === 'assistant' ? 'assistantRequestId' : 'learningRequestId']: state.requestId });
       // A stream or terminal event may precede the submit ACK. Never replace a
@@ -156,19 +163,74 @@ export class LearningModel {
     if (state.done || state.phase === stage) return;
     state.phase = stage; state.phaseLabel = label;
     const value = { stage, label, startedAt: new Date(state.startedAtMs).toISOString(), elapsedMs: Math.max(0, Date.now() - state.startedAtMs) };
+    if (this.purpose === 'assistant') { value.metrics = this.metrics(state); this.persistMetrics(state); }
     // Observers are telemetry, never part of admission or completion. Neither a
     // throwing callback nor its rejected promise can change the model result.
     try { Promise.resolve(state.onProgress?.(value)).catch(() => {}); } catch { /* Keep the controller authoritative. */ }
   }
+  metrics(state) {
+    const date = value => value === undefined ? null : new Date(value).toISOString();
+    return { version: 1, status: state.callStatus || 'running', startedAt: date(state.startedAtMs),
+      submittedAt: date(state.submittedAtMs), firstOutputAt: date(state.firstOutputAtMs), lastOutputAt: date(state.lastOutputAtMs),
+      completedAt: date(state.completedAtMs), promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters,
+      timeoutKind: state.timeoutKind || null, errorCode: state.errorCode || null,
+      timeoutPolicy: { firstResponseTimeoutMs: state.firstResponseTimeoutMs, outputIdleTimeoutMs: state.outputIdleTimeoutMs,
+        maxDurationMs: this.maxDurationMs, deadlineAt: date(state.deadlineAtMs) } };
+  }
+  persistMetrics(state) {
+    if (this.purpose !== 'assistant' || !state.id || state.startedAtMs === undefined) return;
+    // Observability never changes model admission/completion. Stream chunks only
+    // update memory; durable rows are written at phase transitions and terminal.
+    try { this.db.prepare('INSERT INTO application_model_calls(session_id,value) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET value=excluded.value')
+      .run(state.id, JSON.stringify(this.metrics(state))); } catch { /* Preserve the authoritative model result. */ }
+    try { this.app.logger?.write(state.callStatus === 'error' ? 'error' : ['timeout', 'interrupted'].includes(state.callStatus) ? 'warn' : 'info',
+      'assistant.model.state', { component: 'assistant', sessionId: state.id, stage: state.phase, status: state.callStatus || 'running',
+        durationMs: Math.max(0, (state.completedAtMs ?? Date.now()) - state.startedAtMs),
+        ...(state.firstOutputAtMs !== undefined ? { waitMs: state.firstOutputAtMs - state.startedAtMs,
+          outputMs: Math.max(0, (state.completedAtMs ?? Date.now()) - state.firstOutputAtMs) } : {}),
+        promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters, timeoutKind: state.timeoutKind,
+        errorCode: state.errorCode, firstResponseTimeoutMs: state.firstResponseTimeoutMs,
+        outputIdleTimeoutMs: state.outputIdleTimeoutMs, maxDurationMs: this.maxDurationMs }); } catch { /* Logging never changes model control. */ }
+  }
+  scheduleTimeout(state) {
+    if (state.done) return;
+    clearTimeout(state.timer);
+    const absolute = state.deadlineAtMs;
+    const response = state.startedAtMs + (this.purpose === 'assistant' ? state.firstResponseTimeoutMs : this.timeoutMs);
+    const activity = state.responseAtMs ?? state.lastOutputAtMs;
+    const phaseDeadline = this.purpose === 'assistant' && activity !== undefined ? activity + state.outputIdleTimeoutMs : response;
+    const next = Math.min(absolute, phaseDeadline);
+    state.nextDeadlineAtMs = next;
+    const kind = this.purpose === 'learning' || absolute <= phaseDeadline ? 'absolute' : activity === undefined ? 'first-response' : 'output-idle';
+    const timeout = () => {
+      const elapsedMs = Math.max(0, Date.now() - state.startedAtMs);
+      const message = this.purpose === 'assistant'
+        ? `应用助手调用累计等待 ${Math.ceil(elapsedMs / 1000)} 秒超时，停止在「${state.phaseLabel}」阶段（${{ 'first-response': '等待首次输出', 'output-idle': '输出或结果读取停滞', absolute: '达到总截止时间' }[kind]}）。`
+        : '学习模型调用超时，已停止。';
+      state.timeoutKind = kind;
+      this.finish(state, Object.assign(fail(message), { code: 'MODEL_TIMEOUT', timeoutKind: kind, phase: state.phase, phaseLabel: state.phaseLabel, elapsedMs,
+        ...(this.purpose === 'assistant' ? { metrics: this.metrics(state) } : {}) }), true);
+    };
+    if (next <= Date.now()) { timeout(); return; }
+    state.timer = setTimeout(timeout, next - Date.now()); state.timer.unref?.();
+  }
   handleEvent(event) {
     if (this.closed) return;
     if (event.type === 'backend.status' && ['error', 'stopped', 'disconnected'].includes(event.payload?.state)) {
-      for (const state of this.pending) this.finish(state, fail(`Hermes 连接中断；未重放${this.subject}调用。`));
+      for (const state of this.pending) this.finish(state, Object.assign(fail(`Hermes 连接中断；未重放${this.subject}调用。`), { code: 'MODEL_DISCONNECTED' }));
       return;
     }
     const state = this.active.get(event.sessionId);
     if (!state || state.done || state.terminal || !state.submitting) return;
-    if (event.type === 'message.delta') this.progress(state, 'model-output', '接收模型输出');
+    // An overdue timer can still be queued behind an incoming frame. Check the
+    // previous deadline before allowing that frame to renew the output window.
+    if (state.nextDeadlineAtMs <= Date.now()) { this.scheduleTimeout(state); return; }
+    if (event.type === 'message.delta' && typeof event.payload?.text === 'string' && event.payload.text.length) {
+      state.firstOutputAtMs ??= Date.now(); state.lastOutputAtMs = Date.now();
+      state.outputCharacters += event.payload.text.length;
+      this.scheduleTimeout(state);
+      this.progress(state, 'model-output', '接收模型输出');
+    }
     if (event.type === 'request.open') this.finish(state, fail(`${this.purpose === 'assistant' ? '应用助手' : '学习评价'}会话意外请求了工具或交互，已停止。`), true);
     if (event.type === 'error') this.finish(state, fail(redact(event.payload?.message || `${this.subject}调用失败。`)), true);
     if (event.type !== 'message.complete') return;
@@ -177,6 +239,8 @@ export class LearningModel {
     if (payload.status !== 'complete' || payload.partial || payload.error) {
       this.finish(state, fail(redact(payload.error || `${this.subject}未确认成功。`))); return;
     }
+    state.responseAtMs = Date.now(); this.scheduleTimeout(state);
+    if (state.done) return;
     this.progress(state, 'read-result', '确认模型完整结果');
     void (async () => {
       try {
@@ -185,6 +249,7 @@ export class LearningModel {
         const final = history.messages?.filter(message => message.role === 'assistant').at(-1);
         if (!final || typeof final.text !== 'string' || final.partial || final.tool_calls?.length || final.toolCalls?.length) throw fail(`${this.subject}历史中缺少完整结果。`);
         if (Buffer.byteLength(final.text, 'utf8') > 100000) throw fail(`${this.subject}返回内容超过限制。`);
+        state.outputCharacters = Math.max(state.outputCharacters, final.text.length);
         this.finish(state, null, false, final.text);
       } catch (error) { this.finish(state, error); }
     })();
@@ -196,6 +261,12 @@ export class LearningModel {
       error.elapsedMs ??= Math.max(0, Date.now() - state.startedAtMs);
     }
     state.done = true; clearTimeout(state.timer); state.signal?.removeEventListener('abort', state.abort);
+    state.completedAtMs = Date.now();
+    state.callStatus = !error ? 'complete' : error.code === 'MODEL_TIMEOUT' ? 'timeout'
+      : ['MODEL_ABORTED', 'MODEL_CLOSED'].includes(error.code) ? 'interrupted' : 'error';
+    state.errorCode = !error ? null : ['MODEL_TIMEOUT', 'MODEL_ABORTED', 'MODEL_CLOSED', 'MODEL_DISCONNECTED'].includes(error.code) ? error.code : 'MODEL_ERROR';
+    this.persistMetrics(state);
+    if (error && this.purpose === 'assistant' && state.startedAtMs !== undefined) error.metrics = this.metrics(state);
     this.active.delete(state.id); this.pending.delete(state);
     if (interrupt && state.id) void this.app.interrupt(state.id).catch(() => {});
     if (error && state.scopeId) void this.releaseMemoryScope(state.scopeId).catch(() => {});
@@ -204,7 +275,7 @@ export class LearningModel {
   async close() {
     this.closed = true;
     this.app.off('event', this.onEvent);
-    for (const state of this.pending) this.finish(state, fail(`工作台已关闭；${this.subject}调用已停止。`), true);
+    for (const state of this.pending) this.finish(state, Object.assign(fail(`工作台已关闭；${this.subject}调用已停止。`), { code: 'MODEL_CLOSED' }), true);
     for (const id of [...this.memoryScopes]) void this.releaseMemoryScope(id).catch(() => {});
   }
 }

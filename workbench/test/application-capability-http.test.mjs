@@ -38,7 +38,7 @@ async function fixture(t) {
 }
 
 function businessSnapshot(app) {
-  const conversationTables = new Set(['application_conversation_turns', 'workflow_conversations', 'workflow_conversation_turns']);
+  const conversationTables = new Set(['application_conversation_turns', 'workflow_conversations', 'workflow_conversation_turns', 'application_logs']);
   const tables = app.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
     .map(row => row.name).filter(name => !conversationTables.has(name));
   return tables.map(name => {

@@ -38,6 +38,27 @@ test('one bounded read batch avoids separate model decisions and deduplicates no
   assert.match(f.prompts[1], /FETCH_FAILED/); assert.equal(result.evidence[1].cached, true);
 });
 
+test('tool budget exhaustion gets one final answer decision with an empty advertised catalog', async t => {
+  const f = fixture(t, [() => ({ tool: 'workflow.run', arguments: { runId: 'latest' } }), () => ({ text: '依据现有证据结束。' })], { maxCalls: 1 });
+  await f.assistant.plan({ text: '诊断超时' });
+  assert.equal(f.prompts.length, 2);
+  assert.match(f.prompts[1], /FINAL_ANSWER_ONLY=true/);
+  assert.match(f.prompts[1], /TOOL_CATALOG=\[\]/);
+  assert.match(f.prompts[1], /"remainingToolRequests":0/);
+  assert.equal(f.reads.length, 1);
+});
+
+test('parent deadline and server turn identity reach protected model generation and diagnostic tools', async t => {
+  let generated, called;
+  const f = fixture(t, [options => { generated = options; return { tool: 'assistant.probe', arguments: {} }; }, () => ({ text: '完成探测。' })]);
+  f.assistant.call = async (name, args, context) => { called = context; return { success: true }; };
+  await f.assistant.plan({ text: '检查模型连接', sourceConversationId: 'global-application', operationNamespace: 'owned-turn' });
+  assert.equal(generated.deadlineAt, called.deadlineAt);
+  assert(generated.deadlineAt > Date.now());
+  assert.equal(called.diagnosticTurnId, 'owned-turn');
+  assert.match(f.prompts[0], /已加载.*diagnose-workflow|loadedSkills/);
+});
+
 test('a mixed batch is rejected before any read or proposal executes', async t => {
   const f = fixture(t, [() => ({ tools: [
     { tool: 'workflow.run', arguments: { runId: 'latest' } },

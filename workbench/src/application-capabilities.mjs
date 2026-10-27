@@ -5,6 +5,7 @@ import { inspectCodeRuntime } from './application-runtime-inspector.mjs';
 import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-hub.mjs';
+import { ASSISTANT_MODEL_TOOLS } from './assistant-model-tools.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -47,6 +48,7 @@ const FEATURES = [
   { id: 'workflow-recycle-bin', status: 'ui-only', inspect: 'workflows.list', tools: [], requiresUserConfirmation: true,
     note: '工作流直接移入回收站并暂停定时任务，恢复后可编辑运行但定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
   { id: 'application-logs', status: 'available', roles: ['supervisor'], tools: ['app.logs'], note: '受限持久结构化日志支持debug/info/warn/error/fatal、时间/模块/关联ID筛选和分页；仅保存数字与身份元数据，按保留限制清理。Hermes原始诊断窗口仍仅当前进程。日志读取不能修改源码或权限。' },
+  { id: 'assistant-model-diagnostics', status: 'available', tools: ['assistant.diagnose', 'assistant.probe'], note: '按归属轮次聚合模型时序、计量与部分输出状态；固定短请求验证当前连接，单轮一次。等待首字、输出空闲与总截止分离，保留进度；不读取控制会话正文、不切换模型或重放业务。' },
   { id: 'workflow-statistics', status: 'available', tools: ['workbench.inspect'], note: '只读工作流对话、模型用量、上下文、运行成败和登记产物统计；独立助手仅当前工作流。历史未采集Token保持未知，逐工作流CPU和内存及订阅费用尚未采集。' },
   { id: 'statistics-history-import', status: 'ui-only', inspect: 'workbench.inspect', tools: [], note: '统计页由用户触发全局历史补齐，仅扫描已知本地会话并读取Hermes固定历史库的数字；助手可读取补齐后的受限统计，全局缓存写入不作为模型工具开放。' },
   { id: 'diagnostics', status: 'available', tools: ['app.state', 'workflow.run', 'session.history', 'artifact.inspect', 'browser.capture'] },
@@ -79,7 +81,7 @@ export class ApplicationCapabilities {
   constructor(app, { skills = new ApplicationAssistantSkills(app.config?.appRoot) } = {}) { this.app = app; this.skills = skills; }
   tools() {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS)];
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS)];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }

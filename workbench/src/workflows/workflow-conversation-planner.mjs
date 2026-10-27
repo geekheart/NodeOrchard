@@ -200,7 +200,9 @@ USER_SOURCE_JSON=${JSON.stringify(source)}`;
     // Network/authentication failures and cancellations are not automatic retry
     // candidates. Only a received but invalid proposal gets one repair call.
     request.onProgress?.({ stage: attempt ? 'repair-proposal' : 'generate-proposal', label: attempt ? '正在修正未通过校验的候选（仅一次）' : '正在生成工作流修改候选', modelCall: true });
-    const raw = await model.generate(modelPrompt, { signal, onSession, onProgress: request.onProgress, ...(request.modelRoute ? { modelRoute: request.modelRoute } : {}), title: '工作流对话 · 搭建与修改' });
+    const raw = await model.generate(modelPrompt, { signal, onSession, onProgress: request.onProgress,
+      ...(request.deadlineAt !== undefined ? { deadlineAt: request.deadlineAt } : {}),
+      ...(request.modelRoute ? { modelRoute: request.modelRoute } : {}), title: '工作流对话 · 搭建与修改' });
     if (signal?.aborted) throw failure('工作流对话已停止。', 409);
     request.onProgress?.({ stage: 'validate-proposal', label: '正在校验节点配置、连线与固定版本' });
     try { return await pinProposalSkills(app, raw, document, skills, baseFingerprint, signal, revisions); }

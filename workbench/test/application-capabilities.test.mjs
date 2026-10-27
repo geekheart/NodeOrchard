@@ -11,6 +11,7 @@ import { OPERATION_LIMITS } from '../src/workflows/workflow-operations.mjs';
 import { DEFAULT_ASSISTANT_PERMISSIONS } from '../src/application-assistant-permissions.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from '../src/application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from '../src/application-conversation-hub.mjs';
+import { ASSISTANT_MODEL_TOOLS } from '../src/assistant-model-tools.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,7 +74,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   const tools = f.assistant.tools();
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));
-  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS].map(row => row.name));
+  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS].map(row => row.name));
   assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 4);
   assert.match((await f.capabilities.read('assistant.skills.read', { name: 'author-code-node' })).instructions, /node.describe/);
 });

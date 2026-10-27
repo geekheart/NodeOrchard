@@ -6,7 +6,7 @@ import { appRoot as defaultAppRoot } from './config.mjs';
 
 export const APPLICATION_ASSISTANT_SKILL_LIMITS = Object.freeze({ instructionsBytes: 16 * 1024 });
 export const APPLICATION_ASSISTANT_SKILL_MANIFEST = Object.freeze([
-  { name: 'diagnose-workflow', description: '诊断本应用工作流失败、超时或结果异常，关联当前草稿与真实运行证据。' },
+  { name: 'diagnose-workflow', description: '诊断本应用助手对话超时、工作流失败或结果异常，关联模型调用、当前草稿与真实运行证据。' },
   { name: 'edit-workflow', description: '搭建、配置或替换本应用工作流节点与连线，提出可应用的最小修改。' },
   { name: 'author-code-node', description: '编写或修改本应用的 Python 与 JavaScript 代码节点，处理数据或生成文件。' },
   { name: 'verify-result', description: '核验本应用运行状态、真实交付文件及修复验证结果。' },

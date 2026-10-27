@@ -57,7 +57,8 @@ export class ApplicationLogEvents {
       const stage = own(progress, 'stage'), modelCalls = own(progress, 'modelCalls'), toolCalls = own(progress, 'toolCalls');
       const context = { component: 'assistant', workflowId, conversationId, turnId, status, stage,
         runId: own(own(own(turn, 'user'), 'context'), 'runId'), sessionId: own(turn, 'modelSessionId'),
-        modelCalls, toolCalls, elapsedMs: own(progress, 'elapsedMs'), code: status === 'error' ? 'ASSISTANT_TURN_FAILED' : undefined };
+        modelCalls, toolCalls, elapsedMs: own(progress, 'elapsedMs'), durationMs: elapsed(own(turn, 'createdAt'), own(turn, 'updatedAt')),
+        code: status === 'error' ? 'ASSISTANT_TURN_FAILED' : undefined };
       if (turnId && this.changed('turn:' + turnId, [status, stage, modelCalls, toolCalls].join(':'))) this.write(levelFor(status), 'assistant.turn.state', context);
       for (const evidence of list(own(assistant, 'evidence')).slice(-12)) {
         const tool = own(evidence, 'tool'), toolStatus = own(evidence, 'status'), at = own(evidence, 'at');
