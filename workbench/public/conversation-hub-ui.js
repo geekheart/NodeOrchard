@@ -9,14 +9,15 @@ const excerpt = value => clean(typeof value === 'string' ? value : value?.text |
 const date = value => { const time = new Date(value); return value && !Number.isNaN(time.valueOf()) ? time.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : ''; };
 const STATUS = { thinking: '正在回复', queued: '正在准备', proposed: '待应用修改', awaiting_action: '待处理', error: '处理失败', interrupted: '已中断', complete: '已记录', applied: '已应用', dismissed: '已结束事项' };
 const summary = row => row.conversation || row;
+const visibleConversation = row => row.lifecycle === undefined || row.lifecycle === 'active';
 
 export function filterHubConversations(rows, { query = '', filter = 'all' } = {}) {
   const needle = String(query).trim().toLocaleLowerCase();
   return rows.filter(row => {
+    if (!visibleConversation(row)) return false;
     const item = summary(row);
     if (filter === 'pending' && !item.active && !count(item.pendingCount)) return false;
     if (filter === 'active' && !item.active) return false;
-    if (['trashed', 'archived'].includes(filter) && !['archived', 'trashed'].includes(row.lifecycle)) return false;
     return !needle || [row.title, row.workflowId, row.id, excerpt(item.lastMessage)].some(value => String(value || '').toLocaleLowerCase().includes(needle));
   });
 }
@@ -34,7 +35,7 @@ export class ConversationHubUI {
     const search = node('label', 'search-field'); this.search = node('input'); this.search.type = 'search'; this.search.placeholder = '搜索工作流或会话'; this.search.setAttribute('aria-label', '搜索对话'); search.append(this.search);
     this.search.addEventListener('input', () => { this.query = this.search.value; this.renderLists(); });
     this.filterInput = node('select'); this.filterInput.setAttribute('aria-label', '筛选对话');
-    for (const [value, label] of [['all', '全部'], ['pending', '待处理'], ['active', '正在回复'], ['trashed', '回收站']]) { const option = node('option', '', label); option.value = value; this.filterInput.append(option); }
+    for (const [value, label] of [['all', '全部'], ['pending', '待处理'], ['active', '正在回复']]) { const option = node('option', '', label); option.value = value; this.filterInput.append(option); }
     this.filterInput.addEventListener('change', () => { this.filter = this.filterInput.value; this.renderLists(); });
     this.refreshButton = button('刷新目录', () => void this.refresh()); this.toolbar.append(search, this.filterInput, this.refreshButton);
     this.status = node('p', 'helper'); this.status.setAttribute('role', 'status'); this.status.setAttribute('aria-live', 'polite');
@@ -55,7 +56,8 @@ export class ConversationHubUI {
     try {
       const result = await this.api('/api/conversation-hub');
       if (!Array.isArray(result?.workflows) || !Array.isArray(result?.supervisors)) throw new Error('对话目录响应不完整。');
-      this.data = result; this.onCount(result.workflows.length + result.supervisors.length);
+      this.data = { ...result, workflows: result.workflows.filter(visibleConversation) };
+      this.onCount(this.data.workflows.length + this.data.supervisors.length);
       if (chooseDefault && this.active && !this.selected) {
         const recent = result.supervisors.find(item => !item.legacy) || result.supervisors.find(item => item.legacy && count(item.turnCount));
         if (recent?.id) { this.selected = recent.id; this.openSupervisor(recent.id); }
@@ -90,7 +92,7 @@ export class ConversationHubUI {
     heading.append(title);
     const state = item.active ? '正在回复' : count(item.pendingCount) ? `${count(item.pendingCount)} 项待处理` : count(item.turnCount) ? STATUS[item.status] || '已记录' : '尚未开始';
     heading.append(node('span', `status-badge${item.active ? ' running' : count(item.pendingCount) ? ' error' : ''}`, state));
-    const meta = node('p', 'conversation-hub-meta', `${workflow ? '独立助手' : row.legacy ? '旧全局记录' : '总控助手'} · ${count(item.turnCount)} 条交流${date(item.updatedAt) ? ' · ' + date(item.updatedAt) : ''}${row.lifecycle && row.lifecycle !== 'active' ? ' · 回收站' : ''}`);
+    const meta = node('p', 'conversation-hub-meta', `${workflow ? '独立助手' : row.legacy ? '旧全局记录' : '总控助手'} · ${count(item.turnCount)} 条交流${date(item.updatedAt) ? ' · ' + date(item.updatedAt) : ''}`);
     card.append(heading, meta);
     const message = excerpt(item.lastMessage); if (message) card.append(node('p', 'conversation-hub-excerpt', message));
     if (workflow) card.append(link(`#/workflows/${encodeURIComponent(row.workflowId)}`, '进入独立会话 →', 'conversation-hub-open'));

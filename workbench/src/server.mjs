@@ -62,7 +62,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         if ([...requestURL.searchParams.keys()].some(key => !allowed.includes(key) || requestURL.searchParams.getAll(key).length !== 1)) return json(res, 400, { error: '会话目录查询参数无效。' });
         const args = Object.fromEntries(requestURL.searchParams);
         if (args.limit !== undefined) args.limit = Number(args.limit);
-        return json(res, 200, { ...application.applicationAssistant.hub.list({ lifecycle: 'all', ...args }), supervisors: application.applicationAssistant.listConversations() });
+        return json(res, 200, { ...application.applicationAssistant.hub.list({ lifecycle: 'active', ...args }), supervisors: application.applicationAssistant.listConversations() });
       }
       if (path === '/api/app-assistant/conversations' && requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
       if (req.method === 'GET' && path === '/api/app-assistant/conversations') return json(res, 200, { supervisors: application.applicationAssistant.listConversations() });

@@ -102,6 +102,33 @@ test('migration and directory GET preserve legacy global rows and all existing w
   assert.deepEqual(workflowHashes(f.app), beforeWorkflow); assert.deepEqual(f.adapter.calls, []);
 });
 
+test('the default conversation directory omits recycled and legacy archived workflows and restores their original conversations', async t => {
+  const f = await fixture(t), save = title => f.app.workflowLibrary.save({ document: createDocument({ schemaVersion: 2, title }), expectedRevision: 0 });
+  const active = save('正常会话'), recycled = save('回收站会话'), archived = save('旧归档会话');
+  f.app.workflowLibrary.transition(recycled.id, 'trash', { expectedRevision: recycled.revision });
+  const db = f.app.store.db, at = '2026-10-27T01:00:00Z';
+  db.prepare('INSERT INTO workflow_lifecycle(workflow_id,lifecycle,archived_at,trashed_at) VALUES(?,?,?,NULL)').run(archived.id, 'archived', at);
+  const turn = { id: 'retained-recycled-turn', workflowId: recycled.id, clientMessageId: 'retained-client', status: 'complete',
+    user: { text: '保留的消息', intent: 'discuss', context: {} }, assistant: { text: '保留的回复' }, actions: [], createdAt: at, updatedAt: at };
+  db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
+    .run(turn.id, recycled.id, turn.clientMessageId, at, JSON.stringify(turn), '{}');
+  const before = workflowHashes(f.app), conversationRows = rows(f.app, 'workflow_conversation_turns');
+  for (const query of ['', '?limit=1']) {
+    const response = await f.request('/api/conversation-hub' + query);
+    assert.equal(response.status, 200); assert.equal(response.body.total, 1);
+    assert.deepEqual(response.body.workflows.map(row => row.workflowId), [active.id]);
+    assert.equal(response.body.supervisors.length, 1);
+  }
+  const search = await f.request('/api/conversation-hub?search=' + encodeURIComponent('回收站会话'));
+  assert.equal(search.body.total, 0); assert.deepEqual(search.body.workflows, []);
+  assert.deepEqual(workflowHashes(f.app), before);
+  const current = f.app.workflowLibrary.get(recycled.id);
+  f.app.workflowLibrary.transition(recycled.id, 'restore', { expectedRevision: current.revision });
+  const restored = (await f.request('/api/conversation-hub')).body.workflows.find(row => row.workflowId === recycled.id);
+  assert.equal(restored.lifecycle, 'active'); assert.equal(restored.conversation.turnCount, 1);
+  assert.deepEqual(rows(f.app, 'workflow_conversation_turns'), conversationRows); assert.deepEqual(f.adapter.calls, []);
+});
+
 test('creating a supervisor topic is idempotent and rejects title conflicts and unauthorized request shapes', async t => {
   const f = await fixture(t), title = '诊断一件具体问题', id = await f.create(title, 'create-one');
   assert.equal(await f.create('  ' + title + '  ', 'create-one'), id);

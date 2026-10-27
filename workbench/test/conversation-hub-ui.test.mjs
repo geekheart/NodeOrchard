@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ConversationHubUI, filterHubConversations } from '../public/conversation-hub-ui.js';
 
 class Element {
@@ -33,11 +34,11 @@ function fixture(t, api, options = {}) {
 test('directory activation reads existing conversations and prefers a recent topic without creating anything', async t => {
   const calls = [], f = fixture(t, async (...args) => { calls.push(args); return data(); });
   await f.ui.activate({});
-  assert.deepEqual(calls, [['/api/conversation-hub']]); assert.deepEqual(f.opened, ['supervisor-new']); assert.deepEqual(f.counts, [4]);
+  assert.deepEqual(calls, [['/api/conversation-hub']]); assert.deepEqual(f.opened, ['supervisor-new']); assert.deepEqual(f.counts, [3]);
   const hrefs = flatten(f.root).map(item => item.href).filter(Boolean);
-  assert(hrefs.includes('#/workflows/workflow-a')); assert(hrefs.includes('#/workflows/workflow-b'));
+  assert(hrefs.includes('#/workflows/workflow-a')); assert.equal(hrefs.includes('#/workflows/workflow-b'), false);
   assert.match(contents(f.root), /原错误证据保留/); assert.match(contents(f.root), /旧全局记录/);
-  assert.equal(f.ui.data.workflows.length, 2);
+  assert.equal(f.ui.data.workflows.length, 1);
 });
 
 test('an empty directory does not create or open an empty legacy conversation on GET', async t => {
@@ -92,25 +93,43 @@ test('readonly captures cannot create topics but can inspect the directory', asy
 test('search and status filters operate on summaries without merging workflows or history', () => {
   const rows = data().workflows;
   assert.deepEqual(filterHubConversations(rows, { query: '错误证据' }).map(row => row.workflowId), ['workflow-a']);
+  assert.deepEqual(filterHubConversations(rows, { filter: 'active' }), []);
+  assert.deepEqual(filterHubConversations(rows, { filter: 'pending' }).map(row => row.workflowId), ['workflow-a']);
+  assert.deepEqual(filterHubConversations(rows, { query: '整理报告' }), []);
+  rows[1].lifecycle = 'active';
   assert.deepEqual(filterHubConversations(rows, { filter: 'active' }).map(row => row.workflowId), ['workflow-b']);
-  assert.deepEqual(filterHubConversations(rows, { filter: 'pending' }).map(row => row.workflowId), ['workflow-a', 'workflow-b']);
-  assert.deepEqual(filterHubConversations(rows, { filter: 'trashed' }).map(row => row.workflowId), ['workflow-b']);
-  assert.deepEqual(filterHubConversations(rows, { filter: 'trashed' }).map(row => row.workflowId),
-    filterHubConversations(rows.map(row => row.lifecycle === 'trashed' ? { ...row, lifecycle: 'archived' } : row), { filter: 'trashed' }).map(row => row.workflowId));
   assert.equal(rows.length, 2);
 });
 
-test('directory uses one recycle-bin filter and labels older archived records as recycled', async t => {
-  const records = data(); records.workflows[1].lifecycle = 'archived';
+test('directory excludes recycled and legacy archived conversations from every filter and count', async t => {
+  const records = data(); records.workflows.push({ ...records.workflows[1], workflowId: 'workflow-c', title: '旧归档报告', lifecycle: 'archived' });
+  const before = structuredClone(records);
   const f = fixture(t, async () => records);
   await f.ui.activate({ id: 'supervisor-new' });
   assert.deepEqual(f.ui.filterInput.children.map(item => [item.value, item.textContent]),
-    [['all', '全部'], ['pending', '待处理'], ['active', '正在回复'], ['trashed', '回收站']]);
-  assert.match(contents(f.ui.workflowList), /回收站/);
-  assert.doesNotMatch(contents(f.ui.workflowList), /归档/);
-  f.ui.filterInput.value = 'trashed'; f.ui.filterInput.listeners.get('change')();
+    [['all', '全部'], ['pending', '待处理'], ['active', '正在回复']]);
+  assert.equal(f.ui.data.workflows.length, 1); assert.deepEqual(f.counts, [3]);
+  assert.equal(f.ui.status.textContent, '1 个工作流独立会话 · 2 个总控主题');
+  for (const filter of ['all', 'pending', 'active']) {
+    f.ui.filterInput.value = filter; f.ui.filterInput.listeners.get('change')();
+    assert.doesNotMatch(contents(f.ui.workflowList), /整理报告|旧归档报告|回收站/);
+    assert.equal(filterHubConversations(records.workflows, { filter }).some(row => row.lifecycle !== 'active'), false);
+  }
+  f.ui.search.value = '报告'; f.ui.search.listeners.get('input')();
+  assert.doesNotMatch(contents(f.ui.workflowList), /整理报告|旧归档报告/);
+  assert.deepEqual(records, before);
+});
+
+test('lifecycle events hide a trashed conversation and show it again after restoration without writing history', async t => {
+  const records = data(); records.workflows[1].lifecycle = 'active'; let reads = 0;
+  const f = fixture(t, async (_path, options) => { assert.equal(options, undefined); reads++; return structuredClone(records); });
+  await f.ui.activate({ id: 'supervisor-new' });
   assert.match(contents(f.ui.workflowList), /整理报告/);
-  assert.doesNotMatch(contents(f.ui.workflowList), /采集热榜/);
+  records.workflows[1].lifecycle = 'trashed'; f.ui.onEvent({ type: 'workflow.lifecycle' }); await delay(230);
+  assert.doesNotMatch(contents(f.ui.workflowList), /整理报告/); assert.equal(f.ui.data.workflows.length, 1);
+  records.workflows[1].lifecycle = 'active'; f.ui.onEvent({ type: 'workflow.lifecycle' }); await delay(230);
+  assert.match(contents(f.ui.workflowList), /整理报告/); assert.equal(f.ui.data.workflows.length, 2);
+  assert.equal(reads, 3); assert.deepEqual(f.counts, [4, 3, 4]);
 });
 
 test('ordinary historical tasks remain navigable and managed model sessions are not duplicated', async t => {
