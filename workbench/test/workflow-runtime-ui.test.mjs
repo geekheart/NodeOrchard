@@ -248,6 +248,20 @@ test('shared multi-Skill plan is used before POST and double start submits only 
   assert.equal(instance.runs.get(value.id).status, 'complete');
 });
 
+test('a chat-started run explains the exact missing preparation instead of pointing to a hidden panel', async () => {
+  const document = localDocument(); document.schemaVersion = 2;
+  const instance = headless(run(document)); instance.runs.clear(); instance.input.value = 'fixed task';
+  let notice = '', submits = 0;
+  Object.assign(instance, { setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, render() {},
+    showNotice(message) { notice = message; }, api: async () => { submits++; } });
+  instance.editor.prepareRun = () => document;
+  instance.editor.studio = { syncRawInput() {}, preflight: async () => ({ ok: false,
+    errors: [{ label: '输出目录', message: '请选择普通资料目录。' }] }) };
+  await instance.start();
+  assert.equal(submits, 0);
+  assert.match(notice, /输出目录：请选择普通资料目录/);
+});
+
 test('adding another Skill remains available during a run and edits only the draft', async () => {
   const value = run(), instance = headless(value); let calls = 0; instance.editor.insertSkillAfterSelected = () => { calls++; return { title: 'new Skill' }; };
   Object.assign(instance, { refreshBackend() {}, showNotice() {}, setExpanded() {} });

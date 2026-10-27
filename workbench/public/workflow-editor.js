@@ -9,6 +9,7 @@ import { WorkflowStudioUI } from './workflow-studio-ui.js';
 import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
 import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
+import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 
 const STORAGE_KEY = 'workbench.workflow-editor.v1';
 const ACTIVE_KEY = 'workbench.workflow-active.v1';
@@ -559,6 +560,9 @@ export class WorkflowEditor {
     if (node.type === 'input') {
       if (this.doc.schemaVersion !== 2) this.field(form, '启动方式', 'trigger', c.trigger || 'manual', { options: [['manual', '手动输入'], ['schedule', '定时触发']] });
       this.field(form, '输入字段名', 'fieldName', c.fieldName, { maxLength: 128 }); this.field(form, '必填', 'required', c.required, { type: 'checkbox' });
+      const fixedInput = workflowInputDefault({ type: 'input', config: c });
+      this.field(form, c.outputType === 'text' ? '固定任务说明 / 默认输入' : '默认输入（JSON）', 'defaultValue', fixedInput === undefined ? '' : typeof fixedInput === 'string' ? fixedInput : JSON.stringify(fixedInput, null, 2), { multiline: true, maxLength: 64000, placeholder: c.outputType === 'text' ? '填写后直接运行即可；运行前准备中可按需覆盖本次输入。' : '例如 {"query":"AI","limit":20}' });
+      form.append(el('p', 'wf-field-help', '固定任务只需配置一次。未提供本次输入时使用此内容；每次变化的文件和参数仍可通过资料字段填写。'));
       if (this.doc.schemaVersion !== 2) { this.field(form, '每日时间', 'schedule', c.schedule || '09:00', { type: 'time' }); this.field(form, '时区', 'timezone', c.timezone || 'Asia/Shanghai', { maxLength: 128 }); }
       form.append(el('p', 'wf-field-help', this.doc.schemaVersion === 2 ? '输入定义资料要求。立即运行和顶部定时任务共用这些资料字段。' : '入口时间作为定时任务的默认值。应用属性后，通过顶部“定时任务”保存并启用调度；也可立即运行。'));
     }
@@ -698,8 +702,21 @@ export class WorkflowEditor {
   readForm(form, node) {
     const config = clone(node.config);
     for (const input of form.querySelectorAll('input[name], select[name], textarea[name]')) {
-      if (input.name === 'title' || input.name === 'targetSkillNodeIds' || input.name === 'validationRules' || input.disabled) continue;
+      if (input.name === 'title' || input.name === 'targetSkillNodeIds' || input.name === 'validationRules' || input.name === 'defaultValue' || input.disabled) continue;
       config[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
+    }
+    if (node.type === 'input' && form.elements.defaultValue) {
+      const raw = form.elements.defaultValue.value;
+      delete config.value; delete config.defaultValue;
+      if (raw.trim()) {
+        if (config.outputType === 'text') config.defaultValue = raw;
+        else { try { config.defaultValue = JSON.parse(raw); } catch { if (config.outputType === 'any') config.defaultValue = raw; else throw new Error('默认输入必须是合法的 JSON，并符合输入类型。'); } }
+      } else {
+        // Config updates merge with the previous snapshot. Keep an explicit
+        // empty value so clearing the field cannot revive an older default.
+        config.defaultValue = '';
+        if (this.doc?.schemaVersion === 2 || Object.hasOwn(node.config, 'value')) config.value = null;
+      }
     }
     if (node.type === 'improvement') config.targetSkillNodeIds = [...form.querySelectorAll('input[name="targetSkillNodeIds"]')].filter(input => input.checked).map(input => input.value);
     if (node.type === 'validation') { if (this.nodeLibrary?.validationBuilderErrors?.has(node.id)) throw new Error(this.nodeLibrary.validationBuilderErrors.get(node.id)); try { config.rules = JSON.parse(form.elements.validationRules.value); } catch { throw new Error('校验规则必须是合法的 JSON 数组。'); } if (!Array.isArray(config.rules)) throw new Error('校验规则必须是数组。'); }

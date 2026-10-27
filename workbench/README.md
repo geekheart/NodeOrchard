@@ -6,6 +6,8 @@
 
 顶部提示横幅右侧的关闭按钮可隐藏当前消息；后续新提示仍会显示，Hermes 连接与运行状态不受影响。
 
+固定任务可在输入节点配置默认值，或通过对话生成默认输入提案；未提供本次输入时直接沿用，明确的本次输入仍可覆盖。手动运行、预检和定时任务共用默认值解析。
+
 ## 运行与工作环境
 
 需要 Node.js ≥ 22.13。主应用使用 Node 内置模块，无需安装前端框架或独立数据库服务。**使用 AI 功能前，先按 [Hermes 官方指南](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装 Hermes Agent**，运行 `hermes model` 配置提供商和模型，再用 `hermes` 验证一次对话。当前适配已验证 Hermes 0.21.4。

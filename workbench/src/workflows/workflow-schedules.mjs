@@ -3,6 +3,7 @@ import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
 import { validateScheduleTiming, nextScheduleOccurrence } from '../../shared/workflow/workflow-schedule-time.mjs';
 import { validateWorkflowInput } from './workflow-runs.mjs';
 import { redact } from '../hermes-adapter.mjs';
+import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -88,7 +89,8 @@ export class WorkflowSchedules {
     // V2 performs file admission again on every trigger, before any model call.
     // Saving a schedule freezes field bindings; it does not authorize guessing a
     // missing file or reusing an older preflight's hashes.
-    const input = planned.document.schemaVersion === 2 ? clone(body.input ?? {}) : validateWorkflowInput(body.input, planned);
+    const supplied = withWorkflowInputDefaults(planned.document, body.input);
+    const input = planned.document.schemaVersion === 2 ? clone(supplied === undefined ? {} : supplied) : validateWorkflowInput(supplied, planned);
     if (Buffer.byteLength(JSON.stringify(input), 'utf8') > 64 * 1024) fail('输入不能超过 64KB JSON。', 413);
     if (body.outputDirectory !== undefined && (typeof body.outputDirectory !== 'string' || body.outputDirectory.length > 4000 || body.outputDirectory.includes('\0'))) fail('输出目录格式不正确。');
     const timing = validateScheduleTiming(body.timing);

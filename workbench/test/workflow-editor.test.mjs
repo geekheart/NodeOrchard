@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WorkflowEditor } from '../public/workflow-editor.js';
 import { WorkflowStudioUI } from '../public/workflow-studio-ui.js';
-import { createDocument, createNode, connectNodes, validateDocument, serializeDocument } from '../shared/workflow/workflow-model.mjs';
+import { createDocument, createNode, connectNodes, validateDocument, serializeDocument, updateNode } from '../shared/workflow/workflow-model.mjs';
+import { workflowInputDefault, workflowInputValue } from '../shared/workflow/workflow-inputs.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { planWorkflow } from '../shared/workflow/workflow-plan.mjs';
 
@@ -71,6 +72,41 @@ function editor(doc = documentWith()) {
 }
 
 function titleField(instance) { instance.titleInput = new FakeElement('input'); instance.titleInput.value = instance.doc.title; instance.bindTitleInput(); return instance.titleInput; }
+
+test('fixed input property edits parse JSON values and clearing them removes the legacy fallback', () => {
+  const doc = createDocument({ schemaVersion: 2 }), node = createNode('input', {}, { config: { outputType: 'object', value: '旧版固定输入' } });
+  doc.nodes = [node]; const instance = editor(doc);
+  const field = { name: 'defaultValue', value: '{"query":"AI","limit":20}', type: 'textarea' }, form = { elements: { title: { value: node.title }, defaultValue: field }, querySelectorAll: () => [field] };
+  const patch = instance.readForm(form, node); assert.deepEqual(patch.config.defaultValue, { query: 'AI', limit: 20 }); assert.equal(Object.hasOwn(patch.config, 'value'), false);
+  const updated = updateNode(doc, node.id, patch);
+  field.value = ''; const clearing = instance.readForm(form, updated.nodes[0]), cleared = updateNode(updated, node.id, clearing);
+  assert.equal(cleared.nodes[0].config.defaultValue, ''); assert.equal(cleared.nodes[0].config.value, null);
+  assert.equal(workflowInputDefault(cleared.nodes[0]), undefined);
+  assert.equal(workflowInputValue(cleared, undefined, cleared.nodes[0]), undefined);
+  field.value = '{'; assert.throws(() => instance.readForm(form, node), /默认输入必须是合法的 JSON/);
+});
+
+test('clearing a version-one fixed input remains a valid variable-input configuration', () => {
+  const doc = documentWith(); doc.nodes[0].config.defaultValue = '原来的固定任务';
+  const instance = editor(doc), field = { name: 'defaultValue', value: '  ', type: 'textarea' };
+  const form = { elements: { title: { value: doc.nodes[0].title }, defaultValue: field }, querySelectorAll: () => [field] };
+  const cleared = updateNode(doc, doc.nodes[0].id, instance.readForm(form, doc.nodes[0]));
+  assert.equal(workflowInputDefault(cleared.nodes[0]), undefined);
+  assert.equal(Object.hasOwn(cleared.nodes[0].config, 'value'), false);
+});
+
+test('real input properties show legacy fixed instructions and keep them when applying unrelated edits', t => {
+  globalValue(t, 'document', { createElement: tag => new FakeElement(tag), createElementNS: (_namespace, tag) => new FakeElement(tag), createTextNode: text => ({ textContent: text }) });
+  globalValue(t, 'Option', function (label, value) { this.textContent = label; this.value = value; });
+  const doc = createDocument({ schemaVersion: 2 }); doc.nodes = [createNode('input', {}, { id: 'requirements', config: { outputType: 'text', value: '导出今日 GitHub 热榜到 Excel' } })];
+  const instance = editor(doc); instance.selection = new Set(['requirements']); instance.properties = new FakeElement('aside');
+  WorkflowEditor.prototype.renderProperties.call(instance);
+  const descendants = item => [item, ...(item.children || []).flatMap(descendants)], form = instance.properties.children.find(item => item.className === 'wf-property-form'), fields = descendants(form).filter(item => item.name);
+  const fixed = fields.find(item => item.name === 'defaultValue'); assert.ok(fixed); assert.equal(fixed.value, doc.nodes[0].config.value);
+  form.elements = Object.fromEntries(fields.map(item => [item.name, item])); form.querySelectorAll = () => fields;
+  form.elements.title.value = '已改名的固定任务'; const patch = instance.readForm(form, doc.nodes[0]);
+  assert.equal(patch.title, '已改名的固定任务'); assert.equal(patch.config.defaultValue, doc.nodes[0].config.value); assert.equal(Object.hasOwn(patch.config, 'value'), false);
+});
 
 test('title input survives an asynchronous header render and an immediate add-node click without per-character undo entries', t => {
   globalValue(t, 'document', { activeElement: null });

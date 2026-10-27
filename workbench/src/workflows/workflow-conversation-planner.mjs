@@ -71,7 +71,7 @@ function configCatalog() {
   return NODE_TYPES.map(({ type }) => {
     const defaults = createNode(type).config;
     for (const key of ['document', 'trigger', 'schedule', 'timezone']) delete defaults[key];
-    return { type, defaults, allowedConfigKeys: [...new Set([...Object.keys(defaults), ...extra, ...(type === 'output' ? ['stage'] : [])])] };
+    return { type, defaults, allowedConfigKeys: [...new Set([...Object.keys(defaults), ...extra, ...(type === 'input' ? ['defaultValue'] : []), ...(type === 'output' ? ['stage'] : [])])] };
   });
 }
 
@@ -129,6 +129,7 @@ SYSTEM_RULES:
 - Skill 只能使用 SKILL_CATALOG 中的 ref 和 revision，或当前工作流已有 ref/version。未知/未连接的 Skill 保持空引用并明确提示用户选择；不能编造已学习好、已运行或已验证的结论。
 - input 默认输出 fileRef；文本流程显式设 config.outputType="text"，工具与代码/transform 默认 object；请显式配置需要的类型。output stage=final 或 intermediate。validation rules 每项为 {valuePath:"",check:"required"|"nonempty"|"type"|"equals",expectedType:"text"|"number"|"boolean"|"object"|"array",expected:JSON值,message:"提示"}；只填与 check 有关的字段。
 - config 必须严格使用 CONFIG_CATALOG 对应类型的 allowedConfigKeys，不能自创字段。人工审核 human 的修改目标字段只能叫 reviewTargetNodeId（不是 modificationTargetNodeId/targetNodeId）；值为该审核节点上游生产能力的 ID 或已添加的本批 ref。human 常用配置为 {inputType:"text",outputType:"text",prompt:"请检查清理结果，通过后继续",reviewTargetNodeId:"trim",maxRevisions:3}。文本链中的 human 输入输出均设 text。output 的 inputType 固定 any，不能设置 outputType；用 stage 指定 final/intermediate，用 fileName 指定文件名。文本非空校验用 validation config={inputType:"text",outputType:"text",rules:[{valuePath:"",check:"nonempty"}]}。
+- 固定任务与本次输入分开：用户希望配置一次后直接运行时，把完整且明确的固定需求保存到 input.config.defaultValue（文本任务配 outputType="text"），运行时无临时输入会使用它。不能把固定需求只写入 config.value，也不要为了默认需求添加代码/transform 节点。已有 input.config.value 中的固定需求应保留并迁入 defaultValue，不要求用户重复填写。不要猜测缺失的本次文件或资料，只有真实缺少的资料才追问。
 - 不编造文件路径或已知答案，不把历史运行、验证集样例/输入/输出和审核凭据填进 Skill 或工作流。对于反馈、图片修改和 Skill 优化，说明会交给相应节点的反馈/重做/学习入口，operations=[]，不要用改代码替代正式反馈。对于请求审核通过/要求修改，operations=[]，说明需在绑定到确切运行和版本的审核卡处理。
 - 用户只是讨论、提问、反馈或要求运行时 operations=[]。只有用户明确搭建或更改工作流时才提出编辑操作。保持其余节点和连线不变，避免无关改名、删除或重建。
 FOUNDATION_CATALOG=${JSON.stringify(NODE_TYPES.map(row => ({ type: row.type, label: row.label, description: row.description })))}

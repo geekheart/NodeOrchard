@@ -2,6 +2,57 @@ const KINDS = new Set(['file', 'folder', 'image', 'text', 'number']);
 const KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const FORBIDDEN = new Set(['__proto__', 'constructor', 'prototype']);
 
+// Fixed task instructions belong to the workflow snapshot. A blank form means
+// "use the saved default"; explicit JSON values such as false/0/null remain data.
+export function workflowInputDefault(node) {
+  if (node?.type !== 'input') return undefined;
+  const config = node.config || {};
+  if (Object.hasOwn(config, 'defaultValue')) return typeof config.defaultValue === 'string' && !config.defaultValue.trim() ? undefined : config.defaultValue;
+  if ((!config.sourceKind || config.sourceKind === 'value') && Object.hasOwn(config, 'value') && config.value !== null) return config.value;
+  return undefined;
+}
+
+function withInputDefault(node, value) {
+  const saved = workflowInputDefault(node);
+  const missing = item => item === undefined || typeof item === 'string' && !item.trim();
+  if (missing(value)) return saved === undefined ? value : JSON.parse(JSON.stringify(saved));
+  // A preparation form is a partial object: untouched fields keep the fixed
+  // task values. This is a shallow field merge, never a merge inside user data.
+  const fields = workflowInputFields(node);
+  if (fields.length && value && typeof value === 'object' && !Array.isArray(value) && saved !== undefined) {
+    const defaults = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : fields.length === 1 ? { [fields[0].key]: saved } : {};
+    let result = value;
+    for (const field of fields) {
+      if (missing(value[field.key]) && Object.hasOwn(defaults, field.key)) {
+        if (result === value) result = { ...value };
+        result[field.key] = JSON.parse(JSON.stringify(defaults[field.key]));
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+export function withWorkflowInputDefaults(document, input) {
+  const nodes = document.nodes.filter(item => item.type === 'input');
+  if (nodes.length === 1) {
+    const name = nodes[0].config?.fieldName || nodes[0].id;
+    if (input && typeof input === 'object' && !Array.isArray(input) && Object.hasOwn(input, name)) {
+      const value = withInputDefault(nodes[0], input[name]);
+      return value === input[name] ? input : { ...input, [name]: value };
+    }
+    return withInputDefault(nodes[0], input);
+  }
+  let values = input;
+  for (const node of nodes) {
+    const name = node.config?.fieldName || node.id;
+    const current = input && typeof input === 'object' && !Array.isArray(input) ? input[name] : undefined;
+    const value = withInputDefault(node, current);
+    if (value !== current) values = { ...(values && typeof values === 'object' && !Array.isArray(values) ? values : {}), [name]: value };
+  }
+  return values;
+}
+
 export function workflowInputFields(node) {
   let fields = node.config?.fields;
   if (!fields?.length && ['file', 'folder', 'image'].includes(node.config?.sourceKind)) {
@@ -32,6 +83,6 @@ export function workflowInputFields(node) {
 export function workflowInputValue(document, input, node) {
   const nodes = document.nodes.filter(item => item.type === 'input');
   const name = node.config?.fieldName || node.id;
-  if (input && typeof input === 'object' && !Array.isArray(input) && Object.hasOwn(input, name)) return input[name];
-  return nodes.length === 1 ? input : undefined;
+  if (input && typeof input === 'object' && !Array.isArray(input) && Object.hasOwn(input, name)) return withInputDefault(node, input[name]);
+  return withInputDefault(node, nodes.length === 1 ? input : undefined);
 }

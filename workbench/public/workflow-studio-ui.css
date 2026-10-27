@@ -12,6 +12,7 @@
 .wf-studio-input-row small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 .wf-studio-raw-input { display: block; width: 100%; min-height: 150px; box-sizing: border-box; resize: vertical; padding: 9px; border: 1px solid var(--wf-border-strong); border-radius: 6px; color: var(--wf-text); background: var(--wf-panel-soft); font: inherit; font-size: 12px; line-height: 1.65; }
 .wf-studio-raw-input:focus-visible { outline: 2px solid var(--wf-accent); outline-offset: 2px; }
+.wf-fixed-input-notice { padding: 9px 10px; margin: 0 0 12px; border: 1px solid var(--wf-border); border-radius: 6px; background: var(--wf-panel-soft); color: var(--wf-secondary); font-size: 12px; line-height: 1.65; }
 .wf-studio-input-error,.wf-studio-notice.error { color: var(--wf-danger); font-size: 12px; overflow-wrap: anywhere; }
 .wf-studio-notice { font-size: 12px; line-height: 1.6; }
 .wf-studio-run-surface { position: absolute; inset: 0; overflow: auto; padding: 24px; background: var(--wf-canvas); z-index: 3; }

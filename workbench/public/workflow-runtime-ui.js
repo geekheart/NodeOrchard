@@ -4,6 +4,7 @@ import { WorkflowLearningUI } from './workflow-learning-ui.js';
 import { WorkflowSchedulesUI } from './workflow-schedules-ui.js';
 import { WorkflowFeedbackUI } from './workflow-feedback-ui.js';
 import { STUDIO_STATUS, isV2, inputEntries } from '../shared/workflow/workflow-studio-utils.mjs';
+import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 
 const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
@@ -286,6 +287,11 @@ export class WorkflowRuntimeUI {
 
   parseInput(entry, raw = this.input.value) {
     const type = entry.config.outputType;
+    const saved = workflowInputDefault(entry);
+    if (!raw.trim() && saved !== undefined) {
+      if (type === 'text' && typeof saved !== 'string') throw new Error('固定任务的默认输入需要文本。');
+      raw = type === 'text' ? saved : JSON.stringify(saved);
+    }
     if (entry.config.required && !raw.trim()) throw new Error('请输入本次运行的数据。');
     if (type === 'fileRef' && !isV2(this.currentDocument())) throw new Error('首版暂不接收文件引用。请将 Input 和 Skill 输入类型改为 text，或创建最小流程。');
     if (['fileRef', 'file', 'folder', 'image'].includes(type) && isV2(this.currentDocument())) { try { return JSON.parse(raw); } catch { return raw; } }
@@ -311,7 +317,14 @@ export class WorkflowRuntimeUI {
       this.editor.studio?.syncRawInput();
       if (workflowNeedsHermes(document) && this.getBackend()?.state !== 'ready') throw new Error('此流程包含 Skill，请先连接 Hermes。纯工具 / 代码流程可离线运行。');
       input = this.parseInput(planWorkflow(document).inputNode);
-      if (isV2(document)) { const prepared = await this.editor.studio.preflight({ quiet: true, document, input }); if (!prepared.ok) throw new Error('输入未准备好，请补齐左侧资料后重新运行。'); input = prepared.input; }
+      if (isV2(document)) {
+        const prepared = await this.editor.studio.preflight({ quiet: true, document, input });
+        if (!prepared.ok) {
+          const issues = (prepared.errors || []).filter(issue => issue.message).map(issue => `${issue.label ? issue.label + '：' : ''}${issue.message}`);
+          throw new Error(issues.length ? '运行前还需要处理：' + issues.join('；') : '本次运行资料尚未准备好，请查看输入检查结果。');
+        }
+        input = prepared.input;
+      }
     } catch (error) { this.starting = false; this.updateRunButton(); this.showNotice(error.message, true); return; }
     this.showNotice('正在提交本次流程快照…'); const revision = this.revision;
     try {

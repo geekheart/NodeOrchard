@@ -17,8 +17,13 @@ export const isV2 = document => document?.schemaVersion === 2;
 export function inputEntries(document) { return (document?.nodes || []).filter(node => node.type === 'input').flatMap(node => workflowInputFields(node).map(field => ({ node, field }))); }
 export function structuredInput(document, values) {
   const inputs = (document?.nodes || []).filter(node => node.type === 'input');
-  if (inputs.length === 1) return { ...(values[inputs[0].id] || {}) };
-  return Object.fromEntries(inputs.map(node => [node.config.fieldName || node.id, { ...(values[node.id] || {}) }]));
+  const prepared = inputs.map(node => {
+    const name = node.config.fieldName || node.id;
+    const supplied = Object.hasOwn(values, node.id) ? values[node.id] : {};
+    const value = workflowInputValue(document, { [name]: supplied }, node);
+    return [name, { ...(value && typeof value === 'object' && !Array.isArray(value) ? value : {}) }];
+  });
+  return inputs.length === 1 ? prepared[0][1] : Object.fromEntries(prepared);
 }
 export function valuesFromInput(document, input) {
   const inputs = (document?.nodes || []).filter(node => node.type === 'input');

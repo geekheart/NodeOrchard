@@ -1,6 +1,7 @@
 import { createNode, getPorts, connectNodes, validateDocument, updateNode, NODE_TYPES } from '../shared/workflow/workflow-model.mjs';
 import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutPositions, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
+import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 
 const element = (tag, cls = '', value) => { const item = document.createElement(tag); item.className = cls; if (value !== undefined) item.textContent = String(value); return item; };
 const button = (label, handler, cls = 'wf-button') => { const item = element('button', cls, label); item.type = 'button'; item.addEventListener('click', handler); return item; };
@@ -10,6 +11,10 @@ const INPUT_STORAGE_PREFIX = 'workbench.workflow-inputs.v2:';
 const RAW_INPUT_STORAGE_PREFIX = 'workbench.workflow-raw-input.v2:';
 const pathField = field => ['file', 'folder', 'image'].includes(field.kind);
 const pathName = value => typeof value === 'string' && value ? value.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || value : '尚未选择';
+const rawDefault = doc => {
+  const entry = doc.nodes.find(node => node.type === 'input'), value = entry ? workflowInputDefault(entry) : undefined;
+  return value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+};
 
 export function inlineInputFields(node) {
   const fields = inputEntries({ nodes: [node] }).map(entry => entry.field), paths = fields.filter(pathField);
@@ -143,7 +148,7 @@ export class WorkflowStudioUI {
     this.fileDialog.addEventListener('keydown', event => event.stopPropagation());
     this.setView('edit'); this.setTab('nodes');
   }
-  attachRuntime(runtime) { this.runtime = runtime; if (!inputEntries(this.editor.doc).length && this.rawInputDocumentId === this.editor.doc.id) runtime.input.value = this.rawInputValue || ''; if (this.rawInputControl !== runtime.input) { this.rawInputControl?.removeEventListener?.('input', this.rawInputChanged); this.rawInputControl = runtime.input; this.rawInputChanged = () => { this.invalidatePreflight(); if (!inputEntries(this.editor.doc).length) { this.rawInputValue = runtime.input.value; if (this.rawPreparationInput && document.activeElement !== this.rawPreparationInput) this.rawPreparationInput.value = runtime.input.value; try { localStorage.setItem(RAW_INPUT_STORAGE_PREFIX + this.editor.doc.id, runtime.input.value); } catch { /* The current raw input is still available in memory. */ } } }; runtime.input?.addEventListener?.('input', this.rawInputChanged); } this.syncDocument(); this.renderInputs(); this.renderRuntime(); void this.editor.nodeLibrary?.refresh(); }
+  attachRuntime(runtime) { this.runtime = runtime; if (!inputEntries(this.editor.doc).length && this.rawInputDocumentId === this.editor.doc.id) runtime.input.value = this.rawInputValue || ''; if (this.rawInputControl !== runtime.input) { this.rawInputControl?.removeEventListener?.('input', this.rawInputChanged); this.rawInputControl = runtime.input; this.rawInputChanged = () => { this.invalidatePreflight(); if (!inputEntries(this.editor.doc).length) { this.rawInputValue = runtime.input.value; this.rawInputHasDraft = Boolean(runtime.input.value.trim()); if (this.rawPreparationInput && document.activeElement !== this.rawPreparationInput) this.rawPreparationInput.value = runtime.input.value; try { localStorage.setItem(RAW_INPUT_STORAGE_PREFIX + this.editor.doc.id, runtime.input.value); } catch { /* The current raw input is still available in memory. */ } } }; runtime.input?.addEventListener?.('input', this.rawInputChanged); } this.syncDocument(); this.renderInputs(); this.renderRuntime(); void this.editor.nodeLibrary?.refresh(); }
   api(path, options) { if (!this.runtime) return Promise.reject(new Error('运行服务尚未就绪，请稍后再试。')); return this.runtime.api(path, options); }
   inputDefinitionSignature(doc = this.editor.doc) { return JSON.stringify([doc.id, doc.schemaVersion, doc.nodes.filter(node => node.type === 'input').map(node => [node.id, node.config])]); }
   preflightDocumentSignature(doc = this.editor.doc) { return JSON.stringify([this.inputDefinitionSignature(doc), doc.settings || {}]); }
@@ -194,15 +199,19 @@ export class WorkflowStudioUI {
     if (!isV2(doc)) this.inputs.append(element('p', 'wf-field-help', '旧流程继续使用运行面板的原始输入。升级后可配置文件选择表单。'));
     if (isV2(doc) && !rows.length) {
       const entry = doc.nodes.find(node => node.type === 'input'), type = entry?.config.outputType || 'any';
-      if (this.rawInputDocumentId !== doc.id) { this.rawInputDocumentId = doc.id; this.rawInputValue = ''; try { const saved = localStorage.getItem(RAW_INPUT_STORAGE_PREFIX + doc.id); if (typeof saved === 'string' && saved.length <= 262144) this.rawInputValue = saved; } catch { /* Browser drafts are optional. */ } if (this.runtime?.input) this.runtime.input.value = this.rawInputValue; }
-      const row = element('div', 'wf-studio-input-row'), label = element('label', '', entry?.config.fieldName || '运行输入'), control = element('textarea', 'wf-studio-raw-input'); control.id = 'wf-studio-raw-input'; label.htmlFor = control.id; control.setAttribute('aria-label', '本次运行输入'); control.rows = 8; control.spellcheck = false; control.value = this.runtime?.input?.value ?? this.rawInputValue ?? ''; control.placeholder = type === 'text' ? '填写本次要处理的文本' : ['object', 'array', 'number', 'boolean'].includes(type) ? '填写符合入口类型的 JSON' : '填写文本、JSON 或文件路径'; control.disabled = Boolean(this.editor.nodeLibrary?.nested); this.rawPreparationInput = control;
-      control.addEventListener('input', () => { this.rawInputValue = control.value; this.invalidatePreflight(); if (this.runtime?.input) { this.runtime.input.value = control.value; this.runtime.input.dispatchEvent?.(new Event('input', { bubbles: true })); } try { localStorage.setItem(RAW_INPUT_STORAGE_PREFIX + doc.id, control.value); } catch { /* Keep the value in memory when browser storage is unavailable. */ } });
+      const fixed = rawDefault(doc);
+      if (this.rawInputDocumentId !== doc.id) { this.rawInputDocumentId = doc.id; this.rawInputValue = fixed; this.rawInputHasDraft = false; try { const saved = localStorage.getItem(RAW_INPUT_STORAGE_PREFIX + doc.id); if (typeof saved === 'string' && saved.trim() && saved.length <= 262144) { this.rawInputValue = saved; this.rawInputHasDraft = true; } } catch { /* Browser drafts are optional. */ } if (this.runtime?.input) this.runtime.input.value = this.rawInputValue; }
+      else if (this.rawInputHasDraft === false) { this.rawInputValue = fixed; if (this.runtime?.input) this.runtime.input.value = fixed; }
+      const row = element('div', 'wf-studio-input-row'), label = element('label', '', fixed ? '本次覆盖输入（可选）' : entry?.config.fieldName || '运行输入'), control = element('textarea', 'wf-studio-raw-input'); control.id = 'wf-studio-raw-input'; label.htmlFor = control.id; control.setAttribute('aria-label', '本次运行输入'); control.rows = 8; control.spellcheck = false; control.value = this.runtime?.input?.value ?? this.rawInputValue ?? ''; control.placeholder = fixed ? '留空使用固定任务说明 / 默认输入' : type === 'text' ? '填写本次要处理的文本' : ['object', 'array', 'number', 'boolean'].includes(type) ? '填写符合入口类型的 JSON' : '填写文本、JSON 或文件路径'; control.disabled = Boolean(this.editor.nodeLibrary?.nested); this.rawPreparationInput = control;
+      control.addEventListener('input', () => { this.rawInputValue = control.value; this.rawInputHasDraft = Boolean(control.value.trim()); this.invalidatePreflight(); if (this.runtime?.input) { this.runtime.input.value = control.value; this.runtime.input.dispatchEvent?.(new Event('input', { bubbles: true })); } try { localStorage.setItem(RAW_INPUT_STORAGE_PREFIX + doc.id, control.value); } catch { /* Keep the value in memory when browser storage is unavailable. */ } });
+      if (fixed) this.inputs.append(element('p', 'wf-fixed-input-notice', '已配置固定任务说明 / 默认输入，可直接运行；需要本次调整时再编辑下方内容。'));
       const formats = { text: '文本', object: 'JSON 对象', array: 'JSON 数组', number: 'JSON 数字', boolean: 'true / false', any: '文本或 JSON' }; row.append(label, control, element('small', 'wf-field-help', `输入格式：${formats[type] || type}，跟随输入节点类型${entry?.config.required ? ' · 必填' : ''}。`)); this.inputs.append(row);
       this.inputs.append(element('p', 'wf-field-help', '也可在输入节点属性中添加文件、图片或参数字段，生成资料准备表单。'));
     } else this.rawPreparationInput = null;
+    const preparedValues = rows.length ? valuesFromInput(doc, structuredInput(doc, this.values || {})) : {};
     for (const { node, field } of rows) {
       const row = element('div', 'wf-studio-input-row'); const label = element('label', '', `${field.label}${field.required ? ' *' : ''}`); const id = `studio-input-${node.id}-${field.key}`; label.htmlFor = id;
-      const control = element('input'); control.id = id; control.dataset.nodeId = node.id; control.dataset.inputKey = field.key; control.type = field.kind === 'number' ? 'number' : 'text'; control.value = this.values[node.id]?.[field.key] ?? ''; control.placeholder = ['file', 'folder', 'image'].includes(field.kind) ? '选择本机文件或文件夹' : field.label;
+      const control = element('input'); control.id = id; control.dataset.nodeId = node.id; control.dataset.inputKey = field.key; control.type = field.kind === 'number' ? 'number' : 'text'; control.value = preparedValues[node.id]?.[field.key] ?? ''; control.placeholder = ['file', 'folder', 'image'].includes(field.kind) ? '选择本机文件或文件夹' : field.label;
       control.addEventListener('input', () => { this.values[node.id] ||= {}; this.values[node.id][field.key] = field.kind === 'number' && control.value !== '' ? Number(control.value) : control.value; this.invalidatePreflight(); this.syncRawInput(); this.renderGraph(); });
       const controls = element('div', 'wf-studio-input-control'); controls.append(control);
       if (['file', 'folder', 'image'].includes(field.kind)) controls.append(button('选择', () => void this.pickPath(field, control.value, path => { control.value = path; control.dispatchEvent(new Event('input', { bubbles: true })); })));
@@ -235,7 +244,7 @@ export class WorkflowStudioUI {
   }
   syncRawInput() { if (inputEntries(this.editor.doc).length) { if (this.runtime) this.runtime.input.value = JSON.stringify(structuredInput(this.editor.doc, this.values), null, 2); try { localStorage.setItem(INPUT_STORAGE_PREFIX + this.editor.doc.id, JSON.stringify(this.values)); } catch { /* Input values remain usable in memory when browser storage is unavailable. */ } } }
   flushRunSettings() { if (!isV2(this.editor.doc)) return; const current = this.editor.doc.settings, outputDirectory = this.outputDirectoryInput?.isConnected ? this.outputDirectoryInput.value.trim() : current.outputDirectory || '', maxConcurrency = this.concurrencyInput?.isConnected ? Number(this.concurrencyInput.value) : current.maxConcurrency; if (outputDirectory !== current.outputDirectory || maxConcurrency !== current.maxConcurrency) { this.invalidatePreflight(); this.editor.commit({ ...this.editor.doc, settings: { ...current, outputDirectory, maxConcurrency } }, '设置运行目录与并行上限'); } }
-  restoreInput(input) { this.invalidatePreflight(); this.values = valuesFromInput(this.editor.doc, input); if (!inputEntries(this.editor.doc).length) { this.rawInputDocumentId = this.editor.doc.id; this.rawInputValue = typeof input === 'string' ? input : JSON.stringify(input, null, 2); if (this.runtime?.input) this.runtime.input.value = this.rawInputValue; } this.renderInputs(); this.syncRawInput(); }
+  restoreInput(input) { this.invalidatePreflight(); this.values = valuesFromInput(this.editor.doc, input); if (!inputEntries(this.editor.doc).length) { this.rawInputDocumentId = this.editor.doc.id; this.rawInputValue = typeof input === 'string' ? input : JSON.stringify(input, null, 2); this.rawInputHasDraft = Boolean(this.rawInputValue?.trim()); if (this.runtime?.input) this.runtime.input.value = this.rawInputValue; } this.renderInputs(); this.syncRawInput(); }
   async preflight({ quiet = false, document = this.editor.doc, input } = {}) {
     if (this.editor.nodeLibrary?.nested && document === this.editor.doc) { if (!quiet) this.editor.toast('请先应用或取消子流程内部修改，再检查主流程输入。', true); return { ok: false, errors: [{ message: '子流程内部编辑尚未结束。' }] }; }
     if (document === this.editor.doc) { this.flushRunSettings(); document = this.editor.doc; }
@@ -276,6 +285,7 @@ export class WorkflowStudioUI {
     dialog.append(heading, location, nav, list, notice, choose); if (!dialog.open) dialog.showModal(); await load(current);
   }
   renderGraph() {
+    const preparedValues = valuesFromInput(this.editor.doc, structuredInput(this.editor.doc, this.values || {}));
     for (const node of this.editor.doc.nodes) { const card = this.editor.nodeElements.get(node.id); if (!card) continue;
       if (card.contains(document.activeElement) && document.activeElement?.classList.contains('wf-studio-node-input')) continue;
       const ports = getPorts(node), palette = { text: '#fbbf24', number: '#fbbf24', boolean: '#fb7185', object: '#a78bfa', array: '#34d399', fileRef: '#22d3ee', folderRef: '#22d3ee', image: '#34d399', artifactRef: '#22d3ee', artifactBundle: '#22d3ee' };
@@ -284,7 +294,7 @@ export class WorkflowStudioUI {
       if (node.type === 'input') {
         const { visible, total, remaining } = inlineInputFields(node);
         for (const field of visible) {
-          const value = this.values[node.id]?.[field.key], isPath = pathField(field);
+          const value = preparedValues[node.id]?.[field.key], isPath = pathField(field);
           const label = element('label', 'wf-studio-node-field'), caption = element('span', value === undefined || value === '' ? 'is-missing' : '', `${field.label}${field.required ? ' *' : ''}`);
           label.append(caption);
           const filename = isPath ? element('span', 'wf-studio-node-path-name', pathName(value)) : null;

@@ -78,6 +78,7 @@ function removePrivatePaths(node) {
   const config = node.config;
   if (absolutePath(config.path)) config.path = '';
   if (node.type === 'input' && absolutePath(config.value)) config.value = null;
+  if (node.type === 'input' && absolutePath(config.defaultValue)) config.defaultValue = null;
   if (node.type === 'output' && absolutePath(config.fileName)) config.fileName = '';
   if (config.document) {
     if (config.document.settings) config.document.settings.outputDirectory = '';

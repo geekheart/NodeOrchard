@@ -5,6 +5,7 @@ import { constants } from 'node:fs';
 import { join, isAbsolute, relative, dirname } from 'node:path';
 import { planWorkflow, requiresImageReview, assertImageReviewPaths } from '../../shared/workflow/workflow-plan.mjs';
 import { getPorts } from '../../shared/workflow/workflow-model.mjs';
+import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
 import { WORKFLOW_TOOLS } from '../../shared/workflow/workflow-tools.mjs';
 import { validateNodeValue } from '../../shared/workflow/workflow-validation.mjs';
 import { redact } from '../hermes-adapter.mjs';
@@ -84,6 +85,7 @@ export function dagPath(value, path = '') {
 }
 
 export function validateDAGInput(input, plan) {
+  input = withWorkflowInputDefaults(plan.document, input);
   const value = json(input === undefined ? null : input);
   for (const node of plan.inputNodes) {
     const key = node.config.fieldName || node.id;

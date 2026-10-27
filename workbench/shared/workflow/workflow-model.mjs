@@ -130,16 +130,39 @@ function nodeType(type) {
   return type;
 }
 
+function inputDefault(value) {
+  const seen = new Set();
+  function visit(item, depth = 0) {
+    if (depth > 50) fail('默认输入嵌套过深。');
+    if (item === null || ['string', 'boolean'].includes(typeof item) || typeof item === 'number' && Number.isFinite(item)) return;
+    if (!item || typeof item !== 'object' || ![Object.prototype, Array.prototype, null].includes(Object.getPrototypeOf(item)) || seen.has(item)
+      || Object.getOwnPropertySymbols(item).length) fail('默认输入必须是有效 JSON 数据。');
+    seen.add(item);
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(item))) {
+      if (Array.isArray(item) && key === 'length') continue;
+      if (!Object.hasOwn(descriptor, 'value')) fail('默认输入不能包含访问器。');
+      visit(descriptor.value, depth + 1);
+    }
+    seen.delete(item);
+  }
+  visit(value);
+  const encoded = JSON.stringify(value);
+  if (new TextEncoder().encode(encoded).length > 65536) fail('默认输入不能超过 64KB JSON。');
+  return JSON.parse(encoded);
+}
+
 function configFor(type, input = {}, v2 = true) {
   const defaults = DEFAULTS[nodeType(type)];
-  object(input, '节点配置', [...Object.keys(defaults), ...(v2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])]);
+  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])]);
   const result = { ...defaults };
   if (type === 'validation') result.rules = validationRules(defaults.rules);
   if (type === 'improvement') result.targetSkillNodeIds = [...defaults.targetSkillNodeIds];
   // Older drafts used the presence of toolName to distinguish tools from code.
   if (type === 'tool' && !has(input, 'executionMode')) result.executionMode = typeof input.toolName === 'string' && input.toolName.trim() ? 'tool' : 'code';
   for (const [key, value] of Object.entries(input)) {
-    if (type === 'validation' && key === 'rules') {
+    if (type === 'input' && key === 'defaultValue') {
+      result.defaultValue = inputDefault(value);
+    } else if (type === 'validation' && key === 'rules') {
       result.rules = validationRules(value);
     } else if (v2 && type === 'output' && key === 'stage') {
       if (!['final', 'intermediate'].includes(value)) fail('产物用途仅支持 final 或 intermediate。'); result.stage = value;
@@ -364,7 +387,7 @@ export function updateNode(doc, id, patch) {
   if (!existing) fail('要更新的节点不存在。');
   const next = { ...existing, ...patch };
   if (has(patch, 'config')) {
-    object(patch.config, '节点配置', [...Object.keys(DEFAULTS[existing.type]), ...(clean.schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(existing.type === 'output' ? ['stage'] : [])] : [])]);
+    object(patch.config, '节点配置', [...Object.keys(DEFAULTS[existing.type]), ...(existing.type === 'input' ? ['defaultValue'] : []), ...(clean.schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(existing.type === 'output' ? ['stage'] : [])] : [])]);
     next.config = { ...existing.config, ...patch.config };
   }
   // Validate every retained edge against the proposed port types before returning anything.

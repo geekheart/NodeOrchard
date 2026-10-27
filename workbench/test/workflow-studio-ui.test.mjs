@@ -146,7 +146,7 @@ test('v2 manual execution never submits a run if actual file preflight fails', a
   document = connectNodes(document, { sourceNode: 'input-0', sourcePort: 'out', targetNode: 'code', targetPort: 'in' }); document = connectNodes(document, { sourceNode: 'code', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
   let submitted = 0, checks = 0; const runtime = Object.create(WorkflowRuntimeUI.prototype);
   Object.assign(runtime, { editor: { doc: document, prepareRun: () => document, studio: { syncRawInput() {}, preflight: async () => { checks++; return { ok: false, errors: [{ code: 'missing', message: '工程未准备好' }] }; } } }, input: { value: JSON.stringify({ path: '/missing.epro2', count: 0 }) }, skillPending: new Set(), setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, activeRun: () => null, showNotice(message) { this.noticeText = message; }, getBackend: () => ({ state: 'offline' }), api: async () => { submitted++; } });
-  await runtime.start(); assert.equal(checks, 1); assert.equal(submitted, 0); assert.match(runtime.noticeText, /输入未准备好/); assert.equal(runtime.starting, false);
+  await runtime.start(); assert.equal(checks, 1); assert.equal(submitted, 0); assert.match(runtime.noticeText, /工程未准备好/); assert.equal(runtime.starting, false);
 });
 
 test('v2 manual execution posts the preflight-normalized input exactly once', async () => {
@@ -494,6 +494,41 @@ test('delegated subflow waits open the actual child review and never approve the
 
 test('entering run view closes an otherwise empty inspector until the user selects a node', () => {
   const studio = Object.create(WorkflowStudioUI.prototype); studio.view = 'edit'; studio.viewSwitch = { children: [new FakeElement('button'), new FakeElement('button')] }; studio.editor = { root: { dataset: {} }, settings: { propertiesClosed: false }, applySettings() {} }; studio.runSurface = {}; studio.setTab = () => {}; studio.renderRuntime = () => {}; studio.setView('run'); assert.equal(studio.editor.settings.propertiesClosed, true); assert.equal(studio.runSurface.hidden, false);
+});
+
+test('fixed raw inputs ignore empty browser drafts, preserve explicit overrides and stay isolated between workflows', t => {
+  const { studio, descendants } = preflightFixture(t), previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), saved = new Map();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) } });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else delete globalThis.localStorage; });
+  const create = (id, value) => ({ ...createDocument({ schemaVersion: 2 }), id, nodes: [createNode('input', {}, { id: 'requirements', config: { outputType: 'text', defaultValue: value } })] });
+  const first = create('fixed-first', '固定任务 A'), second = create('fixed-second', '固定任务 B'); saved.set('workbench.workflow-raw-input.v2:' + first.id, '  ');
+  studio.editor.doc = first; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, '固定任务 A'); assert.equal(studio.runtime.input.value, '固定任务 A');
+  assert.ok(descendants(studio.inputs).some(item => /已配置固定任务说明/.test(item.textContent || '')));
+  studio.rawPreparationInput.value = '本次覆盖'; studio.rawPreparationInput.listeners.input(); studio.renderInputs(); assert.equal(studio.rawPreparationInput.value, '本次覆盖');
+  first.nodes[0].config.defaultValue = '修改后的固定任务 A'; studio.renderInputs(); assert.equal(studio.rawPreparationInput.value, '本次覆盖');
+  studio.editor.doc = second; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, '固定任务 B');
+  studio.editor.doc = first; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, '本次覆盖');
+  studio.rawPreparationInput.value = ''; studio.rawPreparationInput.listeners.input(); studio.renderInputs(); assert.equal(studio.rawPreparationInput.value, '修改后的固定任务 A');
+});
+
+test('JSON and falsey fixed defaults appear as valid raw input rather than being dropped', t => {
+  const { studio } = preflightFixture(t);
+  for (const [outputType, value, expected] of [['object', { query: 'AI', limit: 20 }, '{\n  "query": "AI",\n  "limit": 20\n}'], ['boolean', false, 'false'], ['number', 0, '0']]) {
+    const doc = createDocument({ schemaVersion: 2 }); doc.nodes = [createNode('input', {}, { config: { outputType, defaultValue: value } })]; studio.editor.doc = doc; studio.syncDocument(); assert.equal(studio.rawPreparationInput.value, expected); assert.equal(studio.runtime.input.value, expected);
+  }
+});
+
+test('structured preparation displays per-entry defaults and keeps explicit user overrides', t => {
+  const { studio, descendants } = preflightFixture(t), doc = createDocument({ schemaVersion: 2 });
+  doc.nodes = ['first', 'second'].map((id, index) => createNode('input', {}, { id, config: { outputType: 'object', fieldName: id,
+    defaultValue: { query: index ? 'tools' : 'AI', limit: 20 }, fields: [{ key: 'query', label: '检索条件', kind: 'text' }, { key: 'limit', label: '数量', kind: 'number' }] } }));
+  studio.editor.doc = doc; studio.syncDocument();
+  const field = (nodeId, key) => descendants(studio.inputs).find(item => item.dataset?.nodeId === nodeId && item.dataset?.inputKey === key);
+  assert.equal(field('first', 'query').value, 'AI'); assert.equal(field('second', 'query').value, 'tools');
+  studio.values.first = { query: 'my query', limit: 0 }; studio.renderInputs();
+  assert.equal(field('first', 'query').value, 'my query'); assert.equal(field('first', 'limit').value, 0);
+  doc.nodes[0].config.defaultValue.query = 'changed default'; doc.nodes[1].config.defaultValue.query = 'updated tools'; studio.renderInputs();
+  assert.equal(field('first', 'query').value, 'my query'); assert.equal(field('second', 'query').value, 'updated tools');
 });
 
 test('preflight, save and run snapshots flush the latest unblurred output-root control', async () => {

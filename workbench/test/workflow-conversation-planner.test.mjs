@@ -115,3 +115,26 @@ test('unavailable, cancelled and failed model calls leave document unchanged and
   const failed = fixture(async () => { throw Error('连接中断'); });
   await assert.rejects(planWorkflowConversation(failed.app, { text: '你好', document: doc }), /连接中断/); assert.equal(failed.calls.length, 1); assert.deepEqual(doc, before);
 });
+
+test('fixed-task planning uses a supported default input rather than a code workaround or a repeated run prompt', async () => {
+  const { app, calls } = fixture({ text: '将热榜要求保存为固定任务。', operations: [
+    { op: 'add-node', ref: 'input', type: 'input', config: { outputType: 'text', defaultValue: '获取今日 GitHub 热榜并导出 Excel' } },
+  ] });
+  const result = await planWorkflowConversation(app, { text: '设为固定任务，每次运行不用我输入', document: document() });
+  assert.equal(result.operations[0].config.defaultValue, '获取今日 GitHub 热榜并导出 Excel');
+  assert.match(calls[0].prompt, /input\.config\.defaultValue/); assert.match(calls[0].prompt, /不要.*添加代码\/transform/);
+  const catalog = JSON.parse(calls[0].prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
+  assert.ok(catalog.find(row => row.type === 'input').allowedConfigKeys.includes('defaultValue'));
+});
+
+test('a fixed-task proposal can update the default of an existing input through the same editor commands', async () => {
+  const doc = document();
+  doc.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'existing-input', config: { outputType: 'text' } })];
+  const before = structuredClone(doc);
+  const { app } = fixture({ text: '保存固定任务需求。', operations: [
+    { op: 'update-node', nodeId: 'existing-input', config: { defaultValue: '获取今日热榜，无需重复输入' } },
+  ] });
+  const result = await planWorkflowConversation(app, { text: '把已有任务改为一键运行', document: doc });
+  assert.equal(result.operations[0].config.defaultValue, '获取今日热榜，无需重复输入');
+  assert.deepEqual(doc, before);
+});

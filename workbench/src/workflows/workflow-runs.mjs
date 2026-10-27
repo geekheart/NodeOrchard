@@ -5,6 +5,7 @@ import { prepareSkillRun } from './workflow-skill.mjs';
 import { executeOperation, validateOperationNode } from './workflow-operations.mjs';
 import { redact } from '../hermes-adapter.mjs';
 import { WorkflowDAGRuns, validateDAGInput } from './workflow-dag-runs.mjs';
+import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
 
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const REVISION = /^sha256:[a-f0-9]{64}$/;
@@ -60,6 +61,7 @@ function transferValue(value, type, optional = false) {
 
 export function validateWorkflowInput(input, planned) {
   if (planned.document?.schemaVersion === 2) return validateDAGInput(input, planned);
+  input = withWorkflowInputDefaults(planned.document, input);
   const missing = input === undefined || input === null;
   if (planned.inputNode.config.required && (missing || (typeof input === 'string' && !input.trim()))) {
     throw failure('请提供工作流所需的输入。');
