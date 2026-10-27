@@ -6,7 +6,8 @@ import {
 } from '../shared/workflow/workflow-model.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { builtinNodePresets, instantiatePreset } from '../shared/workflow/workflow-presets.mjs';
-import { learningSnapshotChanged, mainChainSkillNodes } from './workflow-learning-ui.js';
+import { mainChainSkillNodes, mainChainToolNodes } from './workflow-learning-ui.js';
+import { mergeLearningCandidate } from '../shared/workflow/workflow-learning-scope.mjs';
 import { WorkflowStudioUI } from './workflow-studio-ui.js';
 import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
 import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
@@ -25,7 +26,7 @@ const DATA_TYPES = ['fileRef', 'text', 'number', 'boolean', 'object', 'array', '
 const COPY = {
   input: '输入 / 触发', validation: '校验', skill: 'AI / Skill', tool: '工具 / 代码', subflow: '子流程',
   transform: '数据整理', condition: '条件判断', foreach: '逐项处理', loop: '条件循环',
-  human: '人工审核 / 补充', merge: '汇总', output: '产物输出', evaluation: '产物对比', improvement: 'Skill 改进',
+  human: '人工审核 / 补充', merge: '汇总', output: '产物输出', evaluation: '产物对比', improvement: '学习改进',
 };
 function svgElement(tag, attrs = {}) { const node = document.createElementNS(NS, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value); return node; }
 function el(tag, className = '', text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
@@ -277,7 +278,7 @@ export class WorkflowEditor {
     this.root.querySelector('[data-action="redo"]').disabled = !this.future.length;
     for (const button of this.root.querySelectorAll('[data-mode]')) { button.setAttribute('aria-pressed', String(button.dataset.mode === this.doc.mode)); }
     this.root.querySelector('.wf-count').textContent = `${this.doc.nodes.length} 个节点 · ${this.doc.edges.length} 条连线`;
-    this.root.querySelector('.wf-stage-label').textContent = this.doc.mode === 'learn' ? '学习模式 · 根据对比结果或反馈改进 Skill' : this.doc.schemaVersion === 2 ? `执行模式 · 按依赖并行 · 最多 ${this.doc.settings?.maxConcurrency || 4} 项` : '执行模式 · 按连线串行执行';
+    this.root.querySelector('.wf-stage-label').textContent = this.doc.mode === 'learn' ? '学习模式 · 按指定范围改进' : this.doc.schemaVersion === 2 ? `执行模式 · 按依赖并行 · 最多 ${this.doc.settings?.maxConcurrency || 4} 项` : '执行模式 · 按连线串行执行';
     this.studio?.syncDocument();
     this.runtime?.updateRunButton();
     this.applyLibraryReadOnly();
@@ -428,7 +429,7 @@ export class WorkflowEditor {
     if (node.type === 'human') return c.prompt ? c.prompt.length > 72 ? c.prompt.slice(0, 72) + '…' : c.prompt : '审核产物 · 通过 / 修改 / 停止';
     if (node.type === 'output') return `${c.stage === 'intermediate' ? '阶段产物' : '最终交付'} · ${c.fileName || '返回结果 / 成果引用'}`;
     if (node.type === 'evaluation') return `${c.comparison === 'model' ? 'AI 评价' : '精确对比'} · ${c.valuePath || '完整连线产物'}`;
-    if (node.type === 'improvement') return c.targetSkillNodeIds.length ? `仅改进 ${c.targetSkillNodeIds.length} 个 Skill` : '明确选择要改进的 Skill';
+    if (node.type === 'improvement') return c.scope === 'workflow' ? '改进整个业务流程' : c.scope === 'tools' ? c.targetNodeIds?.length ? `仅改进 ${c.targetNodeIds.length} 个工具或代码节点` : '明确选择工具或代码节点' : c.targetSkillNodeIds.length ? `仅改进 ${c.targetSkillNodeIds.length} 个 Skill` : '明确选择要改进的 Skill';
     if (node.type === 'merge') return '等待各分支完成 · 汇总具名输入';
     return `${c.language} · 字段映射与格式整理`;
   }
@@ -724,20 +725,25 @@ export class WorkflowEditor {
   }
 
   renderImprovementFields(form, config) {
-    this.field(form, '改进范围', 'scope', 'skills', { options: [['skills', '明确选择的 Skill 正文']], disabled: true });
-    const section = el('section', 'wf-property-section'); section.append(el('h3', '', '选择主链 Skill'));
-    const selected = new Set(config.targetSkillNodeIds || []), skills = mainChainSkillNodes(this.doc);
-    for (const skill of skills) {
-      const row = el('div', 'wf-field'), label = el('label'), input = el('input');
-      input.type = 'checkbox'; input.name = 'targetSkillNodeIds'; input.value = skill.id; input.id = `wf-target-${skill.id}`; input.checked = selected.has(skill.id);
-      label.htmlFor = input.id;
-      const metadata = this.runtime?.skills?.skills?.find(item => item.name === skill.config.skillRef);
-      label.textContent = `${skill.title}${metadata?.displayName ? ` · ${metadata.displayName}` : ''}`;
-      row.append(label, input); section.append(row);
-    }
-    if (!skills.length) section.append(el('p', 'wf-field-help', '暂无可改进的主链 Skill'));
-    if ([...selected].some(id => !skills.some(skill => skill.id === id))) section.append(el('p', 'wf-field-feedback error', '已有目标不在当前主链，应用属性时会移除，请重新检查选择。'));
-    form.append(section);
+    const scope = this.field(form, '改进范围', 'scope', config.scope || 'skills', { options: [['skills', '指定 Skill 正文'], ['tools', '指定工具与代码'], ['workflow', '整个业务工作流']] });
+    const section = el('section', 'wf-property-section'), selections = { skills: new Set(config.targetSkillNodeIds || []), tools: new Set(config.targetNodeIds || []) }; let displayed;
+    const render = () => {
+      if (selections[displayed]) selections[displayed] = new Set([...section.querySelectorAll('input')].filter(input => input.checked).map(input => input.value));
+      displayed = scope.value; section.replaceChildren();
+      if (displayed === 'workflow') { section.append(el('p', 'wf-field-help', '可调整业务节点与连线；输入输出、评分和现有审核边界固定。')); return; }
+      const nodes = displayed === 'tools' ? mainChainToolNodes(this.doc) : mainChainSkillNodes(this.doc), selected = selections[displayed];
+      section.append(el('h3', '', displayed === 'tools' ? '选择主链工具与代码' : '选择主链 Skill'));
+      for (const node of nodes) {
+        const row = el('div', 'wf-field'), label = el('label'), input = el('input');
+        input.type = 'checkbox'; input.name = displayed === 'tools' ? 'targetNodeIds' : 'targetSkillNodeIds'; input.value = node.id; input.id = `wf-target-${node.id}`; input.checked = selected.has(node.id); label.htmlFor = input.id;
+        const metadata = node.type === 'skill' && this.runtime?.skills?.skills?.find(item => item.name === node.config.skillRef);
+        label.textContent = `${node.title}${metadata?.displayName ? ` · ${metadata.displayName}` : ''}`;
+        row.append(label, input); section.append(row);
+      }
+      if (!nodes.length) section.append(el('p', 'wf-field-help', displayed === 'tools' ? '暂无可改进的主链工具或代码节点' : '暂无可改进的主链 Skill'));
+      if ([...selected].some(id => !nodes.some(node => node.id === id))) section.append(el('p', 'wf-field-feedback error', '已有目标不在当前主链，应用属性时会移除，请重新检查选择。'));
+    };
+    scope.addEventListener('change', render); render(); form.append(section);
   }
 
   field(parent, label, name, value, options = {}) {
@@ -752,7 +758,7 @@ export class WorkflowEditor {
   readForm(form, node) {
     const config = clone(node.config);
     for (const input of form.querySelectorAll('input[name], select[name], textarea[name]')) {
-      if (input.name === 'title' || input.name === 'targetSkillNodeIds' || input.name === 'validationRules' || input.name === 'defaultValue' || input.disabled) continue;
+      if (input.name === 'title' || input.name === 'targetSkillNodeIds' || input.name === 'targetNodeIds' || input.name === 'validationRules' || input.name === 'defaultValue' || input.disabled) continue;
       config[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
     }
     if (node.type === 'input' && form.elements.defaultValue) {
@@ -768,7 +774,11 @@ export class WorkflowEditor {
         if (this.doc?.schemaVersion === 2 || Object.hasOwn(node.config, 'value')) config.value = null;
       }
     }
-    if (node.type === 'improvement') config.targetSkillNodeIds = [...form.querySelectorAll('input[name="targetSkillNodeIds"]')].filter(input => input.checked).map(input => input.value);
+    if (node.type === 'improvement') {
+      config.targetSkillNodeIds = config.scope === 'skills' ? [...form.querySelectorAll('input[name="targetSkillNodeIds"]')].filter(input => input.checked).map(input => input.value) : [];
+      if (config.scope === 'tools') config.targetNodeIds = [...form.querySelectorAll('input[name="targetNodeIds"]')].filter(input => input.checked).map(input => input.value);
+      else delete config.targetNodeIds;
+    }
     if (node.type === 'validation') { if (this.nodeLibrary?.validationBuilderErrors?.has(node.id)) throw new Error(this.nodeLibrary.validationBuilderErrors.get(node.id)); try { config.rules = JSON.parse(form.elements.validationRules.value); } catch { throw new Error('校验规则必须是合法的 JSON 数组。'); } if (!Array.isArray(config.rules)) throw new Error('校验规则必须是数组。'); }
     if (node.type === 'tool' && config.executionMode === 'tool') {
       const tool = WORKFLOW_TOOLS.find(item => item.id === config.toolName);
@@ -868,7 +878,7 @@ export class WorkflowEditor {
       const ids = new Map(), nodes = this.clipboard.nodes.map(node => { const copy = createNode(node.type, this.snapPosition({ x: node.x + 32, y: node.y + 32 }), { title: node.title, config: node.config, ...(node.ports ? { ports: node.ports } : {}), ...(node.origin ? { origin: node.origin } : {}) }); ids.set(node.id, copy.id); return copy; });
       let next = { ...this.doc, nodes: [...this.doc.nodes, ...nodes] };
       for (const edge of this.clipboard.edges) next = connectNodes(next, { sourceNode: ids.get(edge.sourceNode), sourcePort: edge.sourcePort, targetNode: ids.get(edge.targetNode), targetPort: edge.targetPort });
-      const copiedIds = new Set(ids.values()), externalSkills = new Set(mainChainSkillNodes(this.doc).map(node => node.id)); let cleared = 0;
+      const copiedIds = new Set(ids.values()), externalSkills = new Set(mainChainSkillNodes(this.doc).map(node => node.id)), externalTools = new Set(mainChainToolNodes(this.doc).map(node => node.id)); let cleared = 0;
       next.nodes = next.nodes.map(node => {
         if (!copiedIds.has(node.id)) return node;
         if (node.type === 'human' && node.config.reviewTargetNodeId) {
@@ -877,8 +887,11 @@ export class WorkflowEditor {
           return { ...node, config: { ...node.config, reviewTargetNodeId: mapped || (legalExternal ? target : '') } };
         }
         if (node.type === 'improvement') {
-          const targets = node.config.targetSkillNodeIds || [], mapped = targets.flatMap(id => ids.has(id) ? [ids.get(id)] : externalSkills.has(id) ? [id] : []); cleared += targets.length - mapped.length;
-          return { ...node, config: { ...node.config, targetSkillNodeIds: mapped } };
+          const config = { ...node.config };
+          for (const [key, allowed] of [['targetSkillNodeIds', externalSkills], ['targetNodeIds', externalTools]]) if (Object.hasOwn(config, key)) {
+            const targets = config[key], mapped = targets.flatMap(id => ids.has(id) ? [ids.get(id)] : allowed.has(id) ? [id] : []); cleared += targets.length - mapped.length; config[key] = mapped;
+          }
+          return { ...node, config };
         }
         return node;
       });
@@ -1177,19 +1190,11 @@ export class WorkflowEditor {
     if (this.propertyDrafts.size) { this.commit(next, `应用${operation}配置`); this.propertyDrafts.clear(); this.renderProperties(); this.renderHeader(); }
     return clone(validateDocument(this.doc));
   }
-  applyLearningDocument(document, { baseDocument, trainableNodeIds } = {}) {
+  applyLearningDocument(document, { baseDocument, trainableNodeIds, scope = 'skills' } = {}) {
     if (this.libraryReadOnly) throw new Error('此工作流为只读，不能应用学习候选。');
     this.cancelGesture(); this.cancelConnection();
-    if (this.propertyDrafts.size || learningSnapshotChanged(baseDocument, this.doc)) throw new Error('草稿已变化，请先恢复对应学习快照。');
-    const candidate = validateDocument(document);
-    if (candidate.id !== this.doc.id || candidate.mode !== 'execute' || !Array.isArray(trainableNodeIds) || !trainableNodeIds.length) throw new Error('候选流程与当前学习任务不匹配。');
-    const ids = new Set(trainableNodeIds), replacements = new Map();
-    for (const id of ids) {
-      const current = this.doc.nodes.find(node => node.id === id), proposed = candidate.nodes.find(node => node.id === id);
-      if (current?.type !== 'skill' || proposed?.type !== 'skill' || !proposed.config.skillRef.trim() || !/^sha256:[a-f0-9]{64}$/.test(proposed.config.version)) throw new Error('候选缺少可应用的 Skill 引用或内容指纹。');
-      replacements.set(id, { skillRef: proposed.config.skillRef, version: proposed.config.version });
-    }
-    const next = { ...this.doc, mode: 'execute', nodes: this.doc.nodes.map(node => replacements.has(node.id) ? { ...node, config: { ...node.config, ...replacements.get(node.id) } } : node) };
+    if (this.propertyDrafts.size) throw new Error('草稿已变化，请先恢复对应学习快照。');
+    const next = mergeLearningCandidate(this.doc, document, { baseDocument, scope, trainableNodeIds });
     this.commit(next, '应用学习最佳候选'); return clone(this.doc);
   }
   createMinimalFlow() {

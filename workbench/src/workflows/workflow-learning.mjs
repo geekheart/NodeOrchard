@@ -1,10 +1,12 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
+import { planWorkflow, learningImprovementTargets } from '../../shared/workflow/workflow-plan.mjs';
+import { validateLearningCandidate, learningSnapshotChanged } from '../../shared/workflow/workflow-learning-scope.mjs';
 import { redact } from '../hermes-adapter.mjs';
 import { skillFrontmatter as header } from './learned-skills.mjs';
 import { normalizeWorkflowDataset, summarizeRoundCases } from '../../shared/workflow/workflow-dataset.mjs';
 import { startFeedback, applyFeedback } from './workflow-feedback-learning.mjs';
 import { validateDAGInput, dagPath } from './workflow-dag-runs.mjs';
+import { optimizeWorkflowCandidate } from './workflow-learning-optimizer.mjs';
 
 const ACTIVE = new Set(['running', 'waiting']);
 const RUN_TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
@@ -285,14 +287,16 @@ export class WorkflowLearning {
 
   async start(input = {}) {
     if (this.closed) throw fail('学习管理器已关闭。', 503);
-    const keys = ['document', 'input', 'expected', 'trainingCases', 'comparison', 'rubric', 'targetScore', 'maxRounds', 'trainableNodeIds', 'validationCases'];
+    const keys = ['document', 'input', 'expected', 'trainingCases', 'comparison', 'rubric', 'targetScore', 'maxRounds', 'scope', 'trainableNodeIds', 'validationCases'];
     if (!object(input) || Object.keys(input).some(key => !keys.includes(key))) throw fail('学习配置包含未知字段。');
     if (input.document?.mode !== 'learn') throw fail('请切换到学习模式。');
     const plan = planWorkflow({ ...copy(input.document), mode: 'execute' });
     this.app.workflowLibrary?.assertRunnable?.(plan.document.id);
-    if (!plan.skillNodes.length) throw fail('学习流程至少需要一个可调整的 Skill。');
     const branch = plan.learningBranch;
-    if (!branch) throw fail('学习需要连接“产物对比 → Skill 改进”支路，明确比较产物和允许修改的 Skill。');
+    if (!branch) throw fail('学习需要连接“产物对比 → 学习改进”支路，明确比较产物和允许修改的范围。');
+    const { scope, ids } = learningImprovementTargets(plan);
+    if (Object.hasOwn(input, 'scope') && input.scope !== scope) throw fail('学习范围以改进节点为准，不能在请求中扩大修改范围。');
+    this.assertOptimizationPermissions(scope);
     comparisonPath(branch.evaluationNode.config.valuePath);
     const comparison = branch.evaluationNode.config.comparison;
     if (Object.hasOwn(input, 'comparison') && input.comparison !== comparison) throw fail('比较方式以产物对比节点为准，请先更新节点配置。');
@@ -301,11 +305,8 @@ export class WorkflowLearning {
     if (typeof rubric !== 'string' || rubric.length > 8000) throw fail('评价标准最多 8000 个字符。');
     const targetScore = integer(input.targetScore, 90, 1, 100, '目标分数');
     const maxRounds = integer(input.maxRounds, 3, 1, 10, '最大轮数');
-    const ids = branch.improvementNode.config.targetSkillNodeIds;
-    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length
-      || ids.some(id => !plan.skillNodes.some(node => node.id === id))) throw fail('请选择有效且不重复的可调整 Skill 节点。');
     if (Object.hasOwn(input, 'trainableNodeIds') && canonical(input.trainableNodeIds) !== canonical(ids)) {
-      throw fail('允许修改的 Skill 以改进节点为准，不能在请求中扩大修改范围。');
+      throw fail('允许修改的目标以改进节点为准，不能在请求中扩大修改范围。');
     }
     const explicit = Object.hasOwn(input, 'trainingCases');
     if (explicit && (Object.hasOwn(input, 'input') || Object.hasOwn(input, 'expected'))) throw fail('trainingCases 不能与旧 input / expected 同时提供。');
@@ -318,7 +319,7 @@ export class WorkflowLearning {
     const training = cases[0];
     const workflowId = plan.document.id;
     if (this.isLocked(workflowId) || this.app.workflows.locks?.has(workflowId)) throw fail('此工作流已有正在执行或学习的批次。', 409);
-    if (!this.model?.generate || !this.app.learnedSkills?.create) throw fail('学习模型或候选 Skill 仓库尚未就绪。', 503);
+    if (!this.model?.generate || scope === 'skills' && !this.app.learnedSkills?.create) throw fail('学习模型或候选 Skill 仓库尚未就绪。', 503);
     if (typeof this.model.createMemoryScope !== 'function' || typeof this.model.releaseMemoryScope !== 'function') {
       throw fail('学习模型尚未支持批次只读记忆快照。', 503);
     }
@@ -333,7 +334,7 @@ export class WorkflowLearning {
       const now = new Date().toISOString();
       const job = { id: randomUUID(), workflowId, status: 'running', phase: 'preparing-memory',
         document: { ...plan.document, mode: 'learn' }, input: training.input, expected: training.expected,
-        config: { comparison, rubric, targetScore, maxRounds, trainableNodeIds: [...ids],
+        config: { scope, comparison, rubric, targetScore, maxRounds, trainableNodeIds: [...ids],
           evaluationNodeId: branch.evaluationNode.id, improvementNodeId: branch.improvementNode.id,
           comparisonSource: { nodeId: branch.sourceNodeId, port: branch.sourcePort, valuePath: branch.evaluationNode.config.valuePath },
           trainingCases: dataset.trainingCases, validationCases: dataset.validationCases },
@@ -356,6 +357,44 @@ export class WorkflowLearning {
   }
 
   current(state) { return !this.closed && !state.halted && !state.suspended && this.active.get(state.job.id) === state; }
+
+  assertOptimizationPermissions(scope = 'skills') {
+    if (scope === 'skills') return;
+    const permissions = this.app.assistantPermissionSettings?.get?.()?.workflow;
+    if (permissions && (!permissions.workflowRead || !permissions.workflowEdit || !permissions.customNodes)) {
+      throw fail('工具或工作流学习需要设置中的工作流读取、编辑和自定义节点权限。', 403);
+    }
+  }
+
+  async applyBest(id) {
+    const job = this.get(id), scope = job.config?.scope || 'skills';
+    if (job.kind === 'feedback') throw fail('反馈学习生成的是待验证候选，请使用反馈候选应用入口。', 409);
+    const assertCurrent = () => {
+      this.app.workflowLibrary?.assertRunnable?.(job.workflowId);
+      this.assertOptimizationPermissions(scope);
+      if (this.isLocked(job.workflowId) || this.app.workflows.locks?.has(job.workflowId)) throw fail('请先结束当前工作流的执行或学习，再应用候选。', 409);
+      let current;
+      try { current = this.app.workflowLibrary?.get?.(job.workflowId)?.document; }
+      catch (error) { if (error.httpStatus !== 404) throw error; }
+      if (current && learningSnapshotChanged(job.document, current)) throw fail('草稿已变化，请恢复对应学习快照后再应用。', 409);
+    };
+    if (ACTIVE.has(job.status)) throw fail('请先等待学习结束或停止，再应用已验证版本。', 409);
+    const round = job.rounds.find(item => item.index === job.bestRound);
+    const total = datasetOf(job).trainingCases.length + datasetOf(job).validationCases.length;
+    if (!job.bestDocument || round?.status !== 'complete' || round.cases.length !== total
+      || round.cases.some(item => item.status !== 'complete' || !Number.isFinite(item.score))
+      || learningSnapshotChanged(round.document, job.bestDocument)) throw fail('没有完整验证的最佳版本可应用。', 409);
+    assertCurrent();
+    const document = validateLearningCandidate(job.document, job.bestDocument, { scope, trainableNodeIds: job.config.trainableNodeIds });
+    for (const node of document.nodes.filter(node => node.type === 'skill')) {
+      const skill = await this.app.skill(node.config.skillRef);
+      if (skill.revision !== node.config.version) throw fail('Skill 来源版本已变化，请重新学习后应用。', 409);
+      assertCurrent();
+    }
+    if (document.nodes.some(node => node.type === 'skill')) await this.app.learnedSkills.publish(document, { beforePublish: assertCurrent });
+    assertCurrent();
+    return { document, learningId: id, scope, round: job.bestRound, score: job.bestScore };
+  }
 
   reviewCheckpoint(job) {
     if (job.kind === 'feedback' || job.document?.schemaVersion !== 2 || !snapshotValid(job.memorySnapshot, job.id)
@@ -414,6 +453,7 @@ export class WorkflowLearning {
 
   ensure(state) {
     if (!this.current(state) || state.stopping) throw fail('学习已停止。');
+    this.assertOptimizationPermissions(state.job.config?.scope || 'skills');
   }
 
   requireMemoryScope(state) {
@@ -449,7 +489,7 @@ export class WorkflowLearning {
       return this.model.createMemoryScope({ id: state.job.id, signal, modelRoute: state.job.modelRoute, onSession: id => {
         if (!this.current(state) || state.stopping) return;
         state.job.modelSessionId = id; state.job.modelSessionIds = [...new Set([...(state.job.modelSessionIds || []), id])]; this.save(state.job);
-      }, persist: state.plan.document.schemaVersion === 2 && state.plan.document.nodes.some(node => node.type === 'human') });
+      }, persist: state.plan.document.schemaVersion === 2 && (state.job.config.scope === 'workflow' || state.plan.document.nodes.some(node => node.type === 'human')) });
     });
     // The backend may have captured before a lost/late acknowledgment. Cleanup
     // that late scope even after stop/close, without publishing or touching SQLite.
@@ -466,7 +506,7 @@ export class WorkflowLearning {
         throw fail('Hermes 未明确确认本批次只读记忆快照与外部记忆禁用策略，未开始执行。');
       }
       state.job.memoryScopeId = scope.id;
-      if (state.plan.document.schemaVersion === 2 && state.plan.document.nodes.some(node => node.type === 'human')) {
+      if (state.plan.document.schemaVersion === 2 && (state.job.config.scope === 'workflow' || state.plan.document.nodes.some(node => node.type === 'human'))) {
         if (!snapshotValid(scope.snapshot, state.job.id)) throw fail('人工审核学习需要可恢复的原始记忆快照，Hermes 未确认持久化。');
         state.job.memorySnapshot = copy(scope.snapshot);
       }
@@ -541,6 +581,22 @@ export class WorkflowLearning {
       }
       const node = round.document.nodes.find(node => node.id === run.currentNodeId);
       const error = message(run.error || run.nodes?.[run.currentNodeId]?.error || '');
+      const scope = state.job.config.scope || 'skills';
+      const repairableCodeFailure = scope !== 'skills' && run.status === 'error' && failedIds.length > 0 && failedIds.every(id => {
+        const definition = round.document.nodes.find(item => item.id === id), record = run.nodes?.[id];
+        return (scope === 'workflow' || state.job.config.trainableNodeIds.includes(id))
+          && (definition?.type === 'transform' || definition?.type === 'tool' && definition.config.executionMode === 'code')
+          && record?.status === 'error' && record.learningRecoverable === true
+          && ['CODE_FAILED', 'OUTPUT_INVALID', 'OUTPUT_LIMIT'].includes(record.errorCode);
+      });
+      if (repairableCodeFailure) {
+        const diagnostics = failedIds.map(id => ({ nodeId: id, code: run.nodes[id].errorCode, error: message(run.nodes[id].error) }));
+        const nodeInputs = Object.fromEntries(failedIds.filter(id => Object.hasOwn(run.nodes[id], 'input')).map(id => [id, bounded(run.nodes[id].input, '节点实际输入')]));
+        Object.assign(entry, { recoverable: true, score: 0, error: diagnostics.map(item => item.error).join('\n'),
+          feedback: '业务代码执行失败，尚无正式产物：' + diagnostics.map(item => item.error).join('\n'), nodeInputs,
+          output: bounded({ kind: 'business-code-failure', diagnostics }, '业务代码失败诊断') });
+        this.save(state.job); return entry;
+      }
       if (run.status === 'error' && node?.type === 'skill' && state.job.config.trainableNodeIds.includes(node.id)
         && /Skill 最终结果不是有效的|Skill 最终结果必须是|输入必须是/.test(error)
         && !/收尾|完整性|审计|快照|版本|源文件/.test(error)) {
@@ -550,14 +606,19 @@ export class WorkflowLearning {
         return entry;
       }
       const status = ['interrupted', 'unknown'].includes(run.status) ? run.status : 'error';
-      this.finish(state, status, run.error || '完整工作流未成功，未继续评分或调整 Skill。');
+      this.finish(state, status, run.error || '完整工作流未成功，未继续评分或生成候选。');
       throw fail('工作流未成功。');
     }
-    entry.output = comparedResult(run, state.plan);
+    entry.output = comparedResult(run, planWorkflow(round.document));
     entry.comparisonSource = copy(state.job.config.comparisonSource);
     entry.skillInputs = Object.fromEntries(state.job.config.trainableNodeIds
       .filter(id => run.nodes?.[id]?.status === 'complete' && Object.hasOwn(run.nodes[id], 'input'))
       .map(id => [id, bounded(run.nodes[id].input, 'Skill 实际输入')]));
+    if ((state.job.config.scope || 'skills') !== 'skills') {
+      const ids = state.job.config.scope === 'workflow' ? learningImprovementTargets(planWorkflow(round.document)).ids : state.job.config.trainableNodeIds;
+      entry.nodeInputs = Object.fromEntries(ids.filter(id => run.nodes?.[id]?.status === 'complete' && Object.hasOwn(run.nodes[id], 'input'))
+        .map(id => [id, bounded(run.nodes[id].input, '节点实际输入')]));
+    }
     this.save(state.job);
     return entry;
   }
@@ -586,7 +647,7 @@ export class WorkflowLearning {
 
   async generate(state, prompt) {
     this.requireMemoryScope(state);
-    if (prompt.length > 190000) throw fail('学习提示过大，请缩短样本或 Skill 正文。', 413);
+    if (prompt.length > 190000) throw fail('学习提示过大，请缩短样例或业务定义。', 413);
     const text = await this.model.generate(prompt, { signal: state.controller.signal, memoryScopeId: state.job.memoryScopeId, modelRoute: state.job.modelRoute, onSession: id => {
       if (!this.current(state) || state.stopping) return;
       state.job.modelSessionId = id;
@@ -641,6 +702,27 @@ export class WorkflowLearning {
   async candidate(state, round, nextIndex) {
     this.ensure(state);
     const best = state.job.rounds.find(item => item.index === state.job.bestRound) || round;
+    const scope = state.job.config.scope || 'skills';
+    if (scope !== 'skills') {
+      state.job.phase = 'optimizing'; state.job.status = 'running'; this.save(state.job);
+      const targetIds = scope === 'workflow' ? learningImprovementTargets(planWorkflow(best.document)).ids : state.job.config.trainableNodeIds;
+      const result = await optimizeWorkflowCandidate({ baseDocument: copy(best.document), bestRound: copy(best), latestRound: copy(round),
+        scope, trainableNodeIds: [...targetIds], rubric: state.job.config.rubric,
+        targetScore: state.job.config.targetScore, comparisonSource: copy(state.job.config.comparisonSource),
+        generate: prompt => this.generate(state, prompt), diagnose: evidence => this.diagnose(state, evidence),
+        onContext: context => { this.ensure(state); round.optimizerContext = context.mode;
+          if (context.diagnostics) round.diagnostics = copy(context.diagnostics);
+          if (context.phase) state.job.phase = context.phase; this.save(state.job); } });
+      this.ensure(state);
+      if (!result) return null;
+      const document = validateLearningCandidate(state.job.document, result.document, { scope, trainableNodeIds: state.job.config.trainableNodeIds });
+      if (state.job.rounds.some(previous => !learningSnapshotChanged(previous.document, document))) return null;
+      const plan = planWorkflow(document);
+      for (const sample of state.cases) { inputValue(sample.input, plan); expectedValue(sample.expected, plan, '样例的已知答案'); }
+      for (const node of plan.skillNodes) { checkedSkill(await this.app.skill(node.config.skillRef), node); this.ensure(state); }
+      const next = this.newRound(state, nextIndex, document, result.changes);
+      this.ensure(state); state.job.rounds.push(next); this.save(state.job); return next;
+    }
     const document = copy(best.document);
     const nodeId = state.job.config.trainableNodeIds[(nextIndex - 1) % state.job.config.trainableNodeIds.length];
     const node = document.nodes.find(item => item.id === nodeId);

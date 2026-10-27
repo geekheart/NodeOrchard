@@ -117,7 +117,7 @@ export function runtimeCapabilityMetadata(detail) {
   if (detail.node.type === 'input') return ['Input'];
   if (detail.node.type === 'output') return ['Output'];
   if (detail.node.type === 'skill') return ['Hermes Skill', skillDisplayName(detail.skill) || detail.node.config?.skillRef || '', detail.skill?.revision ? `内容指纹 ${detail.skill.revision}` : '', detail.skill?.source ? `来源 ${detail.skill.source}` : ''].filter(Boolean);
-  if (['evaluation', 'improvement'].includes(detail.node.type)) return [detail.node.type === 'evaluation' ? '产物对比' : 'Skill 改进', '仅学习', detail.reason].filter(Boolean);
+  if (['evaluation', 'improvement'].includes(detail.node.type)) return [detail.node.type === 'evaluation' ? '产物对比' : '学习改进', '仅学习', detail.reason].filter(Boolean);
   if (detail.node.type !== 'tool') return [detail.node.type, '仅编排'];
   const config = detail.node.config || {}, runtime = detail.runtime || {}, mode = runtime.kind || config.executionMode || (config.toolName ? 'tool' : 'code');
   const toolName = runtime.toolName || config.toolName;

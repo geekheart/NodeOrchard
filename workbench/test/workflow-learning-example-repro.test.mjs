@@ -62,7 +62,7 @@ test('config adaptation supports legacy one-case values and rejects mismatched o
   assert.equal(ui.dataset.trainingCases[0].input, 'HELLO'); assert.equal(ui.dataset.trainingCases[0].expected, 'hello');
   assert.deepEqual(config, original); assert.equal(ui.caseDraftDirty, false);
   const snapshot = ui.saveForm();
-  for (const invalid of [ { ...config, comparison: 'model' }, { ...config, trainableNodeIds: ['other'] }, { ...config, targetScore: 0 },
+  for (const invalid of [ { ...config, comparison: 'model' }, { ...config, scope: 'workflow' }, { ...config, trainableNodeIds: ['other'] }, { ...config, targetScore: 0 },
     { ...config, maxRounds: 11 }, { ...config, rubric: 'x'.repeat(8001) }, { ...config, document: ui.editor.doc },
     { ...config, trainingCases: [{ input: 'a', expected: 'b' }] } ]) {
     assert.throws(() => ui.setConfig(invalid)); assert.deepEqual(ui.saveForm(), snapshot);

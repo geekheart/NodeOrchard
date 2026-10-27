@@ -99,6 +99,7 @@ export function presetDefinitionFromNode(input, options = {}) {
   // A single reusable node cannot keep references to nodes outside its scope.
   if (node.config?.reviewTargetNodeId) node.config.reviewTargetNodeId = '';
   if (node.config?.targetSkillNodeIds) node.config.targetSkillNodeIds = [];
+  if (node.config?.targetNodeIds) node.config.targetNodeIds = [];
   if (!safeOptions.includePaths) removePrivatePaths(node);
   return validatePresetDefinition({ title: safeOptions.title ?? node.title, description: safeOptions.description ?? '',
     kind: node.type === 'subflow' && node.config?.document ? 'component' : 'preset', node, parent });
@@ -134,6 +135,7 @@ function remapNodeReferences(node, mapping, idFactory) {
   const config = node.config;
   if (config.reviewTargetNodeId) config.reviewTargetNodeId = mapping.get(config.reviewTargetNodeId) || '';
   if (config.targetSkillNodeIds) config.targetSkillNodeIds = config.targetSkillNodeIds.map(id => mapping.get(id)).filter(Boolean);
+  if (config.targetNodeIds) config.targetNodeIds = config.targetNodeIds.map(id => mapping.get(id)).filter(Boolean);
   if (config.document) {
     const children = cloneDocument(config.document, idFactory);
     // Multi-output components project child output values by node ID. Port IDs

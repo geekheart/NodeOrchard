@@ -116,6 +116,16 @@ test('learn snapshot comparison ignores mode and viewport but detects node or co
   const before = document(), after = structuredClone(before); after.mode = 'execute'; after.viewport.x += 12; after.nodes[1].x += 50; assert.equal(learningSnapshotChanged(before, after), false);
   after.nodes[1].config.version = nextRevision; assert.equal(learningSnapshotChanged(before, after), true);
 });
+test('tool and workflow changes show their actual node and graph snapshots instead of a missing Skill body', t => {
+  fakeDOM(t); const { instance, runtime } = mountedInspection(), value = instance.currentJob();
+  runtime.runs.set('candidate', { id: 'candidate', status: 'complete', output: false });
+  value.rounds[1].changes = [{ kind: 'tool', nodeId: 'skill', summary: '生成真实业务代码', before: { node: { config: { code: 'return 1;' } } }, after: { node: { config: { code: 'return 2;' } } } },
+    { kind: 'workflow', summary: '新增解析步骤', before: { document: { nodes: [] } }, after: { document: { nodes: [{ id: 'parse' }] } } }];
+  instance.renderSelectedRound();
+  const texts = []; const visit = node => { if (node?.tagName === 'pre') texts.push(node.textContent); for (const child of node?.children || []) visit(child); }; visit(instance.changes);
+  assert(texts.some(text => text.includes('return 1;'))); assert(texts.some(text => text.includes('return 2;'))); assert(texts.some(text => text.includes('parse')));
+  assert.equal(texts.some(text => text.includes('未采集正文')), false);
+});
 test('case results never promote partials and preserve exact typed output', () => {
   for (const output of [0, false, null, '']) { const result = learningCaseResult({ status: 'complete', output }); assert.equal(result.confirmed, true); assert.equal(result.value, typeof output === 'string' ? output : JSON.stringify(output)); }
   assert.equal(learningCaseResult({ status: 'unknown', partialText: 'not complete' }).confirmed, false); assert.match(learningCaseResult({ status: 'unknown', partialText: 'not complete' }).label, /未完成/);

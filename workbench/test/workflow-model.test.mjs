@@ -2,13 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   NODE_TYPES, NODE_GROUPS, createDocument, createNode, getPorts, validateConnection,
-  connectNodes, updateNode, removeNodes, removeEdge, validateDocument, serializeDocument, nodeConfigurationContract,
+  connectNodes, updateNode, removeNodes, removeEdge, validateDocument, serializeDocument, nodeConfigurationContract, foundationNodeParent,
 } from '../shared/workflow/workflow-model.mjs';
 
 const node = (type, id, config = {}) => createNode(type, { x: 20, y: 40 }, { id, config });
 const graph = (...nodes) => ({ ...createDocument(), nodes });
 const wire = (sourceNode, targetNode, sourcePort = 'out', targetPort = 'in') => ({ sourceNode, sourcePort, targetNode, targetPort });
 const frozenCopy = value => JSON.parse(JSON.stringify(value));
+
+test('renaming learning improvement preserves the frozen foundation label in historical derived origins', () => {
+  const origin = { kind: 'preset', id: 'preset-legacy-improvement', version: 1, title: '旧改进节点', baseType: 'improvement',
+    parent: { kind: 'foundation', baseType: 'improvement', title: 'Skill 改进' } };
+  const document = { ...createDocument({ schemaVersion: 2 }), nodes: [createNode('improvement', {}, { id: 'improve', title: 'Skill 改进', origin })] };
+  const restored = validateDocument(JSON.parse(serializeDocument(document)));
+  assert.deepEqual(restored.nodes[0].origin, origin); assert.equal(restored.nodes[0].title, 'Skill 改进');
+  assert.deepEqual(foundationNodeParent('improvement'), { kind: 'foundation', baseType: 'improvement', title: '学习改进' });
+  assert.throws(() => createNode('improvement', {}, { origin: { ...origin, parent: { ...origin.parent, title: '伪造来源' } } }), /基础父级名称/);
+});
 
 test('legacy human revision limits round-trip without being advertised as current configuration', () => {
   const human = createNode('human', {}, { id: 'review' }), contract = nodeConfigurationContract('human');
@@ -59,7 +69,7 @@ test('learning nodes keep observation and modification targets explicit without 
   assert.deepEqual(node('improvement', 'fresh').config.targetSkillNodeIds, []);
   const updated = updateNode(graph(evaluation, configured), 'compare', { config: { comparison: 'model', valuePath: 'files.manifest' } });
   assert.deepEqual(updated.nodes[0].config, { comparison: 'model', valuePath: 'files.manifest' });
-  for (const config of [{ scope: 'workflow' }, { targetSkillNodeIds: 'skill-a' }, { targetSkillNodeIds: ['../file'] },
+  for (const config of [{ scope: 'all' }, { targetSkillNodeIds: 'skill-a' }, { targetSkillNodeIds: ['../file'] }, { targetNodeIds: 'worker' }, { targetNodeIds: ['worker', 'worker'] },
     { targetSkillNodeIds: ['skill-a', 'skill-a'] }, { targetSkillNodeIds: Array.from({ length: 201 }, (_, i) => `skill-${i}`) }]) {
     assert.throws(() => node('improvement', 'bad', config));
   }

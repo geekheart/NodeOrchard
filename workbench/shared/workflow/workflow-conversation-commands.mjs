@@ -109,6 +109,7 @@ export function applyWorkflowOperations(document, operations, { idFactory } = {}
     if (!result) return result;
     if (result.reviewTargetNodeId) result.reviewTargetNodeId = resolve(result.reviewTargetNodeId);
     if (Array.isArray(result.targetSkillNodeIds)) result.targetSkillNodeIds = result.targetSkillNodeIds.map(resolve);
+    if (Array.isArray(result.targetNodeIds)) result.targetNodeIds = result.targetNodeIds.map(resolve);
     return result;
   };
   for (let index = 0; index < commands.length; index++) {

@@ -22,7 +22,7 @@ export function analyzeSelection(document, ids) {
   if (nodes.length !== ids.length) fail('选区中有不存在的节点，请重新选择。');
   if (nodes.some(node => ['input', 'output', 'evaluation', 'improvement'].includes(node.type))) fail('封装时请选择能力、数据、控制或人工节点；输入输出由边界自动生成，学习支线保留在外层。');
   for (const node of doc.nodes) {
-    if (node.type === 'improvement' && node.config.targetSkillNodeIds?.some(id => selected.has(id))) fail('选中的 Skill 已是学习改进目标，请将它保留在外层；当前学习控制器按外层 Skill 定位。');
+    if (node.type === 'improvement' && [...(node.config.targetSkillNodeIds || []), ...(node.config.targetNodeIds || [])].some(id => selected.has(id))) fail('选中的能力已是学习改进目标，请将它保留在外层；学习控制器按外层节点定位。');
     if (selected.has(node.id) && node.type === 'human' && node.config.reviewTargetNodeId && !selected.has(node.config.reviewTargetNodeId)) fail('请将人工审核指定的上游修改目标一并选中。');
   }
   if (doc.edges.some(edge => selected.has(edge.sourceNode) && !selected.has(edge.targetNode) && getNode(doc, edge.targetNode)?.type === 'evaluation')) fail('此能力连接了学习对比支线，请保留在外层，避免改变学习观察目标。');

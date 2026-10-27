@@ -81,7 +81,7 @@ const FEATURES = [
   { id: 'conversation-attachments', status: 'available', tools: ['workflow.attachments', 'workflow.attachment.read'],
     note: '聊天支持用户粘贴、拖放与选择图片/文件，素材在所属工作流目录保存且可配置为输入。AI可读获准素材的路径及有界文本，本轮选中图片通过原生图像输入分析；不自动执行素材。' },
   { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '节点派生以基础节点或固定派生版本为父级；node-derivations读取目录，兼容node-presets。创建及发布使用界面，已有实例和未知历史来源保留。' },
-  { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '现有聊天可准备明确目标的学习候选；训练答案和验证样本不开放给全局诊断模型。' },
+  { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '学习改进支持指定Skill、指定工具或整个流程；聊天可准备配置，界面明确启动。工具和流程候选调整业务代码或内部图，固定输入输出、评价和审核边界；最佳版本审阅后应用，训练和验证材料不开放给诊断助手。' },
   { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },
 ];
 

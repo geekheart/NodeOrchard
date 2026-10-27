@@ -41,7 +41,7 @@ export function learningBranch(document) {
   const improvements = clean.nodes.filter(node => node.type === 'improvement');
   if (!evaluations.length && !improvements.length) return null;
   if (evaluations.length !== 1 || improvements.length !== 1) {
-    fail('学习支路需要唯一的产物对比节点和 Skill 改进节点。');
+    fail('学习支路需要唯一的产物对比节点和学习改进节点。');
   }
   const evaluationNode = evaluations[0];
   const improvementNode = improvements[0];
@@ -51,7 +51,7 @@ export function learningBranch(document) {
   const improvement = edges.find(edge => edge.sourceNode === evaluationNode.id && edge.sourcePort === 'out'
     && edge.targetNode === improvementNode.id && edge.targetPort === 'in');
   if (edges.length !== 2 || !observation || !improvement || learningIds.has(observation.sourceNode)) {
-    fail('学习支路必须完整连接：业务产物 → 产物对比 → Skill 改进。');
+    fail('学习支路必须完整连接：业务产物 → 产物对比 → 学习改进。');
   }
   return {
     evaluationNode, improvementNode, sourceNodeId: observation.sourceNode, sourcePort: observation.sourcePort,
@@ -116,6 +116,20 @@ export function planWorkflow(document) {
     document: clean, inputNode, outputNode, nodeOrder, learningBranch: branch,
     operationNodes, skillNodes: operationNodes.filter(node => node.type === 'skill'),
   };
+}
+
+export function learningImprovementTargets(plan) {
+  const branch = plan?.learningBranch;
+  if (!branch) fail('请完整连接业务产物 → 产物对比 → 学习改进。');
+  const config = branch.improvementNode.config, scope = config.scope || 'skills';
+  if (!['skills', 'tools', 'workflow'].includes(scope)) fail('学习改进范围无效。');
+  const business = (plan.operationNodes || []).filter(node => !['input', 'output', 'human', 'evaluation', 'improvement'].includes(node.type));
+  if (scope === 'workflow') return { scope, ids: business.map(node => node.id), nodes: business };
+  const allowed = scope === 'skills' ? business.filter(node => node.type === 'skill') : business.filter(node => ['tool', 'transform'].includes(node.type));
+  const ids = [...(scope === 'skills' ? config.targetSkillNodeIds || [] : config.targetNodeIds || [])];
+  if (!ids.length) fail(scope === 'skills' ? '请在“学习改进”节点明确勾选至少一个可调整 Skill 节点。' : '请在“学习改进”节点明确选择至少一个主链工具或代码节点。');
+  if (ids.some(id => !allowed.some(node => node.id === id))) fail(scope === 'skills' ? '所选目标不是当前主链可调整 Skill 节点，请重新选择。' : '所选目标不是当前主链工具或代码节点，请重新选择。');
+  return { scope, ids, nodes: ids.map(id => allowed.find(node => node.id === id)) };
 }
 
 export function planDAG(clean) {

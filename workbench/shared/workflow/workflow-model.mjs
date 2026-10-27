@@ -22,7 +22,7 @@ export const NODE_TYPES = freezeRows([
   { type: 'foreach', label: '逐项处理', category: 'control', description: '对数组执行有界迭代并汇总结果。', icon: 'list' },
   { type: 'loop', label: '条件循环', category: 'control', description: '在次数上限内重复子流程。', icon: 'repeat' },
   { type: 'evaluation', label: '产物对比', category: 'control', description: '学习时将业务产物与已知结果对比。', icon: 'sliders' },
-  { type: 'improvement', label: 'Skill 改进', category: 'control', description: '学习时根据对比结果改进业务链中的 Skill。', icon: 'repeat' },
+  { type: 'improvement', label: '学习改进', category: 'control', description: '根据对比结果改进指定 Skill、工具或整个业务工作流。', icon: 'repeat' },
   { type: 'human', label: '人工审核 / 补充', category: 'human', description: '等待人工审核或补充信息。', icon: 'user' },
   { type: 'output', label: '产物输出', category: 'io', description: '保存、展示阶段产物或最终交付。', icon: 'file-output' },
 ]);
@@ -155,7 +155,7 @@ function inputDefault(value) {
 
 function configFor(type, input = {}, v2 = true) {
   const defaults = DEFAULTS[nodeType(type)];
-  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), 'maxRevisions', ...(type === 'output' ? ['stage'] : [])] : [])]);
+  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(type === 'improvement' ? ['targetNodeIds'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), 'maxRevisions', ...(type === 'output' ? ['stage'] : [])] : [])]);
   const result = { ...defaults };
   if (type === 'validation') result.rules = validationRules(defaults.rules);
   if (type === 'improvement') result.targetSkillNodeIds = [...defaults.targetSkillNodeIds];
@@ -225,10 +225,10 @@ function configFor(type, input = {}, v2 = true) {
       if (!['exact', 'model'].includes(value)) fail('产物对比方式仅支持 exact 或 model。');
       result[key] = value;
     } else if (key === 'scope') {
-      if (value !== 'skills') fail('当前改进范围仅支持 skills。');
+      if (!['skills', 'tools', 'workflow'].includes(value)) fail('改进范围仅支持 skills、tools 或 workflow。');
       result[key] = value;
-    } else if (key === 'targetSkillNodeIds') {
-      if (!Array.isArray(value) || value.length > LIMITS.nodes) fail('改进目标必须是最多 200 个 Skill 节点 ID 的数组。');
+    } else if (key === 'targetSkillNodeIds' || key === 'targetNodeIds') {
+      if (!Array.isArray(value) || value.length > LIMITS.nodes) fail('改进目标必须是最多 200 个节点 ID 的数组。');
       const ids = value.map(id => identifier(id, '改进目标节点 ID'));
       if (new Set(ids).size !== ids.length) fail('改进目标节点 ID 不能重复。');
       result[key] = ids;
@@ -259,9 +259,10 @@ export function nodeConfigurationContract(type, { schemaVersion = 2 } = {}) {
   if (![1, 2].includes(schemaVersion)) fail('仅支持 schemaVersion 1 或 2。');
   const defaults = configFor(type, {}, schemaVersion === 2);
   const allowedConfigKeys = [...new Set([...Object.keys(DEFAULTS[type]), ...(type === 'input' ? ['defaultValue'] : []),
+    ...(type === 'improvement' ? ['targetNodeIds'] : []),
     ...(schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])])];
   const enums = { language: [...CODE_LANGUAGES], executionMode: [...TOOL_EXECUTION_MODES], inputType: [...PORT_TYPES], outputType: [...PORT_TYPES],
-    failurePolicy: ['stop', 'retry'], trigger: ['manual', 'schedule'], comparison: ['exact', 'model'], scope: ['skills'], stage: ['final', 'intermediate'],
+    failurePolicy: ['stop', 'retry'], trigger: ['manual', 'schedule'], comparison: ['exact', 'model'], scope: ['skills', 'tools', 'workflow'], stage: ['final', 'intermediate'],
     resource: ['default', 'model', 'eda', 'browser', 'drawio', 'memory', 'build'], sourceKind: ['value', 'file', 'folder', 'image'] };
   return { type, schemaVersion, defaults, allowedConfigKeys,
     enums: Object.fromEntries(Object.entries(enums).filter(([key]) => allowedConfigKeys.includes(key))) };
@@ -298,8 +299,10 @@ export function validateNodeParent(value, type) {
   if (value.kind === 'unknown') return { kind: 'unknown', baseType: type };
   if (value.kind === 'foundation') {
     const parent = foundationNodeParent(type);
-    if (value.title !== parent.title) fail('基础父级名称必须与基础节点一致。');
-    return parent;
+    // A renamed foundation keeps the already frozen label in historical origins.
+    const legacyImprovement = type === 'improvement' && value.title === 'Skill 改进';
+    if (value.title !== parent.title && !legacyImprovement) fail('基础父级名称必须与基础节点一致。');
+    return { ...parent, title: value.title };
   }
   if (!['preset', 'component'].includes(value.kind)) fail('派生父级种类无效。');
   return { kind: value.kind, id: identifier(value.id, '派生父级 ID'),
@@ -385,10 +388,10 @@ function checkConnection(doc, edge) {
   const learningTarget = ['evaluation', 'improvement'].includes(target.type);
   if (learningSource || learningTarget) {
     const evaluationSource = (source.type === 'output' && edge.sourcePort === 'learning')
-      || (['skill', 'tool', 'subflow'].includes(source.type) && edge.sourcePort === 'out');
+      || (['skill', 'tool', 'transform', 'subflow'].includes(source.type) && edge.sourcePort === 'out');
     const evaluationEdge = evaluationSource && target.type === 'evaluation' && edge.targetPort === 'in';
     const improvementEdge = source.type === 'evaluation' && edge.sourcePort === 'out' && target.type === 'improvement' && edge.targetPort === 'in';
-    if (!evaluationEdge && !improvementEdge) fail('学习连线只允许业务能力或最终输出 → 产物对比 → Skill 改进。');
+    if (!evaluationEdge && !improvementEdge) fail('学习连线只允许业务能力或最终输出 → 产物对比 → 学习改进。');
   }
   if (output.type !== input.type && output.type !== 'any' && input.type !== 'any') {
     fail(`端口类型不兼容：${output.type} → ${input.type}。`);

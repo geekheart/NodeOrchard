@@ -81,6 +81,7 @@ export function prepareWorkflowVersion(document, options = {}) {
       report.details.nodeMappings.push({ sourceWorkflowId: original.id, workflowId: next.id, sourceNodeId: oldId, nodeId: node.id });
       if (node.config.reviewTargetNodeId && mapping.has(node.config.reviewTargetNodeId)) node.config.reviewTargetNodeId = mapping.get(node.config.reviewTargetNodeId);
       if (node.config.targetSkillNodeIds) node.config.targetSkillNodeIds = node.config.targetSkillNodeIds.map(id => mapping.get(id) || id);
+      if (node.config.targetNodeIds) node.config.targetNodeIds = node.config.targetNodeIds.map(id => mapping.get(id) || id);
       if (node.config.document) {
         const child = cloneGraph(node.config.document);
         node.config.document = child.document;
@@ -91,7 +92,7 @@ export function prepareWorkflowVersion(document, options = {}) {
         }
       }
       if (node.type === 'skill') report.skillCount++;
-      if (node.type === 'improvement') for (const id of node.config.targetSkillNodeIds || []) {
+      if (node.type === 'improvement') for (const id of [...(node.config.targetSkillNodeIds || []), ...(node.config.targetNodeIds || [])]) {
         report.learningTargets.push(id);
         report.details.learningTargets.push({ workflowId: next.id, nodeId: node.id, targetNodeId: id });
       }

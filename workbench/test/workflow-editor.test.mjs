@@ -26,6 +26,7 @@ class FakeElement {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   querySelector(selector) { return this.children.find(child => child.tag === selector) || this.children.map(child => child.querySelector?.(selector)).find(Boolean) || null; }
+  querySelectorAll(selector) { const matches = item => selector.split(',').some(part => { const tag = part.trim().split('[')[0], name = /\[name(?:="([^"]+)")?\]/.exec(part); return item.tag === tag && (!name || (name[1] ? item.name === name[1] : Boolean(item.name))); }); return this.children.flatMap(child => [...(matches(child) ? [child] : []), ...(child.querySelectorAll?.(selector) || [])]); }
   get childElementCount() { return this.children.length; }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, listener) { this.listeners.set(name, listener); }
@@ -294,6 +295,22 @@ test('learning property forms expose the connected comparison source and explici
   const rows = improvementForm.children[1].children.filter(child => child.children?.some(item => item.name === 'targetSkillNodeIds'));
   assert.equal(rows.length, 1); assert.equal(rows[0].children[1].value, 'main-skill'); assert.equal(rows[0].children[1].checked, false);
   assert.match(rows[0].children[0].textContent, /导出节点.*导出与命名/);
+});
+
+test('improvement properties switch between explicit tool targets and the complete workflow without changing the graph', t => {
+  globalValue(t, 'document', { createElement: tag => new FakeElement(tag), createElementNS: (_namespace, tag) => new FakeElement(tag) });
+  globalValue(t, 'Option', function (label, value) { this.textContent = label; this.value = value; });
+  let doc = createDocument({ schemaVersion: 2 });
+  doc.nodes = [createNode('input', {}, { id: 'input', config: { outputType: 'object' } }), createNode('tool', {}, { id: 'worker', title: '处理器', config: { code: 'return input;' } }), createNode('output', {}, { id: 'output' })];
+  for (const [sourceNode, targetNode] of [['input', 'worker'], ['worker', 'output']]) doc = connectNodes(doc, { sourceNode, sourcePort: 'out', targetNode, targetPort: 'in' });
+  const before = structuredClone(doc), instance = editor(doc), form = new FakeElement('form');
+  instance.renderImprovementFields(form, { scope: 'tools', targetSkillNodeIds: [], targetNodeIds: ['worker'] });
+  const scope = form.children[0].children[1]; assert.equal(scope.disabled, undefined); assert.deepEqual(scope.children.map(option => option.value), ['skills', 'tools', 'workflow']);
+  assert.equal(form.querySelectorAll('input[name="targetNodeIds"]')[0].checked, true);
+  scope.value = 'workflow'; scope.listeners.get('change')(); assert.equal(form.querySelectorAll('input').length, 0);
+  assert.match(form.children[1].children[0].textContent, /输入输出.*评分.*审核边界固定/);
+  scope.value = 'tools'; scope.listeners.get('change')(); assert.equal(form.querySelectorAll('input[name="targetNodeIds"]')[0].checked, true);
+  assert.deepEqual(instance.doc, before);
 });
 
 test('switching a selected merge from run to edit restores its real property form and preserves drafts', t => {

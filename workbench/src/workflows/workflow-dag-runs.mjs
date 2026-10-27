@@ -474,6 +474,11 @@ export class WorkflowDAGRuns {
           && node.config.toolName.startsWith('hdk.') && error?.code === 'LEARNING_INVALID_PLAN') {
           record.errorCode = 'LEARNING_INVALID_PLAN'; record.learningRecoverable = true;
         }
+        if (state.run.learningId && (node.type === 'transform' || node.type === 'tool' && node.config.executionMode === 'code')
+          && ['CODE_FAILED', 'OUTPUT_INVALID', 'OUTPUT_LIMIT'].includes(error?.code)) {
+          record.errorCode = error.code; record.learningRecoverable = true;
+        }
+        if (state.run.learningId && ['CODE_ENVIRONMENT', 'CODE_START_FAILED', 'CODE_PROTOCOL_INVALID', 'TIMEOUT'].includes(error?.code)) record.errorCode = error.code;
         await this.failNode(state, step, errorText(error));
       }
     }

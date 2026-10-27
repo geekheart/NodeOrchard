@@ -309,20 +309,9 @@ export function createWorkbenchServer(config, application = new Application(conf
           await readJson(req); return json(res, 200, await application.learning.interrupt(id));
         }
         if (req.method === 'POST' && learningMatch[3] === 'apply') {
-          await readJson(req);
-          const learning = application.learning.get(id);
-          application.workflowLibrary.assertRunnable(learning.workflowId);
-          if (learning.kind === 'feedback') return json(res, 409, { error: '反馈学习生成的是待验证候选，请使用反馈候选应用入口。' });
-          if (['running', 'waiting'].includes(learning.status)) return json(res, 409, { error: '请先等待学习结束或停止，再应用已验证版本。' });
-          if (!learning.bestDocument || !learning.rounds.some(round => round.index === learning.bestRound && round.status === 'complete')) {
-            return json(res, 409, { error: '没有已验证的最佳版本可应用。' });
-          }
-          for (const node of learning.bestDocument.nodes.filter(node => node.type === 'skill')) {
-            const skill = await application.skill(node.config.skillRef);
-            if (skill.revision !== node.config.version) return json(res, 409, { error: 'Skill 来源版本已变化，请重新学习后应用。' });
-          }
-          await application.learnedSkills.publish(learning.bestDocument, { beforePublish: () => application.workflowLibrary.assertRunnable(learning.workflowId) });
-          return json(res, 200, { document: learning.bestDocument, learningId: id, round: learning.bestRound, score: learning.bestScore });
+          const body = await readJson(req);
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return json(res, 400, { error: '应用学习候选不接受其它字段。' });
+          return json(res, 200, await application.learning.applyBest(id));
         }
         if (req.method === 'POST' && learningMatch[3] === 'apply-feedback') {
           const body = await readJson(req);
@@ -473,6 +462,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/shared/workflow/workflow-inputs.mjs': 'workflow-inputs.mjs',
         '/shared/workflow/workflow-model.mjs': 'workflow-model.mjs',
         '/shared/workflow/workflow-plan.mjs': 'workflow-plan.mjs',
+        '/shared/workflow/workflow-learning-scope.mjs': 'workflow-learning-scope.mjs',
         '/shared/workflow/workflow-presets.mjs': 'workflow-presets.mjs',
         '/shared/workflow/workflow-review-revision.mjs': 'workflow-review-revision.mjs',
         '/shared/workflow/workflow-schedule-time.mjs': 'workflow-schedule-time.mjs',
