@@ -43,7 +43,8 @@ function graphContext(document) {
           ...(field.extensions ? { extensions: field.extensions } : {}) }));
         else config[key] = value;
       }
-      return { id: node.id, type: node.type, title: node.title, x: node.x, y: node.y, config, ports: getPorts(node) };
+      return { id: node.id, type: node.type, title: node.title, x: node.x, y: node.y, config, ports: getPorts(node),
+        ...(node.origin ? { origin: node.origin } : {}) };
     }), edges: document.edges };
 }
 function selectionContext(context) {
@@ -237,7 +238,7 @@ SYSTEM_RULES:
   {"op":"update-node","nodeId":"已有节点 ID 或本批 ref","title":"新名称（可选）","config":{},"ports":{"inputs":[],"outputs":[]},"x":80,"y":100}；除 op/nodeId 外均可省略。
   {"op":"connect","sourceNode":"ID 或 ref","sourcePort":"输出端口 ID","targetNode":"ID 或 ref","targetPort":"输入端口 ID"}
   {"op":"remove-edge","edgeId":"已有连线 ID"}；{"op":"remove-node","nodeId":"已有 ID 或 ref"}；{"op":"set-title","title":"流程名称"}。
-- 不能新增操作种类、伪造对象 ID、改变工作流 mode/settings、定时 trigger/schedule/timezone 或传入 config.document。组合内部编辑请让用户进入组合节点。不能改写 origin 版本信息。
+- 不能新增操作种类、伪造对象 ID、改变工作流 mode/settings、定时 trigger/schedule/timezone 或传入 config.document。组合内部编辑请让用户进入组合节点。origin 是只读的派生节点版本，origin.parent 是固定直接父级；保留这些来源，登记派生和发布版本使用界面入口。
 - 默认端口：input 无输入且输出 out；output 输入 in 且输出 out/learning；condition 输入 in、输出 yes/no；improvement 输入 in 且无输出；其他节点输入 in、输出 out。evaluation 输出 object，improvement 输入 object，output 输入固定 any，foreach 输入输出固定 array。连接类型必须相同或任一侧为 any。不能形成环或给一个目标端口接入两根线。需要汇总并行分支时给 merge 定义多个具名 inputs（每项 id/label/type/required），outputs 定义 out；输出端口可用 valuePath 投影。不能删除必需的人工审核绕过审核。
 - 注册工具通过 add-node type=tool、config={executionMode:"tool",toolName:目录 ID} 使用。工具端口、资源和必需审核属性会按目录自动补全；请使用目录真实端口 ID。不要虚构工具或 MCP 名称。代码节点只保存为待审草稿，不会运行；没有必要时优先已注册工具。
 - 代码模式为 add-node type=tool、config={executionMode:"code",language:"python"或"javascript",code:"业务函数体"}，不要求toolName或预先注册专用工具。遵守USER_SOURCE_JSON里的runtimeContract。Python 的 context 是普通 dict；input 按 JSON 类型解码，对象是 dict、数组是 list。对象字段用 input['key']/input.get('key')，上下文字段用 context['key']/context.get('key')，不能用点号属性访问。使用第三方库的方案须依据已确认的实际运行环境，不能声称已安装或已执行。

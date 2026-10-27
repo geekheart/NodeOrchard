@@ -42,6 +42,7 @@ flowchart LR
 | 工作流文件夹、便携包与 ZIP 模块 | 目录归集、迁移、包校验与原子导入；目录为完整可携副本，数据库保留运行索引 | 打包全局认证、重跑导入历史或改写原审核 |
 | `workflow-attachments.mjs`、`assistant-attachments.mjs` 与聊天素材控件 | 工作流内素材登记、SHA 校验、消息引用、文本投影与图像输入绑定 | 任意路径读取、执行附件内容或自动运行工作流 |
 | `shared/workflow/` | 纯模型、端口、规划、校验、数据集、时间及协议 | Node/DOM、数据库、网络或文件副作用 |
+| `workflow-presets.mjs`、`workflow-node-presets.mjs` 与节点库控件 | 节点派生定义、固定直接父级、不可变版本和实例来源展示 | 因父级更新改写已有实例、执行派生内容或补造历史父级 |
 | `public/` | 页面、画布、输入表单和交互状态 | 可信授权、伪造服务端运行状态 |
 | `python/` | Hermes JSON-RPC、Skill 冻结、学习记忆 scope、代码 worker | 工作流业务编排 |
 | `hdk/` | EDA／图像／文档／固件的固定工具与强校验 | 猜硬件事实、伪造实测成功 |

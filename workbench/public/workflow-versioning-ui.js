@@ -93,7 +93,7 @@ export class WorkflowVersioningUI {
     this.titleInput = el('input'); this.titleInput.value = session.title; this.titleInput.name = 'versionTitle'; this.titleInput.required = true; this.titleInput.maxLength = 120; this.titleInput.setAttribute('aria-label', '新版名称'); titleLabel.append(this.titleInput); form.append(titleLabel);
     form.append(el('p', 'wf-field-help', `原版：${session.sourceTitle}`));
     this.options = {};
-    for (const [key, caption] of [['upgradeNodes', '登记工具预设来源'], ['addValidation', '增加输入校验'], ['addStageOutputs', '保存审核后阶段成果'], ['copyInputs', '保留已填写输入资料，但需重新预检']]) {
+    for (const [key, caption] of [['upgradeNodes', '登记工具派生来源'], ['addValidation', '增加输入校验'], ['addStageOutputs', '保存审核后阶段成果'], ['copyInputs', '保留已填写输入资料，但需重新预检']]) {
       const label = el('label', 'wf-field wf-versioning-option'), input = el('input'); input.type = 'checkbox'; input.name = key; input.checked = session.options[key]; input.setAttribute('aria-label', caption); label.append(input, el('span', '', caption)); form.append(label); this.options[key] = input;
       input.addEventListener('change', () => { session.options[key] = input.checked; this.updatePreview(session); });
     }
@@ -155,7 +155,7 @@ export class WorkflowVersioningUI {
     this.preview.replaceChildren(el('h3', '', '重构详情'));
     if (!session.preview) { this.preview.append(el('p', 'wf-field-help', session.busy ? '正在读取已保存原版…' : '请先确认原版已保存，再重新打开。')); return; }
     const { document, report } = session.preview, list = el('dl', 'wf-node-origin-list');
-    for (const [label, value] of [['新版节点', document.nodes.length], ['新版连线', document.edges.length], ['登记工具预设', report.toolPresets], ['新增输入校验', report.validationNodes], ['新增阶段成果', report.stageOutputs], ['保留固定 Skill', report.skillCount], ['保留学习目标', report.learningTargetCount ?? report.learningTargets?.length ?? 0]]) list.append(el('dt', '', label), el('dd', '', value ?? 0));
+    for (const [label, value] of [['新版节点', document.nodes.length], ['新版连线', document.edges.length], ['登记工具派生节点', report.toolPresets], ['新增输入校验', report.validationNodes], ['新增阶段成果', report.stageOutputs], ['保留固定 Skill', report.skillCount], ['保留学习目标', report.learningTargetCount ?? report.learningTargets?.length ?? 0]]) list.append(el('dt', '', label), el('dd', '', value ?? 0));
     this.preview.append(list);
   }
   async confirmSource(session) {

@@ -1,5 +1,5 @@
 import { NODE_GROUPS, NODE_TYPES, createNode, getPorts, validateDocument, updateNode, connectNodes } from '../shared/workflow/workflow-model.mjs';
-import { builtinNodePresets, instantiatePreset, presetDefinitionFromNode } from '../shared/workflow/workflow-presets.mjs';
+import { builtinNodePresets, instantiatePreset, presetDefinitionFromNode, presetParentFromNode } from '../shared/workflow/workflow-presets.mjs';
 import { vacantNodePosition, portCompatible } from '../shared/workflow/workflow-studio-utils.mjs';
 import * as components from '../shared/workflow/workflow-components.mjs';
 import { validationRules } from '../shared/workflow/workflow-validation.mjs';
@@ -11,7 +11,10 @@ const labels = { skill: 'AI / Skill', human: '人工审核 / 补充', output: '�
 const labelFor = type => labels[type] || NODE_TYPES.find(item => item.type === type)?.label || type;
 const typeFor = type => NODE_TYPES.find(item => item.type === type);
 const groupFor = type => NODE_GROUPS.find(group => group.id === typeFor(type)?.category);
-const stageLabels = [['foundation', '基础节点'], ['preset', '节点预设'], ['component', '组合节点']];
+const stageLabels = [['foundation', '基础节点'], ['preset', '节点派生'], ['component', '组合节点']];
+const parentDescription = parent => parent?.kind === 'foundation' ? `${parent.title || labelFor(parent.baseType)}（基础节点）`
+  : ['preset', 'component'].includes(parent?.kind) ? `${parent.title} · v${parent.version}` : '未记录';
+const recordParent = record => record.parent || record.definition?.parent || { kind: 'unknown', baseType: record.baseType || record.definition?.node?.type };
 const glyphs = { input: 'M14 3H5v18h14V8zM14 3v5h5M9 12h7m-3-3 3 3-3 3', output: 'M14 3H5v18h14V8zM14 3v5h5M9 13h7m-4-3-3 3 3 3', skill: 'M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1zM12 5v15', tool: 'm8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18', subflow: 'm12 2 10 5-10 5L2 7zM2 12l10 5 10-5M2 17l10 5 10-5', transform: 'M4 6h16M4 12h16M4 18h16M8 3v6m8 0v6m-6 0v6', condition: 'm12 2 10 10-10 10L2 12z', foreach: 'M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01', loop: 'M20 7H7a4 4 0 0 0-4 4m17-4-4-4m4 4-4 4M4 17h13a4 4 0 0 0 4-4M4 17l4 4m-4-4 4-4', human: 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2z', merge: 'M4 4v4l8 5 8-5V4M12 13v7', validation: 'm7 12 3 3 7-7M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', evaluation: 'M5 4v16M19 4v16M5 8h14M5 16h14', improvement: 'M4 17l6-6 4 3 6-9M14 5h6v6' };
 function nodeIcon(type) { const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(key, value); const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', glyphs[type] || glyphs.subflow); svg.append(path); return svg; }
 
@@ -66,7 +69,7 @@ export class WorkflowNodeLibraryUI {
       const fetched = await Promise.all(summaries.filter(item => item.source !== 'builtin').map(async item => { const result = await this.api(`/api/workflow-node-presets/${encodeURIComponent(item.id)}`); return result.preset || result; }));
       const next = new Map(builtinNodePresets().map(record => [record.id, record])); for (const record of fetched) next.set(record.id, record);
       this.records = next; this.loadError = ''; this.render();
-    } catch (error) { this.loadError = `个人节点预设读取失败：${error.message}`; this.render(); }
+    } catch (error) { this.loadError = `个人派生节点读取失败：${error.message}`; this.render(); }
     finally { this.loading = false; }
   }
   entries({ query = '', all = false } = {}) {
@@ -74,7 +77,7 @@ export class WorkflowNodeLibraryUI {
     const entries = [];
     if (all || this.tab === 'foundation') for (const type of NODE_TYPES) entries.push({ key: `type:${type.type}`, type: type.type, title: labelFor(type.type), description: type.description, group: type.category, foundation: true });
     for (const record of this.records.values()) if (all || this.tab === record.kind) entries.push({ key: record.id, type: record.baseType || record.definition?.node?.type, title: record.title, description: record.description || record.definition?.description || '', group: record.source === 'builtin' ? 'builtin' : 'user', record });
-    return entries.filter(entry => `${entry.title} ${entry.description} ${entry.type} ${entry.key} ${entry.record?.definition?.node?.config?.toolName || ''}`.toLowerCase().includes(query));
+    return entries.filter(entry => `${entry.title} ${entry.description} ${entry.type} ${entry.key} ${entry.record ? parentDescription(recordParent(entry.record)) : ''} ${entry.record?.definition?.node?.config?.toolName || ''}`.toLowerCase().includes(query));
   }
   createEntry(entry, position) {
     if (entry.record) return instantiatePreset(entry.record, position);
@@ -85,7 +88,7 @@ export class WorkflowNodeLibraryUI {
     for (const item of this.tabs.children) item.setAttribute('aria-pressed', String(item.dataset.nodeLibraryTab === this.tab));
     parent.replaceChildren();
     const entries = this.entries({ query });
-    const groups = this.tab === 'foundation' ? NODE_GROUPS.map(group => [group.id, group.label]) : [['user', '我的组合与预设'], ['builtin', '内置工具预设']];
+    const groups = this.tab === 'foundation' ? NODE_GROUPS.map(group => [group.id, group.label]) : this.tab === 'component' ? [['user', '我的组合节点'], ['builtin', '内置组合节点']] : [['user', '我的派生节点'], ['builtin', '内置派生节点']];
     for (const [groupId, title] of groups) {
       const matches = entries.filter(entry => entry.group === groupId); if (!matches.length) continue;
       const section = el('section', 'wf-library-group'); section.append(el('h3', '', title));
@@ -94,7 +97,7 @@ export class WorkflowNodeLibraryUI {
         item.disabled = editor.libraryReadOnly || !editor.studio.executable(entry.type) || Boolean(entry.record && editor.doc.schemaVersion !== 2) || Boolean(this.nested && ['input', 'output'].includes(entry.type)); item.style.setProperty('--node-color', group?.color || '#a78bfa'); item.setAttribute('aria-label', `添加${entry.title}${entry.foundation ? '节点' : ''}`); if (this.nested && ['input', 'output'].includes(entry.type)) item.title = '组合边界保持固定，请重新封装调整接口。';
         const tile = el('span', 'wf-type-icon'); tile.append(nodeIcon(entry.type));
         const content = el('span'); content.append(el('strong', '', entry.title), el('small', 'wf-library-item-description', entry.description));
-        if (entry.record) content.append(el('small', 'wf-preset-meta', `${labelFor(entry.type)} · ${entry.record.source === 'builtin' ? '内置' : '个人'} · v${entry.record.version}`));
+        if (entry.record) content.append(el('small', 'wf-preset-meta', `${labelFor(entry.type)} · ${entry.record.source === 'builtin' ? '内置' : '个人'} · v${entry.record.version}`), el('small', 'wf-preset-parent', `派生自：${parentDescription(recordParent(entry.record))}`));
         item.append(tile, content, el('span', 'wf-drag-grip', '⠿')); section.append(item);
       }
       parent.append(section);
@@ -105,11 +108,11 @@ export class WorkflowNodeLibraryUI {
   addPreset(id, position) {
     const editor = this.editor; if (editor.libraryReadOnly || !editor.flushTitleDraft()) return;
     try {
-      const record = this.records.get(id); if (!record) throw new Error('节点预设尚未读取，请刷新后重试。'); if (editor.doc.schemaVersion !== 2) throw new Error('请先升级为并行工作流。'); if (this.nested && ['input', 'output'].includes(record.baseType)) throw new Error('组合边界保持固定，请重新封装调整接口。');
+      const record = this.records.get(id); if (!record) throw new Error('派生节点尚未读取，请刷新后重试。'); if (editor.doc.schemaVersion !== 2) throw new Error('请先升级为并行工作流。'); if (this.nested && ['input', 'output'].includes(record.baseType)) throw new Error('组合边界保持固定，请重新封装调整接口。');
       const r = editor.canvas.getBoundingClientRect(), point = position || editor.worldPoint(r.left + r.width / 2, r.top + r.height / 2);
       const sizes = new Map([...editor.nodeElements].map(([id, card]) => [id, { width: card.offsetWidth || 270, height: card.offsetHeight || 180 }]));
       const node = instantiatePreset(record, editor.snapPosition(vacantNodePosition(editor.doc.nodes, { x: point.x - 112, y: point.y - 50 }, sizes)));
-      editor.commit({ ...editor.doc, nodes: [...editor.doc.nodes, node] }, '添加节点预设'); editor.selectNode(node.id); editor.toast(`已添加 ${record.title} · v${record.version}`); return node;
+      editor.commit({ ...editor.doc, nodes: [...editor.doc.nodes, node] }, record.kind === 'component' ? '添加组合节点' : '添加派生节点'); editor.selectNode(node.id); editor.toast(`已添加 ${record.title} · v${record.version}`); return node;
     } catch (error) { editor.toast(error.message, true); }
   }
   renderInspector(selected) {
@@ -117,14 +120,16 @@ export class WorkflowNodeLibraryUI {
     if (selected.length > 1) { const action = button('封装为子流程', () => this.openExtract(), 'wf-button primary'); action.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; section.append(el('h3', '', '组合与复用'), action); editor.properties.append(section); return; }
     const node = selected[0]; if (!node) return;
     section.append(el('h3', '', '基础与来源')); const list = el('dl', 'wf-node-origin-list');
-    for (const [key, value] of [['基础节点', labelFor(node.type)], ['来源', node.origin ? `${node.origin.title} · v${node.origin.version}` : node.type === 'tool' && node.config.executionMode === 'tool' ? '内置工具配置' : '基础节点配置']]) list.append(el('dt', '', key), el('dd', '', value)); section.append(list);
+    const metadata = [['基础节点', labelFor(node.type)], ['来源', node.origin ? `${node.origin.title} · v${node.origin.version}` : node.type === 'tool' && node.config.executionMode === 'tool' ? '内置工具配置' : '基础节点配置']];
+    if (node.origin) metadata.push(['派生自', parentDescription(node.origin.parent)]);
+    for (const [key, value] of metadata) list.append(el('dt', '', key), el('dd', '', value)); section.append(list);
     const actions = el('div', 'wf-property-actions');
     if (node.config.document && ['subflow', 'foreach', 'loop'].includes(node.type)) {
       actions.append(button('进入子流程', () => this.openNested(node.id))); if (node.type === 'subflow') actions.append(button('展开为节点', () => this.unpack(node.id)));
       section.append(el('p', 'wf-field-help', `${node.config.document.nodes.length} 个内部节点`));
     }
-    const save = button(node.type === 'subflow' && node.config.document ? '保存为组合节点' : '保存为预设', () => this.openSavePreset(node.id)); save.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; actions.append(save);
-    if (node.origin && this.records.get(node.origin.id)?.source === 'user') { const update = button('保存新版本', () => this.openSavePreset(node.id, true)); update.disabled = save.disabled; actions.append(update); }
+    const save = button(node.type === 'subflow' && node.config.document ? '保存为组合节点' : '派生为特色节点', () => this.openSavePreset(node.id)); save.disabled = editor.libraryReadOnly || editor.doc.schemaVersion !== 2; actions.append(save);
+    if (node.origin && this.records.get(node.origin.id)?.source === 'user') { const update = button('发布新版本', () => this.openSavePreset(node.id, true)); update.disabled = save.disabled; actions.append(update); }
     for (const action of actions.children) if (editor.libraryReadOnly) action.disabled = true;
     section.append(actions); const form = editor.properties.querySelector('.wf-property-form'); if (form) editor.properties.insertBefore(section, form); else editor.properties.append(section);
   }
@@ -167,16 +172,18 @@ export class WorkflowNodeLibraryUI {
     const editor = this.editor; if (editor.libraryReadOnly) return;
     try { this.flushNodeDrafts(); } catch (error) { editor.toast(error.message, true); return; }
     const node = copy(editor.doc.nodes.find(item => item.id === nodeId)); if (!node) return;
-    const contextDocumentId = editor.doc.id, session = this.presetDialogSession = {}, origin = update && this.records.get(node.origin?.id), dialog = editor.dialog; dialog.replaceChildren(el('h2', '', update ? '保存预设新版本' : node.type === 'subflow' && node.config.document ? '保存组合节点' : '保存节点预设'));
-    dialog.setAttribute('aria-label', update ? '保存预设新版本' : '保存节点预设');
-    const form = el('form', 'wf-preset-form'); const title = editor.field(form, '预设名称', 'presetTitle', origin?.title || node.title, { required: true, maxLength: 120 }); const description = editor.field(form, '用途说明', 'presetDescription', origin?.description || '', { multiline: true, maxLength: 2000 });
-    form.append(el('p', 'wf-field-help', '预设不包含本机路径。'));
-    const error = el('p', 'wf-field-feedback'); error.setAttribute('role', 'status'); const actions = el('div', 'wf-dialog-actions'); const cancel = button('取消', () => dialog.close()), save = el('button', 'wf-button primary', update ? '发布新版本' : '保存预设'); save.type = 'submit'; actions.append(cancel, save); form.append(error, actions); dialog.append(form);
+    const contextDocumentId = editor.doc.id, session = this.presetDialogSession = {}, origin = update && this.records.get(node.origin?.id), dialog = editor.dialog;
+    if (update && (!origin || origin.source !== 'user')) { editor.toast('当前派生节点来源尚未读取，请刷新后重试。', true); return; }
+    const caption = update ? '发布节点新版本' : node.type === 'subflow' && node.config.document ? '保存组合节点' : '派生特色节点', parent = origin ? recordParent(origin) : presetParentFromNode(node);
+    dialog.replaceChildren(el('h2', '', caption)); dialog.setAttribute('aria-label', caption);
+    const form = el('form', 'wf-preset-form'); const title = editor.field(form, '节点名称', 'presetTitle', origin?.title || node.title, { required: true, maxLength: 120 }); const description = editor.field(form, '用途说明', 'presetDescription', origin?.description || '', { multiline: true, maxLength: 2000 });
+    const source = el('dl', 'wf-node-origin-list'); source.append(el('dt', '', '派生自'), el('dd', '', parentDescription(parent)), el('dt', '', '基础节点'), el('dd', '', labelFor(node.type))); form.append(source);
+    const error = el('p', 'wf-field-feedback'); error.setAttribute('role', 'status'); const actions = el('div', 'wf-dialog-actions'); const cancel = button('取消', () => dialog.close()), save = el('button', 'wf-button primary', update ? '发布新版本' : node.type === 'subflow' && node.config.document ? '保存组合节点' : '保存派生节点'); save.type = 'submit'; actions.append(cancel, save); form.append(error, actions); dialog.append(form);
     form.addEventListener('submit', async event => { event.preventDefault(); if (save.disabled) return;
-      if (editor.libraryReadOnly || editor.doc.id !== contextDocumentId || this.presetDialogSession !== session || !dialog.open || !dialog.contains(form)) { error.textContent = '当前流程已变化或为只读，请重新打开节点预设入口。'; error.classList.add('error'); return; }
+      if (editor.libraryReadOnly || editor.doc.id !== contextDocumentId || this.presetDialogSession !== session || !dialog.open || !dialog.contains(form)) { error.textContent = '当前流程已变化或为只读，请重新打开节点派生入口。'; error.classList.add('error'); return; }
       save.disabled = true; error.textContent = '';
       try {
-        const definition = presetDefinitionFromNode(node, { title: title.value.trim(), description: description.value.trim(), includePaths: false });
+        const definition = presetDefinitionFromNode(node, { title: title.value.trim(), description: description.value.trim(), includePaths: false, ...(origin ? { parent } : {}) });
         const result = await this.api('/api/workflow-node-presets' + (origin ? `/${encodeURIComponent(origin.id)}` : ''), { method: 'POST', body: { definition, ...(origin ? { expectedRevision: origin.revision } : {}) } });
         const record = result.preset || result; this.records.set(record.id, record); this.render();
         const currentContext = editor.doc.id === contextDocumentId && this.presetDialogSession === session && dialog.contains(form);
@@ -184,8 +191,8 @@ export class WorkflowNodeLibraryUI {
         // The workflow pins this new version only if its originating node still
         // matches the reviewed snapshot; late HTTP responses never overwrite edits.
         const current = editor.doc.nodes.find(item => item.id === nodeId);
-        if (currentContext && !editor.libraryReadOnly && current && JSON.stringify(current) === JSON.stringify(node)) editor.commit({ ...editor.doc, nodes: editor.doc.nodes.map(item => item.id === nodeId ? { ...item, origin: { kind: record.kind, id: record.id, version: record.version, title: record.title, baseType: record.baseType } } : item) }, '记录节点预设版本');
-        if (currentContext) editor.toast(`已保存 ${record.title} · v${record.version}，其它流程保持原版本。`);
+        if (currentContext && !editor.libraryReadOnly && current && JSON.stringify(current) === JSON.stringify(node)) editor.commit({ ...editor.doc, nodes: editor.doc.nodes.map(item => item.id === nodeId ? { ...item, origin: { kind: record.kind, id: record.id, version: record.version, title: record.title, baseType: record.baseType, parent: recordParent(record) } } : item) }, '记录节点派生版本');
+        if (currentContext) editor.toast(`已保存 ${record.title} · v${record.version}`);
       } catch (caught) { if (editor.doc.id === contextDocumentId && this.presetDialogSession === session && dialog.contains(form)) { error.textContent = caught.message; error.classList.add('error'); save.disabled = false; } }
     }); if (!dialog.open) dialog.showModal(); title.focus();
   }
@@ -224,7 +231,7 @@ export class WorkflowNodeLibraryUI {
   }
   async applyNested() {
     const session = this.nested; if (!session) return;
-    try { const child = copy(this.flushNodeDrafts()), next = await components.updateEmbeddedWorkflow(session.parent, session.nodeId, child); if (this.nested !== session) return; this.nestedStack.pop(); this.restoreParent(session); this.editor.commit(next, '修改子流程内部节点'); this.paintNested(); this.editor.toast('内部修改已应用到当前流程，原预设版本保持不变。'); }
+    try { const child = copy(this.flushNodeDrafts()), next = await components.updateEmbeddedWorkflow(session.parent, session.nodeId, child); if (this.nested !== session) return; this.nestedStack.pop(); this.restoreParent(session); this.editor.commit(next, '修改子流程内部节点'); this.paintNested(); this.editor.toast('内部修改已应用到当前流程。'); }
     catch (error) { this.editor.toast(error.message, true); }
   }
   cancelNested(all = false) { if (!this.nested) return; do { const session = this.nestedStack.pop(); this.restoreParent(session); } while (all && this.nested); this.paintNested(); if (!all && !this.nested && this.editor.unsaved) this.editor.scheduleSave(); }
@@ -238,7 +245,7 @@ export class WorkflowNodeLibraryUI {
   }
   openSearch(clientX, clientY, origin = null, edge = null) {
     const editor = this.editor, menu = editor.contextMenu, bounds = editor.canvas.getBoundingClientRect(), point = editor.worldPoint(clientX, clientY); editor.cancelConnection(); menu.replaceChildren(el('strong', '', edge ? '在线中插入节点' : origin ? '连接兼容节点' : '添加节点'));
-    const search = el('input'); search.type = 'search'; search.placeholder = '搜索基础节点、预设或组合…'; search.setAttribute('aria-label', '搜索要添加的节点'); const list = el('div', 'wf-context-items'); menu.append(search, list);
+    const search = el('input'); search.type = 'search'; search.placeholder = '搜索基础节点、派生节点或组合…'; search.setAttribute('aria-label', '搜索要添加的节点'); const list = el('div', 'wf-context-items'); menu.append(search, list);
     const sourceNode = origin && editor.doc.nodes.find(node => node.id === origin.node), sourcePort = sourceNode && getPorts(sourceNode)[origin.direction === 'output' ? 'outputs' : 'inputs'].find(port => port.id === origin.port);
     const render = () => { list.replaceChildren();
       for (const entry of this.entries({ query: search.value, all: true })) {
@@ -247,9 +254,11 @@ export class WorkflowNodeLibraryUI {
         const ports = getPorts(candidate), direction = origin?.direction === 'output' ? 'inputs' : 'outputs'; if (origin && !ports[direction].some(port => port.id !== 'learning' && portCompatible(port.type, sourcePort?.type))) continue;
         const source = edge && getPorts(editor.doc.nodes.find(node => node.id === edge.sourceNode)).outputs.find(port => port.id === edge.sourcePort), target = edge && getPorts(editor.doc.nodes.find(node => node.id === edge.targetNode)).inputs.find(port => port.id === edge.targetPort);
         if (edge && (!ports.inputs.some(port => portCompatible(source.type, port.type)) || !ports.outputs.some(port => port.id !== 'learning' && portCompatible(port.type, target.type)))) continue;
-        list.append(button(`${entry.title}${entry.record ? ` · v${entry.record.version}` : ' · 基础'}`, () => {
+        const caption = `${entry.title}${entry.record ? ` · v${entry.record.version}` : ' · 基础'}`, choose = button(caption, () => {
           try { if (editor.libraryReadOnly) return; let next = { ...editor.doc, nodes: [...editor.doc.nodes, candidate] }; if (origin) { const port = ports[direction].find(port => port.id !== 'learning' && portCompatible(port.type, sourcePort.type)); next = connectNodes(next, origin.direction === 'output' ? { sourceNode: origin.node, sourcePort: origin.port, targetNode: candidate.id, targetPort: port.id } : { sourceNode: candidate.id, sourcePort: port.id, targetNode: origin.node, targetPort: origin.port }); } if (edge) { next.edges = next.edges.filter(item => item.id !== edge.id); next = connectNodes(next, { sourceNode: edge.sourceNode, sourcePort: edge.sourcePort, targetNode: candidate.id, targetPort: ports.inputs.find(port => portCompatible(source.type, port.type)).id }); next = connectNodes(next, { sourceNode: candidate.id, sourcePort: ports.outputs.find(port => port.id !== 'learning' && portCompatible(port.type, target.type)).id, targetNode: edge.targetNode, targetPort: edge.targetPort }); } editor.commit(next, '添加并连接节点'); editor.selectNode(candidate.id); menu.hidden = true; } catch (error) { editor.toast(error.message, true); }
-        }));
+        });
+        if (entry.record) { const label = el('span'); label.append(el('span', '', caption), el('br'), el('small', 'wf-field-help', `派生自：${parentDescription(recordParent(entry.record))}`)); choose.replaceChildren(label); }
+        list.append(choose);
       }
       if (!list.childElementCount) list.append(el('p', 'wf-field-help', '没有兼容节点。可先添加节点再配置端口。'));
     }; search.addEventListener('input', render); render(); menu.hidden = false; menu.style.left = `${Math.max(8, Math.min(clientX - bounds.left, bounds.width - 300))}px`; menu.style.top = `${Math.max(54, Math.min(clientY - bounds.top, bounds.height - 400))}px`; search.focus();

@@ -112,7 +112,7 @@ test('preset source metadata is attached without replacing custom instance ports
   const current = document.nodes.find(row => row.id === report.nodeIdMap.trim);
   assert.deepEqual(current.config, original.config);
   assert.deepEqual(current.ports, original.ports);
-  assert.deepEqual(current.origin, { kind: 'preset', id: 'builtin-tool-json-keys', version: 1, title: '读取对象字段', baseType: 'tool' });
+  assert.deepEqual(current.origin, { kind: 'preset', id: 'builtin-tool-json-keys', version: 1, title: '读取对象字段', baseType: 'tool', parent: { kind: 'foundation', baseType: 'tool', title: '工具与代码' } });
   original.origin = { kind: 'preset', id: 'my-special-preset', version: 5, title: '我的工具', baseType: 'tool' };
   const preserved = prepareWorkflowVersion(source, { idFactory: factory() });
   assert.deepEqual(preserved.document.nodes.find(row => row.id === preserved.report.nodeIdMap.trim).origin, original.origin);

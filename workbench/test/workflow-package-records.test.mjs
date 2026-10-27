@@ -59,6 +59,17 @@ test('portable records rebuild identities and paths while retaining immutable so
   assert.equal(result.fileRuns[0].outputDirectory, join(f.directory, 'runs/run-source')); assert(result.warnings.some(text => /输入|资料/.test(text)));
 });
 
+test('portable records preserve derived node identity and its pinned parent when rebuilding workflow identities', () => {
+  const f = fixture(), origin = { kind: 'preset', id: 'preset-weekly-summary', version: 2, title: '周报摘要', baseType: 'tool',
+    parent: { kind: 'preset', id: 'preset-short-summary', version: 1, title: '简洁摘要', baseType: 'tool' } };
+  f.document.nodes[1].origin = structuredClone(origin); f.runs[0].document.nodes[1].origin = structuredClone(origin);
+  const result = prepareImportedWorkflowRecords(f);
+  assert.notEqual(result.document.id, f.document.id);
+  assert.deepEqual(result.document.nodes.find(node => node.type === 'tool').origin, origin);
+  assert.deepEqual(result.runs[0].document.nodes.find(node => node.type === 'tool').origin, origin);
+  assert.deepEqual(f.document.nodes[1].origin, origin);
+});
+
 test('chat preserves full text but cannot revive source candidate, review, retry or native session authority', () => {
   const f = fixture(), result = prepareImportedWorkflowRecords(f), { turn, privateValue } = result.turns[0];
   assert.notEqual(turn.id, 'turn-source'); assert.notEqual(turn.clientMessageId, 'message-source'); assert.equal(turn.workflowId, f.targetWorkflowId);

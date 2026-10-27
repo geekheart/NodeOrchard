@@ -26,8 +26,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
-  definition('workbench.inspect', '只读读取设置、模型、定时任务、节点预设、示例目录或统计；统计包含对话、执行、Token采集覆盖和最近上下文，独立助手限定当前工作流。', {
-    section: { enum: ['settings', 'models', 'schedules', 'node-presets', 'statistics', 'examples'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
+  definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录及固定父级、示例和统计。统计含对话、执行、Token覆盖和上下文，独立助手限定当前工作流。', {
+    section: { enum: ['settings', 'models', 'schedules', 'node-derivations', 'node-presets', 'statistics', 'examples'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
   definition('page.inspect', '读取发消息时当前页面的界面状态与脱敏操作、错误记录。', {}),
   definition('environment.probe', '检查固定工具版本，或检查 GitHub HTTPS 连接；代码解释器和库请使用 runtime.inspect。', { target: { enum: ['dependencies', 'github'] } }),
   definition('browser.capture', '在专用只读浏览器中真实截图或短录制，附复现步骤与错误；不会采集当前用户标签页或桌面。', {
@@ -80,7 +80,7 @@ const FEATURES = [
   { id: 'workflow-packages', status: 'ui-only', inspect: 'workflow.folder', tools: [], note: '用户导出完整文件夹为 .workflow ZIP，导入解包为独立副本；历史只读，不恢复执行、审核或认证。选择本机文件、下载和打开文件夹由界面完成。' },
   { id: 'conversation-attachments', status: 'available', tools: ['workflow.attachments', 'workflow.attachment.read'],
     note: '聊天支持用户粘贴、拖放与选择图片/文件，素材在所属工作流目录保存且可配置为输入。AI可读获准素材的路径及有界文本，本轮选中图片通过原生图像输入分析；不自动执行素材。' },
-  { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '可读预设目录，创建与版本保存使用已有界面。' },
+  { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '节点派生以基础节点或固定派生版本为父级；node-derivations读取目录，兼容node-presets。创建及发布使用界面，已有实例和未知历史来源保留。' },
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '现有聊天可准备明确目标的学习候选；训练答案和验证样本不开放给全局诊断模型。' },
   { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },
 ];
@@ -163,6 +163,7 @@ export class ApplicationCapabilities {
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };
     if (section === 'node-presets') return { section, presets: this.app.nodePresets.list() };
+    if (section === 'node-derivations') return { section, derivations: this.app.nodePresets.list() };
     if (section === 'examples') return { section, examples: this.app.workflowExamples.list(), loading: '从空画布的载入示例选择；不会开始执行或学习。' };
     if (section === 'statistics') {
       if (![7, 30].includes(days)) fail('统计周期只支持7或30天。');

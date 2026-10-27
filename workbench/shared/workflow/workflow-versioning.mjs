@@ -98,7 +98,7 @@ export function prepareWorkflowVersion(document, options = {}) {
       if (upgradeNodes && node.type === 'tool' && node.config.executionMode === 'tool' && !node.origin) {
         const preset = presets.get(node.config.toolName);
         if (preset) {
-          node.origin = { kind: 'preset', id: preset.id, version: preset.version, title: preset.title, baseType: 'tool' };
+          node.origin = { kind: 'preset', id: preset.id, version: preset.version, title: preset.title, baseType: 'tool', parent: copy(preset.parent) };
           report.toolPresets++;
           report.details.toolPresets.push({ workflowId: next.id, nodeId: node.id, toolName: node.config.toolName, presetId: preset.id, version: preset.version });
         }

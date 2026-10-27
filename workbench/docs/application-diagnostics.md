@@ -15,7 +15,7 @@
 | `assistant.skills.read` | 按名称读取内部操作方法，供助手自动按需使用 |
 | `assistant.diagnose` | 按归属聊天事项一次读取各次模型等待、输出、用量和完整性，不开放控制会话正文 |
 | `assistant.probe` | 同轮固定模型的短请求探测，单轮一次、最多30秒；不执行业务、不重试原请求 |
-| `workbench.inspect` | 只读检查设置、模型目录、定时任务与节点预设 |
+| `workbench.inspect` | 只读检查设置、模型目录、定时任务与节点派生目录 |
 | `app.state` | Hermes 状态、会话摘要、待处理请求及有限适配器错误 |
 | `workflows.list` | 全局工作流列表，不要求先选择画布 |
 | `workflow.inspect` | 当前草稿、保存版本与差异 |

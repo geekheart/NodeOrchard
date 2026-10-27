@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
 import { planWorkflowConversation } from '../src/workflows/workflow-conversation-planner.mjs';
-import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
+import { documentFingerprint, applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 
 const document = () => createDocument({ title: '独立聊天测试', schemaVersion: 2 });
 function fixture(response) {
@@ -54,6 +54,19 @@ test('planning hides obsolete human revision limits while preserving the legacy 
   const prompt = calls[0].prompt, source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
   assert.equal(prompt.includes('maxRevisions'), false);
   assert.equal(Object.hasOwn(source.workflow.nodes[0].config, 'maxRevisions'), false);
+  assert.deepEqual(doc, before);
+});
+
+test('planning sees the fixed direct parent and preserves provenance when configuring a derived node', async () => {
+  const doc = document();
+  const origin = { kind: 'preset', id: 'preset-weekly-summary', version: 2, title: '周报摘要', baseType: 'tool',
+    parent: { kind: 'preset', id: 'preset-short-summary', version: 1, title: '简洁摘要', baseType: 'tool' } };
+  doc.nodes = [createNode('tool', {}, { id: 'summary', origin })];
+  const before = structuredClone(doc), { app, calls } = fixture({ text: '已准备名称修改。', operations: [{ op: 'update-node', nodeId: 'summary', title: '团队周报摘要' }] });
+  const result = await planWorkflowConversation(app, { text: '只修改节点名称', document: doc });
+  const source = JSON.parse(calls[0].prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.deepEqual(source.workflow.nodes[0].origin, origin);
+  assert.deepEqual(applyWorkflowOperations(doc, result.operations).document.nodes[0].origin, origin);
   assert.deepEqual(doc, before);
 });
 

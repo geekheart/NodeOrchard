@@ -116,7 +116,7 @@ test('workbench inspection projects current state without changing settings, sch
   app.settings = async () => ({ preferences: { theme: 'dark' }, approvalMode: 'smart', runtime: { hermesHome: 'PRIVATE_HOME' } });
   app.modelOptions = async () => ({ current: { model: 'fixture' }, providers: [] });
   app.schedules = { list: id => { calls.push(id); return [{ id: 'schedule', enabled: false, input: 'PRIVATE_SCHEDULE_INPUT', document: { answer: 'PRIVATE_ANSWER' } }]; } };
-  app.nodePresets = { list: () => [{ id: 'preset', title: '示例' }] };
+  app.nodePresets = { list: () => [{ id: 'preset', title: '示例', parent: { kind: 'foundation', baseType: 'tool', title: '工具与代码' } }] };
   app.workflowExamples = { list: () => [{ id: 'learning-text', title: '学习示例', kind: 'learn', requiresModel: true }] };
   assert.deepEqual((await capabilities.read('workbench.inspect', { section: 'settings' })).preferences, { theme: 'dark' });
   assert.equal(JSON.stringify(await capabilities.read('workbench.inspect', { section: 'settings' })).includes('PRIVATE_HOME'), false);
@@ -124,6 +124,8 @@ test('workbench inspection projects current state without changing settings, sch
   const schedules = await capabilities.read('workbench.inspect', { section: 'schedules', workflowId: 'wf' });
   assert.deepEqual(calls, ['wf']); assert.equal(JSON.stringify(schedules).includes('PRIVATE_'), false);
   assert.equal((await capabilities.read('workbench.inspect', { section: 'node-presets' })).presets.length, 1);
+  const derived = await capabilities.read('workbench.inspect', { section: 'node-derivations' });
+  assert.deepEqual(derived.derivations[0].parent, { kind: 'foundation', baseType: 'tool', title: '工具与代码' });
   assert.equal((await capabilities.read('workbench.inspect', { section: 'examples' })).examples[0].id, 'learning-text');
 });
 

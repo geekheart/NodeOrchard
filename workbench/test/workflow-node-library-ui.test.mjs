@@ -22,9 +22,9 @@ function nestedHarness(t) {
 }
 
 test('root lifecycle events during nested editing cancel the local session without ever saving the child', async t => {
-  const { fixture, editor, ui, writes } = nestedHarness(t), calls = []; const client = new WorkflowLibraryClient(editor, { api: async (path, options) => { calls.push([path, options]); throw new Error('unexpected request'); } }); client.currentId = fixture.document.id; client.adopt({ id: fixture.document.id, revision: 1, lifecycle: 'active', document: fixture.document });
+  const { fixture, editor, ui, writes, values } = nestedHarness(t), calls = [], cacheKey = 'workbench.workflow-document.v1:' + fixture.document.id; values.set(cacheKey, 'cached-root-draft'); const client = new WorkflowLibraryClient(editor, { api: async (path, options) => { calls.push([path, options]); throw new Error('unexpected request'); } }); client.currentId = fixture.document.id; client.adopt({ id: fixture.document.id, revision: 1, lifecycle: 'active', document: fixture.document });
   ui.openNested(fixture.node.id); const childId = editor.doc.id; editor.doc.title = 'local nested edit'; await client.handleLifecycle({ id: fixture.document.id, revision: 2, lifecycle: 'archived' });
-  assert.equal(ui.nested, undefined); assert.equal(editor.doc.id, fixture.document.id); assert.equal(editor.libraryReadOnly, true); assert.equal(client.slot(fixture.document.id).lifecycle, 'trashed'); assert.equal(client.slots.has(childId), false); assert.equal(calls.length, 0); assert.ok(writes.every(([key]) => !key.includes(childId))); assert.equal(editor.libraryStatus, '只读 · 本地未同步草稿保留');
+  assert.equal(ui.nested, undefined); assert.notEqual(editor.doc.id, fixture.document.id); assert.equal(editor.documentLoaded, false); assert.deepEqual(editor.doc.nodes, []); assert.equal(editor.libraryReadOnly, true); assert.equal(client.currentId, null); assert.equal(client.slot(fixture.document.id).lifecycle, 'trashed'); assert.equal(client.slots.has(childId), false); assert.equal(calls.length, 0); assert.ok(writes.every(([key]) => !key.includes(childId))); assert.equal(values.get(cacheKey), 'cached-root-draft'); assert.equal(editor.libraryStatus, '');
 });
 
 test('pending root saves keep their acknowledgement while nested canvas and child autosaves stay isolated', async t => {
@@ -41,7 +41,7 @@ test('runtime and studio bypasses reject child run, input preflight and historic
 });
 
 class FormElement {
-  constructor(tag) { this.tag = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.attributes = {}; this.classList = { add() {}, remove() {} }; this.elements = {}; this.value = ''; }
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.attributes = {}; this.style = { setProperty() {} }; this.classList = { add() {}, remove() {} }; this.elements = {}; this.value = ''; }
   append(...items) { this.children.push(...items); for (const item of items) item.parent = this; }
   replaceChildren(...items) { for (const item of this.children) item.parent = null; this.children = []; this.append(...items); }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
@@ -57,6 +57,62 @@ function presetHarness(t) {
   globalValue(t, 'document', { createElement: tag => new FormElement(tag) }); const ui = library(), editor = Object.create(WorkflowEditor.prototype), node = createNode('transform', { x: 0, y: 0 }, { id: 'configured-node' }), doc = createDocument({ schemaVersion: 2 }); doc.nodes = [node];
   Object.assign(editor, { doc, libraryLifecycle: 'active', dialog: new FormElement('dialog'), propertyDrafts: new Map(), field(parent, _label, name, value) { const input = new FormElement('input'); input.value = value; parent.elements[name] = input; parent.append(input); return input; }, toast() {}, commit(next) { this.doc = next; this.commits = (this.commits || 0) + 1; } }); ui.editor = editor; ui.flushNodeDrafts = () => editor.doc; ui.render = () => {}; return { ui, editor, node };
 }
+
+const allElements = parent => [parent, ...parent.children.flatMap(allElements)];
+const visibleText = parent => allElements(parent).map(item => item.textContent || '').join('\n');
+
+test('deriving a foundation node previews its explicit parent and pins the saved parent without editing it', async t => {
+  const { ui, editor, node } = presetHarness(t); let request;
+  ui.api = async (_path, options) => { request = options.body; return { preset: { id: 'preset-distinct', title: '标题清理', description: '', kind: 'preset', baseType: node.type, source: 'user', version: 1, revision: 1, parent: options.body.definition.parent, definition: options.body.definition } }; };
+  ui.openSavePreset(node.id);
+  assert.match(editor.dialog.attributes['aria-label'], /派生/);
+  assert.match(visibleText(editor.dialog), /派生自/); assert.match(visibleText(editor.dialog), /数据整理.*基础节点/);
+  const form = editor.dialog.children.find(item => item.tag === 'form'); form.elements.presetTitle.value = '标题清理'; await form.listeners.get('submit')({ preventDefault() {} });
+  assert.equal(request.definition.parent.kind, 'foundation'); assert.equal(request.definition.parent.baseType, 'transform');
+  assert.deepEqual(editor.doc.nodes[0].origin.parent, request.definition.parent); assert.equal(editor.doc.nodes[0].origin.id, 'preset-distinct');
+});
+
+test('a further derivation names the selected derived node as its direct parent rather than its foundation', async t => {
+  const { ui, editor, node } = presetHarness(t), parent = { kind: 'preset', id: 'preset-title-cleaner', version: 3, title: '标题清理', baseType: 'transform' };
+  node.origin = { ...parent, parent: { kind: 'foundation', baseType: 'transform', title: '数据整理' } };
+  let definition; ui.api = async (_path, options) => { definition = options.body.definition; return { preset: { id: 'preset-child', title: definition.title, kind: 'preset', baseType: 'transform', source: 'user', version: 1, revision: 1, parent: definition.parent, definition } }; };
+  ui.openSavePreset(node.id); assert.match(visibleText(editor.dialog), /派生自\n标题清理 · v3/);
+  const form = editor.dialog.children.find(item => item.tag === 'form'); await form.listeners.get('submit')({ preventDefault() {} });
+  assert.deepEqual(definition.parent, parent); assert.deepEqual(editor.doc.nodes[0].origin.parent, parent); assert.equal(editor.doc.nodes[0].origin.id, 'preset-child');
+});
+
+test('publishing a new derived version retains its parent and remains distinct from creating a child', async t => {
+  const { ui, editor, node } = presetHarness(t), parent = { kind: 'preset', id: 'preset-parent', version: 2, title: '英文标题', baseType: 'transform' };
+  node.origin = { kind: 'preset', id: 'preset-current', version: 1, title: '小写标题', baseType: 'transform', parent };
+  ui.records.set('preset-current', { id: 'preset-current', title: '小写标题', source: 'user', revision: 1, version: 1, kind: 'preset', baseType: 'transform', parent });
+  let path, request; ui.api = async (url, options) => { path = url; request = options.body; return { preset: { ...ui.records.get('preset-current'), version: 2, revision: 2, definition: request.definition } }; };
+  ui.openSavePreset(node.id, true); assert.match(visibleText(editor.dialog), /派生自\n英文标题 · v2/);
+  const form = editor.dialog.children.find(item => item.tag === 'form'); await form.listeners.get('submit')({ preventDefault() {} });
+  assert.equal(path, '/api/workflow-node-presets/preset-current'); assert.equal(request.expectedRevision, 1); assert.deepEqual(request.definition.parent, parent);
+  assert.equal(editor.doc.nodes[0].origin.id, 'preset-current'); assert.equal(editor.doc.nodes[0].origin.version, 2); assert.deepEqual(editor.doc.nodes[0].origin.parent, parent);
+});
+
+test('derived library entries and instance properties show direct parents while legacy entries stay explicit about missing history', t => {
+  globalValue(t, 'document', { createElement: tag => new FormElement(tag), createElementNS: (_ns, tag) => new FormElement(tag) });
+  const ui = library(), parent = { kind: 'preset', id: 'preset-parent', version: 2, title: '英文标题', baseType: 'transform' }, definition = presetDefinitionFromNode(createNode('transform'));
+  ui.records = new Map([['preset-child', { id: 'preset-child', title: '小写标题', source: 'user', kind: 'preset', baseType: 'transform', version: 1, parent, definition }], ['preset-legacy', { id: 'preset-legacy', title: '旧标题处理', source: 'user', kind: 'preset', baseType: 'transform', version: 1, definition: { ...definition, parent: undefined } }]]);
+  ui.tab = 'preset'; ui.tabs = new FormElement('div'); const items = new FormElement('div'), search = new FormElement('input'); Object.assign(ui.editor, { root: { querySelector: selector => selector === '.wf-library-items' ? items : search }, studio: { executable: () => true }, properties: new FormElement('div') });
+  ui.render(); assert.match(visibleText(items), /我的派生节点/); assert.match(visibleText(items), /派生自：英文标题 · v2/); assert.match(visibleText(items), /派生自：未记录/); assert.doesNotMatch(visibleText(items), /预设/);
+  const node = createNode('transform', undefined, { origin: { kind: 'preset', id: 'preset-child', version: 1, title: '小写标题', baseType: 'transform', parent } }); ui.renderInspector([node]); assert.match(visibleText(ui.editor.properties), /派生自\n英文标题 · v2/); assert.match(visibleText(ui.editor.properties), /派生为特色节点/); assert.match(visibleText(ui.editor.properties), /发布新版本/);
+  ui.editor.properties.replaceChildren(); delete node.origin.parent; ui.renderInspector([node]); assert.match(visibleText(ui.editor.properties), /派生自\n未记录/);
+});
+
+test('context search keeps derived candidate names readable and shows their parent before insertion', t => {
+  globalValue(t, 'document', { createElement: tag => new FormElement(tag) });
+  const ui = library(), parent = { kind: 'preset', id: 'preset-parent', version: 2, title: '简洁摘要', baseType: 'transform' }, definition = presetDefinitionFromNode(createNode('transform'), { title: '周报摘要', parent });
+  ui.records = new Map([['preset-weekly', { id: 'preset-weekly', title: '周报摘要', kind: 'preset', baseType: 'transform', version: 1, source: 'user', parent, definition }]]);
+  Object.assign(ui.editor, { contextMenu: new FormElement('div'), canvas: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }) }, worldPoint: (x, y) => ({ x, y }), cancelConnection() {}, studio: { executable: () => true }, commit(next) { this.doc = next; }, selectNode() {}, toast(message) { assert.fail(message); } });
+  ui.openSearch(100, 100);
+  const list = ui.editor.contextMenu.children.find(item => item.className === 'wf-context-items'), candidate = list.children.find(item => visibleText(item).includes('周报摘要 · v1'));
+  assert.ok(candidate); assert.match(visibleText(candidate), /派生自：简洁摘要 · v2/);
+  const foundation = list.children.find(item => visibleText(item).includes('数据整理 · 基础')); assert.ok(foundation); assert.doesNotMatch(visibleText(foundation), /派生自/);
+  candidate.listeners.get('click')(); assert.equal(ui.editor.doc.nodes[0].origin.id, 'preset-weekly'); assert.deepEqual(ui.editor.doc.nodes[0].origin.parent, parent);
+});
 
 test('a preset dialog opened before archive cannot publish after lifecycle becomes read-only', async t => {
   const { ui, editor, node } = presetHarness(t); let requests = 0; ui.api = async () => { requests++; }; ui.openSavePreset(node.id); const form = editor.dialog.children.find(item => item.tag === 'form'); editor.libraryLifecycle = 'archived'; await form.listeners.get('submit')({ preventDefault() {} }); assert.equal(requests, 0); assert.equal(editor.commits, undefined); assert.match(form.children.find(item => item.tag === 'p' && item.className === 'wf-field-feedback').textContent, /只读/);
@@ -152,6 +208,13 @@ test('foundation output is explicitly final while validation has executable pass
 test('adding a configured preset is guarded by lifecycle and schema before canvas mutation', () => {
   const ui = library(), id = [...ui.records.keys()][0]; let commits = 0, message = ''; Object.assign(ui.editor, { libraryReadOnly: true, commit() { commits++; }, toast(value) { message = value; } }); ui.addPreset(id); assert.equal(commits, 0);
   ui.editor.libraryReadOnly = false; ui.editor.flushTitleDraft = () => true; ui.editor.doc = createDocument(); ui.addPreset(id); assert.match(message, /升级/); assert.equal(commits, 0);
+});
+
+test('the legacy tool-add entry also records its built-in derivation and foundation parent', () => {
+  const editor = Object.create(WorkflowEditor.prototype), record = builtinNodePresets().find(item => item.toolName === 'text.trim');
+  Object.assign(editor, { doc: createDocument({ schemaVersion: 2 }), nodeElements: new Map(), canvas: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }) }, flushTitleDraft: () => true, worldPoint: (x, y) => ({ x, y }), snapPosition: point => point, commit(next) { this.doc = next; }, selectNode() {}, toast(value, failed) { if (failed) assert.fail(value); } });
+  const node = editor.addNode('tool', { x: 100, y: 100 }, { toolName: record.toolName });
+  assert.equal(node.origin.id, record.id); assert.equal(node.origin.parent.kind, 'foundation'); assert.equal(node.origin.parent.baseType, 'tool');
 });
 
 test('local nested edits cannot autosave or admit a child document as a root run', () => {

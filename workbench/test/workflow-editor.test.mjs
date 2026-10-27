@@ -228,9 +228,9 @@ function capabilityLibrary(t) {
   return { instance, search, items, attached, buttons: () => items.children.flatMap(section => section.children.filter(child => child.tag === 'button')) };
 }
 
-test('generic built-in tool presets reuse search and native keyboard click while creating one complete registered tool', t => {
+test('built-in tool derivations reuse search and native keyboard click while creating one complete registered tool', t => {
   globalValue(t, 'Element', FakeElement); const { instance, search, items, buttons } = capabilityLibrary(t); instance.renderLibrary();
-  assert.deepEqual(items.children.filter(section => section.children[0]?.textContent === '内置工具预设').map(section => section.children[0].textContent), ['内置工具预设']); assert.ok(buttons().some(item => item.dataset.type === 'tool' && !item.dataset.toolName), 'the generic code/tool entry remains available');
+  assert.deepEqual(items.children.filter(section => section.children[0]?.textContent === '内置派生节点').map(section => section.children[0].textContent), ['内置派生节点']); assert.ok(buttons().some(item => item.dataset.type === 'tool' && !item.dataset.toolName), 'the generic code/tool entry remains available');
   search.value = 'OpenInterfaceMark'; instance.renderLibrary(); const entries = buttons(); assert.equal(entries.length, 4); assert.ok(entries.every(item => item.dataset.toolName.startsWith('hdk.guide.annotate-')));
   const selected = entries[0], metadata = WORKFLOW_TOOLS.find(tool => tool.id === selected.dataset.toolName); let prevented = false; instance.onKeyDown({ key: 'Enter', target: selected, preventDefault() { prevented = true; } }); assert.equal(prevented, false, 'Enter keeps the native button click'); instance.onClick({ target: selected, detail: 0 });
   assert.equal(instance.doc.nodes.length, 1); assert.equal(instance.doc.edges.length, 0); const node = instance.doc.nodes[0]; assert.equal(node.title, metadata.label); assert.equal(node.config.executionMode, 'tool'); assert.equal(node.config.toolName, metadata.id); assert.deepEqual(node.ports, metadata.ports); assert.equal(node.config.resource, metadata.resource); assert.equal(node.config.timeoutSeconds, metadata.defaultConfig.timeoutSeconds); assert.equal(node.config.reviewImages, true); assert.equal(metadata.reviewRequired, true);

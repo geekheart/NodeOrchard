@@ -143,6 +143,7 @@ body.workflow-active .main-content { overflow: hidden; }
 .wf-node-library-tabs button[aria-pressed="true"] { color: var(--wf-text); background: var(--wf-panel); box-shadow: 0 1px 3px #0000000d; }
 .wf-node-library-tabs button:focus-visible { outline: 2px solid var(--wf-accent); outline-offset: 1px; }
 .wf-library-item small.wf-preset-meta { margin-top: 5px; font-size: 10px; color: var(--wf-secondary); }
+.wf-library-item small.wf-preset-parent { margin-top: 2px; color: var(--wf-secondary); overflow-wrap: anywhere; }
 .wf-foundation-letter { display: grid; place-items: center; font-size: 10px; font-weight: 600; }
 .wf-node-library-notice { margin: 12px; padding: 10px; border: 1px solid var(--wf-border); border-radius: 7px; }
 .wf-node-origin-list { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 7px 14px; font-size: 11px; line-height: 1.6; }

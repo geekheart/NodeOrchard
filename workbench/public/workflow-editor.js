@@ -5,6 +5,7 @@ import {
   validateDocument, serializeDocument,
 } from '../shared/workflow/workflow-model.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
+import { builtinNodePresets, instantiatePreset } from '../shared/workflow/workflow-presets.mjs';
 import { learningSnapshotChanged, mainChainSkillNodes } from './workflow-learning-ui.js';
 import { WorkflowStudioUI } from './workflow-studio-ui.js';
 import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
@@ -362,14 +363,14 @@ export class WorkflowEditor {
       parent.append(section);
     }
     const toolGroup = GROUPS.get(TYPES.get('tool').category);
-    for (const [domain, label] of [['builtin', '内置工具预设']]) {
-      const tools = WORKFLOW_TOOLS.filter(tool => `工具预设 ${tool.id} ${tool.label} ${tool.description}`.toLowerCase().includes(query));
+    for (const [domain, label] of [['builtin', '内置派生节点']]) {
+      const tools = WORKFLOW_TOOLS.filter(tool => `派生节点 ${tool.id} ${tool.label} ${tool.description}`.toLowerCase().includes(query));
       if (!tools.length) continue;
       const section = el('section', 'wf-library-group'); section.append(el('h3', '', label));
       for (const tool of tools) {
         const item = el('button', 'wf-library-item'); item.type = 'button'; item.dataset.type = 'tool'; item.dataset.toolName = tool.id; item.dataset.category = toolGroup.id;
         item.disabled = this.libraryReadOnly || this.doc.schemaVersion !== 2; item.title = item.disabled ? '只读或尚未升级的工作流不可添加能力。' : tool.description; item.style.setProperty('--node-color', toolGroup.color); item.setAttribute('aria-label', `添加${tool.label}能力`);
-        const tile = el('span', 'wf-type-icon'); tile.append(icon('code')); const content = el('span'); content.append(el('strong', '', tool.label), el('small', 'wf-library-item-description', item.disabled ? '升级后可添加此能力' : tool.description + (tool.reviewRequired ? ' · 必须人工审核' : '')));
+        const tile = el('span', 'wf-type-icon'); tile.append(icon('code')); const content = el('span'); content.append(el('strong', '', tool.label), el('small', 'wf-library-item-description', item.disabled ? '升级后可添加此能力' : tool.description + (tool.reviewRequired ? ' · 必须人工审核' : '')), el('small', 'wf-preset-parent', '派生自：工具与代码（基础节点）'));
         item.append(tile, content, el('span', 'wf-drag-grip', '⠿')); section.append(item);
       }
       parent.append(section);
@@ -799,15 +800,16 @@ export class WorkflowEditor {
       const r = this.canvas.getBoundingClientRect(), point = position || this.worldPoint(r.left + r.width / 2, r.top + r.height / 2), shift = position ? 0 : (this.doc.nodes.length % 4) * 16;
       const sizes = new Map([...this.nodeElements].map(([id, card]) => [id, { width: card.offsetWidth || 270, height: card.offsetHeight || 180 }]));
       const vacant = vacantNodePosition(this.doc.nodes, { x: point.x - 112 + shift, y: point.y - 50 + shift }, sizes);
+      let template;
       let overrides = { title: COPY[type] || TYPES.get(type)?.label, ...(this.doc.schemaVersion === 2 && ['input', 'skill'].includes(type) ? { config: { ...(type === 'skill' ? { inputType: 'object' } : {}), outputType: 'object' } } : {}) };
       if (toolName) {
         const tool = WORKFLOW_TOOLS.find(item => item.id === toolName);
-        if (type !== 'tool' || !tool) throw new Error('请选择已注册的工具预设。');
+        if (type !== 'tool' || !tool) throw new Error('请选择已注册的工具派生节点。');
         if (this.doc.schemaVersion !== 2) throw new Error('专业能力需先升级为并行工作流。');
-        overrides = { title: tool.label, ...(tool.ports ? { ports: clone(tool.ports) } : {}), config: { ...clone(tool.defaultConfig || {}), executionMode: 'tool', toolName: tool.id, inputType: tool.inputType, outputType: tool.outputType, ...(tool.resource ? { resource: tool.resource } : {}), reviewImages: tool.reviewRequired === true || tool.defaultConfig?.reviewImages === true } };
+        template = builtinNodePresets().find(record => record.toolName === toolName);
       }
       if (type === 'output' && this.doc.schemaVersion === 2) overrides.config = { ...overrides.config, stage: 'final' };
-      const node = createNode(type, this.snapPosition(vacant), overrides);
+      const node = template ? instantiatePreset(template, this.snapPosition(vacant)) : createNode(type, this.snapPosition(vacant), overrides);
       this.commit({ ...this.doc, nodes: [...this.doc.nodes, node] }, '添加节点'); this.selectNode(node.id); this.toast(`已添加${COPY[type]}节点。`); return node;
     } catch (error) { this.toast(error.message, true); }
   }

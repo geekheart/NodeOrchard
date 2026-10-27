@@ -166,7 +166,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         return;
       }
       if (req.method === 'POST' && path === '/api/connect') { await readJson(req); return json(res, 200, await application.connect()); }
-      if (path === '/api/workflow-node-presets' && requestURL.search) return json(res, 400, { error: '节点预设列表或创建请求不能包含查询参数。' });
+      if (path === '/api/workflow-node-presets' && requestURL.search) return json(res, 400, { error: '节点派生列表或创建请求不能包含查询参数。' });
       if (req.method === 'GET' && path === '/api/workflow-node-presets') return json(res, 200, { presets: application.nodePresets.list() });
       if (req.method === 'POST' && path === '/api/workflow-node-presets') return json(res, 201, { preset: application.nodePresets.create(await readJson(req, 2 * 1024 * 1024 + 8192)) });
       const nodePresetMatch = path.match(/^\/api\/workflow-node-presets\/([^/]+)$/);
@@ -175,7 +175,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         if (req.method === 'GET') {
           const keys = [...requestURL.searchParams.keys()];
           const version = requestURL.searchParams.get('version');
-          if (keys.some(key => key !== 'version') || requestURL.searchParams.getAll('version').length > 1 || (version !== null && !/^[1-9]\d*$/.test(version))) return json(res, 400, { error: '节点预设版本查询无效。' });
+          if (keys.some(key => key !== 'version') || requestURL.searchParams.getAll('version').length > 1 || (version !== null && !/^[1-9]\d*$/.test(version))) return json(res, 400, { error: '节点派生版本查询无效。' });
           return json(res, 200, { preset: application.nodePresets.get(id, version === null ? {} : { version: Number(version) }) });
         }
         if (req.method === 'POST') {

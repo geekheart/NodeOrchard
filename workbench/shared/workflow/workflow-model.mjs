@@ -282,13 +282,41 @@ export function createNode(type, position = { x: 0, y: 0 }, options = {}) {
   };
 }
 
+export function foundationNodeParent(type) {
+  nodeType(type);
+  return { kind: 'foundation', baseType: type, title: TYPES.get(type).label };
+}
+
+// A direct parent is a bounded identity snapshot, never a recursive ancestry.
+// Unknown is reserved for old records whose parent was not recorded.
+export function validateNodeParent(value, type) {
+  nodeType(type);
+  const kind = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'kind')?.value : undefined;
+  object(value, '派生父级', kind === 'unknown' ? ['kind', 'baseType']
+    : kind === 'foundation' ? ['kind', 'baseType', 'title'] : ['kind', 'id', 'version', 'title', 'baseType']);
+  if (nodeType(value.baseType) !== type) fail('派生父级的基础类型必须与当前节点一致。');
+  if (value.kind === 'unknown') return { kind: 'unknown', baseType: type };
+  if (value.kind === 'foundation') {
+    const parent = foundationNodeParent(type);
+    if (value.title !== parent.title) fail('基础父级名称必须与基础节点一致。');
+    return parent;
+  }
+  if (!['preset', 'component'].includes(value.kind)) fail('派生父级种类无效。');
+  return { kind: value.kind, id: identifier(value.id, '派生父级 ID'),
+    version: number(value.version, '派生父级版本', 1, Number.MAX_SAFE_INTEGER, true),
+    title: text(value.title, '派生父级名称', 120, { empty: false }), baseType: type };
+}
+
 function cleanOrigin(value, type) {
-  object(value, '节点来源', ['kind', 'id', 'version', 'title', 'baseType']);
+  object(value, '节点来源', ['kind', 'id', 'version', 'title', 'baseType', 'parent']);
   if (!['preset', 'component'].includes(value.kind)) fail('节点来源必须是 preset 或 component。');
   if (nodeType(value.baseType) !== type) fail('节点来源的基础类型必须与当前节点一致。');
+  const parent = has(value, 'parent') ? validateNodeParent(value.parent, type) : undefined;
+  if (parent && has(parent, 'id') && parent.id === value.id) fail('派生节点不能以自身作为父级。');
   return { kind: value.kind, id: identifier(value.id, '节点来源 ID'),
     version: number(value.version, '节点来源版本', 1, Number.MAX_SAFE_INTEGER, true),
-    title: text(value.title, '节点来源名称', 120, { empty: false }), baseType: type };
+    title: text(value.title, '节点来源名称', 120, { empty: false }), baseType: type,
+    ...(parent ? { parent } : {}) };
 }
 
 export function getPorts(node) {

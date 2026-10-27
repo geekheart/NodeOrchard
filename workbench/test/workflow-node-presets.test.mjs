@@ -38,6 +38,63 @@ function component() {
   return createNode('subflow', { x: 0, y: 0 }, { title: '生成并审核标注', config: { document, workflowRef: document.id } });
 }
 
+test('derived nodes retain their immediate immutable parent instead of flattening to a primitive', t => {
+  const { store } = setup(t);
+  const first = store.create({ definition: definition() });
+  assert.deepEqual(first.parent, { kind: 'foundation', baseType: 'tool', title: '工具与代码' });
+  const instance = instantiatePreset(first);
+  assert.deepEqual(instance.origin.parent, first.parent);
+  const child = store.create({ definition: presetDefinitionFromNode(instance, { title: '特色文本整理' }) });
+  assert.deepEqual(child.parent, { kind: 'preset', id: first.id, version: 1, title: '去除空白', baseType: 'tool' });
+  const next = { ...child.definition, title: '特色文本整理第二版' };
+  assert.deepEqual(store.update(child.id, { definition: next, expectedRevision: 1 }).parent, child.parent);
+  store.update(first.id, { definition: { ...first.definition, title: '父级新名称' }, expectedRevision: 1 });
+  assert.equal(store.get(child.id).parent.title, '去除空白');
+  assert.equal(store.get(child.id).parent.version, 1);
+  assert.deepEqual(store.get(first.id, { version: child.parent.version }).parent, first.parent);
+});
+
+test('new derivations reject missing, fabricated, recursive and silently replaced parent identities', t => {
+  const { store } = setup(t), source = store.create({ definition: definition() });
+  const fromSource = presetDefinitionFromNode(instantiatePreset(source));
+  const missing = definition(); delete missing.parent;
+  for (const value of [missing, { ...definition(), parent: { kind: 'unknown', baseType: 'tool' } }]) assert.throws(() => store.create({ definition: value }), { httpStatus: 400 });
+  for (const parent of [
+    { ...fromSource.parent, id: 'preset-unavailable' }, { ...fromSource.parent, version: 99 },
+    { ...fromSource.parent, title: '伪造父级' }, { ...fromSource.parent, kind: 'component' },
+  ]) assert.throws(() => store.create({ definition: { ...fromSource, parent } }), { httpStatus: 409 });
+  assert.throws(() => store.create({ definition: { ...fromSource, parent: { ...fromSource.parent, baseType: 'skill' } } }), { httpStatus: 400 });
+  const child = store.create({ definition: fromSource });
+  assert.throws(() => store.update(child.id, { definition: { ...child.definition, parent: source.parent }, expectedRevision: 1 }), { httpStatus: 409 });
+  assert.throws(() => store.update(child.id, { definition: { ...child.definition, parent: { ...child.parent, id: child.id } }, expectedRevision: 1 }), { httpStatus: 409 });
+  assert.throws(() => validatePresetDefinition({ ...fromSource, parent: { ...fromSource.parent, parent: source.parent } }), /未知字段/);
+  assert.throws(() => instantiatePreset({ id: source.id, version: 2, definition: fromSource }), /自身/);
+  let reads = 0;
+  assert.throws(() => createNode('tool', {}, { origin: { kind: 'preset', id: source.id, version: 1, title: source.title, baseType: 'tool', parent: { get kind() { reads++; return 'foundation'; }, baseType: 'tool', title: '工具与代码' } } }), /访问器/);
+  assert.equal(reads, 0);
+  assert.deepEqual(store.get(child.id), child);
+});
+
+test('legacy derivations project unknown direct parents without rewriting history or old node origins', t => {
+  const { store, db } = setup(t), old = definition(); delete old.parent;
+  const bytes = JSON.stringify(old), at = '2026-01-01T00:00:00.000Z';
+  db.prepare('INSERT INTO workflow_node_presets VALUES(?,1,?,?)').run('preset-legacy', at, at);
+  db.prepare('INSERT INTO workflow_node_preset_versions VALUES(?,1,?,?)').run('preset-legacy', at, bytes);
+  const legacy = store.get('preset-legacy');
+  assert.deepEqual(legacy.parent, { kind: 'unknown', baseType: 'tool' });
+  assert.deepEqual(legacy.definition.parent, legacy.parent);
+  assert.deepEqual(store.list().find(row => row.id === legacy.id).parent, legacy.parent);
+  const instance = instantiatePreset(legacy);
+  assert.deepEqual(instance.origin.parent, legacy.parent);
+  assert.equal(db.prepare('SELECT definition FROM workflow_node_preset_versions WHERE preset_id=? AND version=1').get(legacy.id).definition, bytes);
+  const document = createDocument({ schemaVersion: 2 });
+  const historical = { ...instance, origin: { kind: 'preset', id: legacy.id, version: 1, title: legacy.title, baseType: 'tool' } };
+  document.nodes = [historical]; assert.deepEqual(validateDocument(document).nodes[0].origin, historical.origin);
+  const next = store.update(legacy.id, { definition: { ...legacy.definition, title: '旧派生第二版' }, expectedRevision: 1 });
+  assert.deepEqual(next.parent, legacy.parent);
+  assert.equal(db.prepare('SELECT definition FROM workflow_node_preset_versions WHERE preset_id=? AND version=1').get(legacy.id).definition, bytes);
+});
+
 test('every builtin tool is a metadata-driven primitive preset with unchanged ports and execution defaults', () => {
   const records = builtinNodePresets();
   assert.equal(records.length, WORKFLOW_TOOLS.length);
@@ -53,7 +110,7 @@ test('every builtin tool is a metadata-driven primitive preset with unchanged po
     assert.equal(node.config.reviewImages, metadata.reviewRequired === true || metadata.defaultConfig?.reviewImages === true);
     for (const [key, value] of Object.entries(metadata.defaultConfig || {})) assert.deepEqual(node.config[key], value);
     if (metadata.ports) assert.deepEqual(node.ports, metadata.ports);
-    assert.deepEqual(node.origin, { id: row.id, version: 1, title: row.title, baseType: 'tool', kind: 'preset' });
+    assert.deepEqual(node.origin, { id: row.id, version: 1, title: row.title, baseType: 'tool', kind: 'preset', parent: { kind: 'foundation', baseType: 'tool', title: '工具与代码' } });
   }
   records[0].definition.node.config.toolName = 'changed';
   assert.equal(builtinNodePresets()[0].definition.node.config.toolName, WORKFLOW_TOOLS[0].id);

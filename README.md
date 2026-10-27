@@ -340,7 +340,7 @@ git diff --cached --stat
 | 文档 | 内容 |
 | --- | --- |
 | [完整操作指南](workbench/docs/user-guide.md) | 页面、编辑、运行、定时、学习与结果反馈 |
-| [节点体系](workbench/docs/workflow-node-system.md) | 基础节点、预设、组合与当前限制 |
+| [节点体系](workbench/docs/workflow-node-system.md) | 基础节点、节点派生、父级来源与组合 |
 | [工作流对话](workbench/docs/workflow-conversation.md) | AI 修改、产物反馈与回复对象 |
 | [工作流文件夹与便携包](workbench/docs/workflow-packages.md) | 独立目录、迁移、`.workflow` ZIP 导入导出及历史只读 |
 | [输入与恢复](workbench/docs/workflow-inputs-and-recovery.md) | 输入预检、原件、审核与重启恢复 |

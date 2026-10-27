@@ -52,7 +52,7 @@ async function fixture(t) {
   f.restart = async () => { await f.close(); await f.open(); };
   f.request = async (path = ROUTE, { body, raw, method = body === undefined && raw === undefined ? 'GET' : 'POST', headers = {} } = {}) => {
     const response = await fetch(f.origin + path, { method,
-      headers: method === 'POST' ? { 'Content-Type': 'application/json', 'X-Workbench-Token': f.csrfToken, ...headers } : headers,
+      headers: method !== 'GET' ? { 'Content-Type': 'application/json', 'X-Workbench-Token': f.csrfToken, ...headers } : headers,
       ...(body === undefined && raw === undefined ? {} : { body: raw ?? JSON.stringify(body) }),
     });
     return { status: response.status, body: await response.json(), headers: response.headers };
@@ -105,6 +105,24 @@ test('node preset HTTP persists immutable versions and existing pinned workflow 
   assert.deepEqual((await f.request(`/api/workflow-library/${document.id}`)).body.workflow, snapshot);
   const summary = (await f.request()).body.presets.find(row => row.id === first.id);
   assert.equal(summary.version, 2); assert.equal(summary.title, '大写文本'); assert.equal(Object.hasOwn(summary, 'definition'), false);
+});
+
+test('derivation HTTP returns an explicit frozen parent and refuses absent or falsified ancestry', async t => {
+  const f = await fixture(t);
+  const missing = definition(); delete missing.parent;
+  assert.equal((await f.request(ROUTE, { body: { definition: missing } })).status, 400);
+  const parent = saved(await f.request(ROUTE, { body: { definition: definition() } }));
+  assert.deepEqual(parent.parent, { kind: 'foundation', baseType: 'tool', title: '工具与代码' });
+  const childDefinition = presetDefinitionFromNode(instantiatePreset(parent), { title: '特色清理' });
+  const forged = await f.request(ROUTE, { body: { definition: { ...childDefinition, parent: { ...childDefinition.parent, version: 2 } } } });
+  assert.equal(forged.status, 409);
+  const child = saved(await f.request(ROUTE, { body: { definition: childDefinition } }));
+  assert.deepEqual(child.parent, { kind: 'preset', id: parent.id, version: 1, title: '文本清理', baseType: 'tool' });
+  const changedParent = await f.request(`${ROUTE}/${child.id}`, { body: { definition: { ...child.definition, parent: parent.parent }, expectedRevision: 1 } });
+  assert.equal(changedParent.status, 409);
+  assert.deepEqual((await f.request()).body.presets.find(row => row.id === child.id).parent, child.parent);
+  await f.restart();
+  assert.deepEqual((await f.request(`${ROUTE}/${child.id}`)).body.preset.parent, child.parent);
 });
 
 test('node preset HTTP protects writes with CSRF, same-origin JSON and strict envelopes without side effects', async t => {
@@ -221,7 +239,7 @@ test('node preset HTTP accepts large definitions within budget and rejects overs
     const inner = createDocument({ schemaVersion: 2, title: '大量代码配置' });
     inner.nodes = Array.from({ length: count }, (_, index) => createNode('tool', { x: index * 10, y: 0 }, { id: `code-${index}`,
       config: { code: '// ' + '中'.repeat(94000), language: 'javascript' } }));
-    return { title: '大组合预设', description: '', kind: 'component', node: createNode('subflow', { x: 0, y: 0 }, { config: { document: inner } }) };
+    return { title: '大组合预设', description: '', kind: 'component', parent: { kind: 'foundation', baseType: 'subflow', title: '子流程' }, node: createNode('subflow', { x: 0, y: 0 }, { config: { document: inner } }) };
   };
   const within = large(6);
   assert.ok(Buffer.byteLength(JSON.stringify(within)) > 1000000 && Buffer.byteLength(JSON.stringify(within)) < 2 * 1024 * 1024);
