@@ -1,5 +1,8 @@
 import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { runArtifacts, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
+import { conversationTurnGroups, canRetryConversationTurn } from '../shared/workflow/workflow-conversation-issues.mjs';
+
+export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
 const clean = value => String(value ?? '').replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[已隐藏密钥]').replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [已隐藏]').replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|authorization)["']?\s*[:=]\s*["']?)([^\s"',;}\]]+)/gi, '$1[已隐藏]');
 const element = (tag, className = '', text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = clean(text); return node; };
@@ -8,9 +11,18 @@ const clone = value => structuredClone(value);
 const truncate = (value, size = 70) => { const text = clean(value); return text.length > size ? text.slice(0, size) + '…' : text; };
 const valueText = value => typeof value === 'string' ? clean(value) : value === undefined ? '' : clean(JSON.stringify(value, null, 2));
 const shortId = value => String(value || '').slice(0, 8);
+const PENDING_PREFERENCE = 'workbench.conversation-pending-expanded:';
+const settled = turn => ['resolved', 'superseded'].includes(turn?.pendingState?.status);
+const turnStatus = turn => settled(turn) && turn.pendingState.label || TURN_STATUS[turn.status] || '已记录';
+const contextKey = value => JSON.stringify(Object.fromEntries(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b))));
+const coveredReview = (turn, pending) => {
+  const actions = turn.actions || [];
+  return actions.length > 0 && actions.every(action => action.kind?.startsWith('review-') && action.context?.runId && action.context?.nodeId
+    && Number.isInteger(action.context.attempt) && action.context.attemptId
+    && pending.some(item => item.kind === 'review' && ['runId', 'nodeId', 'attempt', 'attemptId'].every(key => item.context?.[key] === action.context[key])));
+};
 const INTENTS = [['auto', '自动理解'], ['discuss', '对话与咨询'], ['workflow', '搭建 / 修改流程'], ['redo', '重做本次产物'], ['feedback', '记录产物反馈'], ['skill', '改进 Skill']];
 const TURN_STATUS = { thinking: '正在思考', queued: '正在准备', proposed: '待应用修改', awaiting_action: '待选择操作', complete: '已记录', error: '处理失败', applied: '已应用', interrupted: '已中断', dismissed: '已结束事项' };
-const unresolved = turn => ['thinking', 'queued', 'proposed', 'awaiting_action', 'error', 'interrupted'].includes(turn.status) && !turn.outcome?.applied;
 const image = item => /^image\//.test(item.mimeType || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(item.name || item.path || '');
 const safeArtifactURL = value => typeof value === 'string' && /^\/api\/workflow-v2\/artifacts\/[A-Za-z0-9_-]+(?:\?download=1)?$/.test(value) ? value : null;
 const duration = milliseconds => { const seconds = Math.floor(Math.max(0, milliseconds || 0) / 1000); return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; };
@@ -49,10 +61,7 @@ export function conversationContext(document, run, nodeId, attachment = {}) {
   return context;
 }
 
-export function conversationTurnGroups(turns = []) {
-  return { latest: turns.at(-1) || null, history: turns.slice(0, -1), unresolved: turns.filter(unresolved) };
-}
-export const canDismissConversationTurn = turn => ['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn?.status) && !turn.actions?.some(action => action.kind?.startsWith('review-'));
+export const canDismissConversationTurn = turn => ['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn?.status) && !settled(turn) && !turn.actions?.some(action => action.kind?.startsWith('review-'));
 export const isConversationRunCommand = value => /^(?:(?:请|帮我)\s*)?(?:运行|开始运行|立即运行|直接运行|运行一次|执行|开始执行|直接执行|运行当前流程|运行流程|执行当前流程)[。！!\s]*$/.test(value.trim());
 
 export class WorkflowConversationUI {
@@ -62,7 +71,29 @@ export class WorkflowConversationUI {
     this.mount(); this.syncWorkflow();
   }
   currentDocument() { return this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
-  state(id = this.workflowId) { if (!this.states.has(id)) this.states.set(id, { conversation: { workflowId: id, revision: 0, turns: [] }, pending: [], draft: '', intent: 'auto', loading: false, loaded: false, sending: false, request: 0, error: '', retry: null, expanded: new Set(), messageEdit: 0 }); return this.states.get(id); }
+  state(id = this.workflowId) {
+    if (!this.states.has(id)) {
+      let pendingExpanded = false; try { pendingExpanded = localStorage.getItem(PENDING_PREFERENCE + id) === 'true'; } catch { /* Keep the current preference in memory. */ }
+      this.states.set(id, { conversation: { workflowId: id, revision: 0, turns: [] }, pending: [], pendingExpanded, draft: '', intent: 'auto', loading: false, loaded: false, sending: false, request: 0, error: '', retry: null, retryOfTurnId: null, retryTarget: null, expanded: new Set(), messageEdit: 0 });
+    }
+    return this.states.get(id);
+  }
+  setPendingExpanded(expanded, id = this.workflowId) {
+    this.state(id).pendingExpanded = expanded;
+    try { localStorage.setItem(PENDING_PREFERENCE + id, String(expanded)); } catch { /* The memory preference still survives renders and SSE. */ }
+  }
+  clearRetryTarget(state = this.state()) { state.retryOfTurnId = null; state.retryTarget = null; }
+  beginRetry(turn) {
+    if (!['error', 'interrupted'].includes(turn?.status) || settled(turn)) return;
+    const state = this.state(); this.clearRetryTarget(state); state.draft = turn.user?.text || ''; state.intent = 'auto';
+    this.focusContext(turn.user?.context || {});
+    if (canRetryConversationTurn(turn)) { state.retryOfTurnId = turn.id; state.retryTarget = { text: state.draft.trim(), context: contextKey(this.getContext()) }; }
+    this.render(); this.input.focus();
+  }
+  retryTargetFor(text, context, state = this.state()) {
+    if (state.retryOfTurnId && state.retryTarget?.text === text && state.retryTarget.context === contextKey(context)) return state.retryOfTurnId;
+    this.clearRetryTarget(state); return undefined;
+  }
   mount() {
     const panel = element('aside', 'wf-conversation'); panel.setAttribute('aria-label', '工作流 AI 对话');
     this.resizeHandle = element('div', 'wf-conversation-resize'); this.resizeHandle.tabIndex = 0; this.resizeHandle.setAttribute('role', 'separator'); this.resizeHandle.setAttribute('aria-label', '调整工作流对话宽度'); this.resizeHandle.setAttribute('aria-orientation', 'vertical'); this.resizeHandle.setAttribute('aria-valuemin', '280'); this.resizeHandle.setAttribute('aria-valuemax', '560'); this.resizeHandle.setAttribute('aria-valuenow', '360');
@@ -80,9 +111,9 @@ export class WorkflowConversationUI {
     advanced.append(element('summary', '', '高级：指定处理方式')); this.intentSelect = element('select'); this.intentSelect.setAttribute('aria-label', '本次对话的修改范围');
     for (const [id, label] of INTENTS) { const option = element('option', '', label); option.value = id; this.intentSelect.append(option); }
     this.intentSelect.addEventListener('change', () => { this.state().intent = this.intentSelect.value; this.renderComposerHelp(); });
-    advanced.append(this.intentSelect); this.followSelection = button('使用当前结果', () => { this.attachment = null; this.renderContext(); }, 'wf-conversation-link'); options.append(advanced, this.followSelection);
+    advanced.append(this.intentSelect); this.followSelection = button('使用当前结果', () => { this.attachment = null; this.clearRetryTarget(); this.renderContext(); }, 'wf-conversation-link'); options.append(advanced, this.followSelection);
     this.input = element('textarea'); this.input.rows = 3; this.input.maxLength = 8000; this.input.placeholder = '描述任务、回复结果，或直接说“运行”…'; this.input.setAttribute('aria-label', '给工作流 AI 的消息');
-    this.input.addEventListener('input', () => { const state = this.state(); state.draft = this.input.value; state.messageEdit++; this.updateSendButton(); });
+    this.input.addEventListener('input', () => { const state = this.state(); state.draft = this.input.value; state.messageEdit++; this.retryTargetFor(state.draft.trim(), this.getContext(), state); this.updateSendButton(); });
     this.input.addEventListener('keydown', event => { event.stopPropagation(); if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void this.send(); } });
     this.help = element('p', 'wf-conversation-help');
     const actions = element('div', 'wf-conversation-composer-actions'); this.runButton = button('运行当前流程', () => void this.startRun(), 'wf-button'); this.sendButton = element('button', 'wf-button primary', '发送'); this.sendButton.type = 'submit'; this.sendButton.setAttribute('aria-label', '发送工作流消息'); actions.append(this.runButton, this.sendButton);
@@ -186,7 +217,7 @@ export class WorkflowConversationUI {
     const selected = this.editor.nodeLibrary?.nested ? null : this.editor.selection?.size === 1 ? [...this.editor.selection][0] : null;
     return conversationContext(document, run, selected);
   }
-  focusContext(context = {}, { intent } = {}) { if (INTENTS.some(([id]) => id === intent)) this.state().intent = intent; this.attachment = { ...Object.fromEntries(['documentRevision', 'runId', 'nodeId', 'attempt', 'attemptId', 'artifactIds', 'artifactHashes'].filter(key => context[key] !== undefined).map(key => [key, clone(context[key])])), workflowId: this.currentDocument().id }; this.renderContext(); this.toggle(true); this.render(); this.input.focus(); }
+  focusContext(context = {}, { intent } = {}) { this.clearRetryTarget(); if (INTENTS.some(([id]) => id === intent)) this.state().intent = intent; this.attachment = { ...Object.fromEntries(['documentRevision', 'runId', 'nodeId', 'attempt', 'attemptId', 'artifactIds', 'artifactHashes'].filter(key => context[key] !== undefined).map(key => [key, clone(context[key])])), workflowId: this.currentDocument().id }; this.renderContext(); this.toggle(true); this.render(); this.input.focus(); }
   describeContext(context = {}) {
     const document = this.currentDocument(), run = this.runtime?.runs?.get(context.runId), nodes = run?.document?.nodes || document.nodes || [], node = nodes.find(item => item.id === context.nodeId);
     const labels = [document.title || '当前工作流']; if (context.runId) labels.push(`运行 ${shortId(context.runId)}`); if (context.nodeId) labels.push(node?.title || `节点 ${shortId(context.nodeId)}`); if (context.attempt) labels.push(`第 ${context.attempt} 次`); if (context.artifactIds?.length) labels.push(`${context.artifactIds.length} 项产物`); return labels;
@@ -221,7 +252,7 @@ export class WorkflowConversationUI {
     } else {
       if (groups.history.length) {
         const history = element('div', 'wf-conversation-history');
-        for (const turn of groups.history) { const detail = element('details', 'wf-conversation-turn-history'); detail.dataset.turnId = turn.id; detail.open = state.expanded.has(turn.id); const summary = element('summary'); summary.append(element('span', '', truncate(turn.user?.text || '历史对话', 42)), element('span', 'wf-conversation-history-state', TURN_STATUS[turn.status] || '已记录')); detail.append(summary); if (detail.open) detail.append(this.turnView(turn)); detail.addEventListener('toggle', () => { if (detail.open) { state.expanded.add(turn.id); if (detail.children.length === 1) detail.append(this.turnView(turn)); } else state.expanded.delete(turn.id); }); history.append(detail); }
+        for (const turn of groups.history) { const detail = element('details', 'wf-conversation-turn-history'); detail.dataset.turnId = turn.id; detail.open = state.expanded.has(turn.id); const summary = element('summary'); summary.append(element('span', '', truncate(turn.user?.text || '历史对话', 42)), element('span', 'wf-conversation-history-state', turnStatus(turn))); detail.append(summary); if (detail.open) detail.append(this.turnView(turn)); detail.addEventListener('toggle', () => { if (detail.open) { state.expanded.add(turn.id); if (detail.children.length === 1) detail.append(this.turnView(turn)); } else state.expanded.delete(turn.id); }); history.append(detail); }
         this.messages.append(history);
       }
       this.messages.append(this.turnView(groups.latest, true));
@@ -256,7 +287,7 @@ export class WorkflowConversationUI {
     const section = element('section', 'wf-conversation-turn' + (latest ? ' is-latest' : '')); section.dataset.turnId = turn.id;
     const user = element('article', 'wf-conversation-message is-user'); user.append(element('div', 'wf-conversation-speaker', '你'), element('p', 'wf-conversation-prose', turn.user?.text || ''));
     const context = turn.user?.context || {}; const scope = element('p', 'wf-conversation-message-scope', this.describeContext(context).join(' / ')); user.append(scope); section.append(user);
-    const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', TURN_STATUS[turn.status] || '已记录')); assistant.append(meta);
+    const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', turnStatus(turn))); assistant.append(meta);
     const text = turn.assistant?.text || turn.error?.message || (typeof turn.error === 'string' ? turn.error : '') || (['thinking', 'queued'].includes(turn.status) ? '正在结合当前流程和明确选择的对象生成回复…' : '已保存本次对话。'); assistant.append(element('p', 'wf-conversation-prose', text));
     const progress = this.diagnosticProgressView(turn); if (progress) assistant.append(progress);
     if (Array.isArray(turn.assistant?.summary) && turn.assistant.summary.length) { const list = element('ul', 'wf-conversation-plan-summary'); for (const item of turn.assistant.summary) list.append(element('li', '', item)); assistant.append(list); }
@@ -275,9 +306,10 @@ export class WorkflowConversationUI {
       try { this.accept(await this.api(`/api/workflow-conversations/${encodeURIComponent(this.workflowId)}/turns/${encodeURIComponent(turn.id)}/action`, { method: 'POST', body: { action: 'interrupt-turn' } })); }
       catch (error) { this.state().error = error.message; this.renderNotice(); }
     }, 'wf-conversation-link'));
-    if (Array.isArray(turn.actions) && turn.actions.length && !turn.outcome && !['complete', 'applied', 'dismissed'].includes(turn.status)) { const actions = element('div', 'wf-conversation-actions'); for (const action of turn.actions.filter(item => item.kind !== 'mark-applied')) { const item = button(action.label || action.kind, () => void this.performAction(turn, action), 'wf-button' + (action.kind === 'review-approve' ? ' primary' : '')); item.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:${action.id}`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(item); if (action.context?.nodeId || action.context?.runId) actions.append(element('p', 'wf-conversation-message-scope', this.describeContext(action.context).join(' / '))); } if (actions.children.length) assistant.append(actions); }
+    if (Array.isArray(turn.actions) && turn.actions.length && !turn.outcome && !settled(turn) && !['complete', 'applied', 'dismissed'].includes(turn.status)) { const actions = element('div', 'wf-conversation-actions'); for (const action of turn.actions.filter(item => item.kind !== 'mark-applied')) { const item = button(action.label || action.kind, () => void this.performAction(turn, action), 'wf-button' + (action.kind === 'review-approve' ? ' primary' : '')); item.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:${action.id}`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(item); if (action.context?.nodeId || action.context?.runId) actions.append(element('p', 'wf-conversation-message-scope', this.describeContext(action.context).join(' / '))); } if (actions.children.length) assistant.append(actions); }
+    if (settled(turn) && turn.actions?.some(action => action.kind?.startsWith('review-'))) assistant.append(element('p', 'wf-conversation-help', '此条历史审核入口已结束；如仍需审核，请使用当前待审核卡。'));
     if (turn.outcome) { const uncertain = ['rejected', 'unknown', 'started'].includes(turn.outcome.status), outcome = element('p', uncertain ? 'wf-conversation-error' : 'wf-conversation-outcome', uncertain ? turn.outcome.error || '操作结果尚未确认，请核对当前运行状态。系统不会自动重复操作。' : turn.outcome.label || turn.outcome.message || (turn.outcome.action === 'mark-applied' || turn.outcome.applied ? '节点修改已应用，可使用画布撤销。' : '操作已记录。')); assistant.append(outcome); }
-    if (['error', 'interrupted'].includes(turn.status)) assistant.append(button('载入消息重试', () => { const state = this.state(); state.draft = turn.user?.text || ''; state.intent = 'auto'; this.focusContext(turn.user?.context || {}); this.render(); this.input.focus(); }, 'wf-button'));
+    if (['error', 'interrupted'].includes(turn.status) && !settled(turn)) assistant.append(button('载入消息重试', () => this.beginRetry(turn), 'wf-button'));
     if (canDismissConversationTurn(turn)) { const dismiss = button('结束此事项', () => void this.dismissTurn(turn), 'wf-conversation-link'); dismiss.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:dismiss`) || this.editor.libraryReadOnly; assistant.append(dismiss); }
     section.append(assistant); return section;
   }
@@ -295,11 +327,15 @@ export class WorkflowConversationUI {
     return box;
   }
   renderPending(groups) {
-    this.pendingHost.replaceChildren(); const state = this.state(), pending = state.pending || [], other = groups.unresolved.filter(turn => turn.id !== groups.latest?.id && !['thinking', 'queued'].includes(turn.status));
+    this.pendingHost.replaceChildren(); const state = this.state(), pending = state.pending || [], other = groups.unresolved.filter(turn => turn.id !== groups.latest?.id && !['thinking', 'queued'].includes(turn.status) && !coveredReview(turn, pending));
     const failedRun = this.runtime?.currentRun?.(), failure = failedRun?.workflowId === this.currentDocument()?.id && ['error', 'interrupted', 'unknown'].includes(failedRun.status) ? failedRun : null;
     this.pendingHost.hidden = !pending.length && !other.length && !failure; if (this.pendingHost.hidden) return;
-    const title = element('h3', '', `待处理 · ${pending.length + other.length + Number(Boolean(failure))}`); this.pendingHost.append(title);
-    if (failure) this.pendingHost.append(button(`运行${STUDIO_STATUS[failure.status] || '异常'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'));
+    const reviewCount = pending.filter(item => item.kind === 'review').length, contentId = `wf-conversation-pending-${this.workflowId}`;
+    const title = button(`待处理 · ${pending.length + other.length + Number(Boolean(failure))}${reviewCount ? ` · 审核 ${reviewCount}` : ''}`, () => {
+      this.setPendingExpanded(!state.pendingExpanded); body.hidden = !state.pendingExpanded; title.setAttribute('aria-expanded', String(state.pendingExpanded));
+    }, 'wf-conversation-pending-toggle'); title.setAttribute('aria-expanded', String(state.pendingExpanded)); title.setAttribute('aria-controls', contentId);
+    const body = element('div', 'wf-conversation-pending-body'); body.id = contentId; body.hidden = !state.pendingExpanded; this.pendingHost.append(title, body);
+    if (failure) body.append(button(`运行异常 · ${STUDIO_STATUS[failure.status] || '待核对'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'));
     for (const item of pending) {
       const row = element('div', 'wf-conversation-pending-item'), selected = this.attachment?.runId === item.context?.runId && this.attachment?.nodeId === item.context?.nodeId && this.attachment?.attempt === item.context?.attempt;
       row.classList.toggle('is-selected', selected); const target = button(item.label || '待审核产物', () => { this.focusContext(item.context); this.activeReview = item.id; this.state().intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'); target.title = this.describeContext(item.context).join(' / '); row.append(target);
@@ -311,9 +347,20 @@ export class WorkflowConversationUI {
         for (const control of [approve, revise, stop]) control.disabled = state.sending || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested);
         actions.append(approve, revise, stop); row.append(actions);
       }
-      this.pendingHost.append(row);
+      body.append(row);
     }
-    for (const turn of other) this.pendingHost.append(button(`${TURN_STATUS[turn.status] || '待处理'} · ${truncate(turn.user?.text, 30)}`, () => { state.expanded.add(turn.id); this.render(); this.messages.querySelector(`[data-turn-id="${CSS.escape(turn.id)}"]`)?.scrollIntoView({ block: 'nearest' }); }, 'wf-conversation-pending-target'));
+    for (const turn of other) {
+      const row = element('div', 'wf-conversation-pending-item'); row.append(button(`${turnStatus(turn)} · ${truncate(turn.user?.text, 30)}`, () => {
+        state.expanded.add(turn.id); this.focusContext(turn.user?.context || {}); this.render(); this.messages.querySelector(`[data-turn-id="${CSS.escape(turn.id)}"]`)?.scrollIntoView({ block: 'nearest' });
+      }, 'wf-conversation-pending-target'));
+      if (canDismissConversationTurn(turn)) {
+        const actions = element('div', 'wf-conversation-pending-actions');
+        for (const label of ['已处理', '不再处理']) { const control = button(label, () => void this.dismissTurn(turn), 'wf-conversation-link');
+          control.title = '只结束此对话事项，运行与人工审核状态保持原样。'; control.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:dismiss`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(control); }
+        row.append(actions);
+      }
+      body.append(row);
+    }
   }
   artifactGallery(items, context) {
     const gallery = element('div', 'wf-conversation-artifacts');
@@ -364,11 +411,12 @@ export class WorkflowConversationUI {
       finally { state.sending = false; if (this.workflowId === id) this.render(); }
       return;
     }
-    const request = retry || { text, intent: state.intent, context: clone(this.getContext()), page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID() }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
+    const context = retry?.context || clone(this.getContext()), retryOfTurnId = retry?.retryOfTurnId || (!retry ? this.retryTargetFor(text, context, state) : undefined);
+    const request = retry || { text, intent: state.intent, context, page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID(), ...(retryOfTurnId ? { retryOfTurnId } : {}) }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
     try {
       const document = request.document; if (document.id !== id || this.currentDocument().id !== id) throw new Error('工作流已切换，请在对应工作流中发送。');
       const snapshot = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { ...request, document } }); this.accept(snapshot, id);
-      if (state.messageEdit === messageEdit && state.draft.trim() === text) state.draft = ''; state.retry = null;
+      if (state.messageEdit === messageEdit && state.draft.trim() === text && (state.retryOfTurnId || null) === (request.retryOfTurnId || null)) { state.draft = ''; this.clearRetryTarget(state); } state.retry = null;
     } catch (error) { state.error = `发送未确认：${error.message}。原文和回复对象已保留，请核对对话记录后重试。`; state.retry = request; }
     finally { state.sending = false; if (this.workflowId === id) { this.render(); this.messages.scrollTop = this.messages.scrollHeight; } }
   }
@@ -391,7 +439,8 @@ export class WorkflowConversationUI {
     if (this.workflowId === id) this.render();
   }
   async performAction(turn, action) {
-    const id = this.workflowId, key = `${id}:${turn.id}:${action.id}`; if (this.actionPending.has(key) || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return;
+    const id = this.workflowId, key = `${id}:${turn.id}:${action.id}`, current = this.state(id).conversation.turns.find(item => item.id === turn.id) || turn;
+    if (settled(current) || this.actionPending.has(key) || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return;
     this.actionPending.add(key); this.state(id).error = ''; this.render();
     try {
       const snapshot = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turn.id)}/action`, { method: 'POST', body: { action: action.kind, actionId: action.id, ...(action.context ? { context: action.context } : {}), ...(action.feedback ? { feedback: action.feedback } : {}), document: clone(this.currentDocument()) } }); this.accept(snapshot, id);

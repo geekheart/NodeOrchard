@@ -38,6 +38,10 @@ const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
   { id: 'diagnostics', status: 'available', tools: ['app.state', 'workflow.run', 'session.history', 'artifact.inspect', 'browser.capture'] },
+  { id: 'conversation-lifecycle', status: 'available', channel: 'conversation-response', tools: [],
+    note: '会话响应只读投影待处理状态；明确关联的成功重试接续旧聊天失败，审核按真实运行与尝试核对，不回写旧历史或业务状态。' },
+  { id: 'conversation-pending-controls', status: 'ui-only', tools: [],
+    note: '同一聊天界面折叠待处理区、明确重试或手动结束聊天关注；模型没有结束事项、批准审核或清除业务失败的工具。' },
   { id: 'workflow-editing', status: 'proposal-only', tools: ['node.describe', 'workflow.propose'], apply: '用户在同一聊天点击应用；保存版本和草稿指纹防冲突。' },
   { id: 'business-code', status: 'proposal-only', tools: ['node.describe', 'runtime.inspect', 'workflow.propose'], note: 'Python/JavaScript代码可写入业务节点候选，不需要注册固定工具。' },
   { id: 'execution', status: 'ui-only', tools: [], note: '界面运行按钮/编辑器中明确的“运行”命令使用现有执行器；后台助手没有自动start/retry工具。workflow.run只读历史。' },
@@ -91,6 +95,8 @@ export class ApplicationCapabilities {
     if (section === 'skills') return { skills: await this.skills.list() };
     if (section === 'interfaces') return { contractVersion: 1, tools: this.tools(), features: structuredClone(FEATURES),
       protocol: { current: 'internal-broker', externalMcpServerAvailable: false, reuse: 'MCP适配器须复用相同schema、调度器及权限，不复制业务执行逻辑。',
+        conversationIssues: { projection: 'read-only', retryLink: 'retryOfTurnId', controls: 'ui-only',
+          automaticBusinessResolution: false, reviewIdentityRequired: true },
         diagnostics: { batchQueries: ASSISTANT_DIAGNOSTIC_LIMITS.batchQueries, batchEffect: 'read-only', batchExecution: 'sequential-after-admission',
           stageProgress: true, persistedCheckpoints: true, automaticReplay: false,
           defaultToolRequests: ASSISTANT_DIAGNOSTIC_LIMITS.toolRequests, defaultDurationMs: ASSISTANT_DIAGNOSTIC_LIMITS.durationMs } } };

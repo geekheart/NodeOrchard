@@ -4,6 +4,7 @@ import { planWorkflow, learningBranch } from '../../shared/workflow/workflow-pla
 import { planWorkflowConversation } from './workflow-conversation-planner.mjs';
 import { sanitizeDiagnosticEvidence } from '../app-diagnostics.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../../shared/workflow/workflow-conversation-commands.mjs';
+import { projectConversationIssues, canRetryConversationTurn } from '../../shared/workflow/workflow-conversation-issues.mjs';
 import { redact } from '../hermes-adapter.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -14,6 +15,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const now = () => new Date().toISOString();
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const retryContext = value => Array.isArray(value) ? value.map(retryContext) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, retryContext(value[key])])) : value;
 function finishDiagnostic(assistant, status, message) {
   const completedAt = now(), elapsed = value => Number.isFinite(Date.parse(value)) ? Math.max(0, Date.parse(completedAt) - Date.parse(value)) : 0;
   if (assistant.progress) assistant.progress = { ...assistant.progress, status, completedAt, elapsedMs: elapsed(assistant.progress.startedAt) };
@@ -151,7 +154,24 @@ export class WorkflowConversations {
     this.assertOpen(workflowId);
     const revision = this.db.prepare('SELECT revision FROM workflow_conversations WHERE workflow_id=?').get(workflowId)?.revision || 0;
     const rows = this.db.prepare('SELECT value FROM workflow_conversation_turns WHERE workflow_id=? ORDER BY rowid DESC LIMIT 200').all(workflowId).reverse();
-    return { conversation: { workflowId, revision, turns: rows.map(row => JSON.parse(row.value)) }, pending: this.pending(workflowId) };
+    const turns = projectConversationIssues(rows.map(row => JSON.parse(row.value)), { reviewState: context => this.reviewState(workflowId, context) });
+    return { conversation: { workflowId, revision, turns }, pending: this.pending(workflowId) };
+  }
+  response(workflowId, turn) {
+    const snapshot = this.get(workflowId);
+    return { ...snapshot, turn: snapshot.conversation.turns.find(item => item.id === turn.id) || turn };
+  }
+  reviewState(workflowId, context) {
+    if (!context?.runId || !context.nodeId || !Number.isSafeInteger(context.attempt) || context.attempt < 1 || typeof context.attemptId !== 'string' || !context.attemptId) return 'unknown';
+    try {
+      const run = this.app.workflows.get(context.runId); this.assertRunScope(workflowId, run);
+      const node = run.document?.nodes?.find(item => item.id === context.nodeId), record = run.nodes?.[context.nodeId];
+      if (node?.type !== 'human' || !record || !Number.isSafeInteger(record.attempt)) return 'unknown';
+      if (record.attempt > context.attempt) return 'resolved';
+      if (record.attempt !== context.attempt || record.attemptId !== context.attemptId) return 'unknown';
+      if (record.status === 'waiting_review') return 'pending';
+      return ['complete', 'completed', 'error', 'interrupted', 'cancelled', 'stopped', 'blocked', 'skipped'].includes(record.status) ? 'resolved' : 'unknown';
+    } catch { return 'unknown'; }
   }
   childIds(record) {
     return [...new Set([...(Array.isArray(record?.subflowProgress?.childRunIds) ? record.subflowProgress.childRunIds : []),
@@ -363,21 +383,31 @@ export class WorkflowConversations {
   }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
-    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page'], '对话请求');
+    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId'], '对话请求');
     identifier(input.clientMessageId, '消息幂等 ID'); text(input.text, '消息');
     if (input.intent !== undefined && !['auto', 'workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
     const document = safeDocument(input.document, workflowId), requestDigest = digest(input);
     const existing = this.db.prepare('SELECT id,private_value FROM workflow_conversation_turns WHERE workflow_id=? AND client_message_id=?').get(workflowId, input.clientMessageId);
     if (existing) {
       if (JSON.parse(existing.private_value).requestDigest !== requestDigest) fail('相同消息 ID 不能对应不同内容。', 409);
-      return { ...this.get(workflowId), turn: this.readTurn(workflowId, existing.id).turn };
+      return this.response(workflowId, this.readTurn(workflowId, existing.id).turn);
     }
     const requestedContext = contextInput(input.context);
-    const intent = conversationIntent(input.text, input.intent, requestedContext), automatic = !input.intent || input.intent === 'auto';
+    let intent = conversationIntent(input.text, input.intent, requestedContext);
+    const automatic = !input.intent || input.intent === 'auto';
     const candidates = ['feedback', 'skill'].includes(intent) && !requestedContext.runId ? this.feedbackRuns(workflowId, requestedContext) : [];
     const selectedContext = candidates.length === 1 ? { ...requestedContext, runId: candidates[0].id } : requestedContext;
     const bound = this.bindContext(workflowId, selectedContext, document);
+    if (input.retryOfTurnId !== undefined) {
+      identifier(input.retryOfTurnId, '重试原事项 ID');
+      const { turn: parent } = this.readTurn(workflowId, input.retryOfTurnId);
+      if (!canRetryConversationTurn(parent)) fail('此事项不能作为重试对象；未确认的操作和人工审核不能自动重放。', 409);
+      if (parent.user.text !== input.text || digest(retryContext(parent.user.context || {})) !== digest(retryContext(bound.context))) fail('重试必须保持原消息和回复对象，请将新的问题单独发送。', 409);
+      if (input.intent && input.intent !== 'auto' && input.intent !== parent.user.intent) fail('重试不能改变原事项的处理方式。', 409);
+      intent = parent.user.intent;
+    }
     const createdAt = now(), turn = { id: 'turn-' + randomUUID(), workflowId, clientMessageId: input.clientMessageId,
+      ...(input.retryOfTurnId !== undefined ? { retryOfTurnId: input.retryOfTurnId } : {}),
       user: { text: input.text, context: bound.context, intent },
       assistant: { text: '正在整理你的要求…' }, actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
@@ -398,7 +428,7 @@ export class WorkflowConversations {
       turn.status = 'awaiting_action'; turn.assistant.text = '请明确选择这条回复对应的运行节点，避免操作其他版本或并行审核。';
       turn.actions = candidates.map(item => ({ id: 'action-' + randomUUID(), kind: direct.action, label: item.label, context: item.context, feedback: direct.feedback || '' }));
       this.update(turn); this.emit(workflowId);
-      return { ...this.get(workflowId), turn };
+      return this.response(workflowId, turn);
     }
     if (intent === 'feedback' || intent === 'skill') {
       if (candidates.length > 1) {
@@ -417,7 +447,7 @@ export class WorkflowConversations {
       const controller = new AbortController(); this.active.set(turn.id, controller);
       void this.generate(turn, document, bound, controller);
     }
-    return { ...this.get(workflowId), turn };
+    return this.response(workflowId, turn);
   }
   async generate(turn, document, bound, controller) {
     try {
@@ -489,9 +519,9 @@ export class WorkflowConversations {
     const key = workflowId + ':' + turnId;
     if (this.mutations.has(key)) fail('此回复正在处理中，请稍候。', 409);
     const { turn, privateValue } = this.readTurn(workflowId, turnId);
-    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return { ...this.get(workflowId), turn }; }
+    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return this.response(workflowId, turn); }
     if (input.action === 'dismiss-turn') {
-      if (turn.status === 'dismissed') return { ...this.get(workflowId), turn };
+      if (turn.status === 'dismissed') return this.response(workflowId, turn);
       if (!['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn.status)) fail('只能结束尚未解决的建议或失败事项。', 409);
       if (turn.status === 'awaiting_action' && turn.actions.some(card => card.kind.startsWith('review-'))) fail('人工审核仍在等待，请明确通过、要求修改或停止审核分支。', 409);
       turn.resolution = { kind: 'dismissed', previousStatus: turn.status, at: now() };
@@ -499,12 +529,15 @@ export class WorkflowConversations {
       // Keep both the request and the original answer/outcome as historical
       // evidence. Dismissing a chat item never changes a run or a human gate.
       this.update(turn); this.emit(workflowId);
-      return { ...this.get(workflowId), turn };
+      return this.response(workflowId, turn);
     }
     if (turn.status === 'dismissed') fail('此事项已结束，请发送新的要求。', 409);
+    if (input.action.startsWith('review-') && this.get(workflowId).conversation.turns.find(item => item.id === turnId)?.pendingState?.status === 'resolved') {
+      fail('此条历史审核入口已结束，请使用当前待审核卡。', 409);
+    }
     if (turn.outcome) {
       if (turn.outcome.action !== input.action || input.actionId && turn.outcome.actionId !== input.actionId) fail('此轮回复已经执行过其他操作。', 409);
-      return { ...this.get(workflowId), turn };
+      return this.response(workflowId, turn);
     }
     const card = turn.actions.find(item => item.id === input.actionId && item.kind === input.action)
       || (!input.actionId && turn.actions.length === 1 && turn.actions[0].kind === input.action ? turn.actions[0] : null);
@@ -520,7 +553,7 @@ export class WorkflowConversations {
       if (input.action === 'select-learning-target') this.prepareLearningScope(turn, document, bound.context);
       else this.prepareFeedback(turn, document, bound, turn.user.intent, privateValue.automatic);
       turn.updatedAt = now(); this.update(turn); this.emit(workflowId);
-      return { ...this.get(workflowId), turn };
+      return this.response(workflowId, turn);
     }
     if (input.action === 'review-revise' && !feedback.trim()) fail('请填写具体修改要求。');
     if (input.action === 'mark-applied') {
@@ -571,7 +604,7 @@ export class WorkflowConversations {
       turn.outcome = { ...turn.outcome, status: error.httpStatus ? 'rejected' : 'unknown', error: turn.assistant.text, completedAt: now() }; turn.updatedAt = now(); this.update(turn);
     } finally { this.mutations.delete(key); }
     this.emit(workflowId);
-    return { ...this.get(workflowId), turn };
+    return this.response(workflowId, turn);
   }
   async close() {
     this.closed = true; this.app.off('event', this.onEvent);

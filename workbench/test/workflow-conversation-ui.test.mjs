@@ -16,6 +16,119 @@ function harness() {
 }
 const snapshot = (id, revision, turns = []) => ({ conversation: { workflowId: id, revision, turns }, pending: [] });
 
+test('a stale callback cannot submit an already processed historical review action', async () => {
+  const { ui } = harness(); let posts = 0;
+  const old = { id: 'old-review', status: 'awaiting_action', actions: [{ id: 'approve', kind: 'review-approve' }] };
+  ui.state().conversation.turns = [{ ...old, pendingState: { status: 'resolved', label: '审核已处理' } }];
+  ui.api = async () => { posts++; return snapshot(ui.workflowId, 2); };
+  await ui.performAction(old, old.actions[0]);
+  assert.equal(posts, 0);
+});
+
+class PendingElement {
+  constructor(tag) { this.tagName = tag; this.children = []; this.attributes = {}; this.listeners = {}; this.dataset = {}; this.hidden = false;
+    this.classList = { toggle() {} }; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  append(...items) { this.children.push(...items); }
+  replaceChildren(...items) { this.children = items; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  focus() {}
+}
+function pendingDOM(t) {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document'), previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), saved = new Map();
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: tag => new PendingElement(tag) } });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) } });
+  t.after(() => { for (const [key, descriptor] of [['document', previousDocument], ['localStorage', previousStorage]]) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } });
+  return { saved, descendants: node => [node, ...node.children.flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])] };
+}
+const pendingDOMDescendants = node => [node, ...(node.children || []).flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])];
+
+test('pending group starts folded, reports reviews and preserves its workflow preference across rerenders and reloads', t => {
+  pendingDOM(t); const { ui, document } = harness(); ui.pendingHost = new PendingElement('section');
+  ui.state().pending = [{ id: 'review-one', kind: 'review', label: '待审核', context: { runId: 'run-one', nodeId: 'trim', attempt: 2 } }];
+  const turns = [{ id: 'old-error', status: 'error', user: { text: '失败事项' } }, { id: 'latest', status: 'complete' }];
+  ui.renderPending(conversationTurnGroups(turns));
+  const toggle = ui.pendingHost.children[0], body = ui.pendingHost.children[1];
+  assert.equal(toggle.attributes['aria-expanded'], 'false'); assert.match(toggle.textContent, /待处理.*2.*审核.*1/); assert.equal(body.hidden, true);
+  toggle.listeners.click(); ui.renderPending(conversationTurnGroups(turns)); assert.equal(ui.pendingHost.children[1].hidden, false);
+  const reloaded = harness().ui; reloaded.workflowId = document.id; assert.equal(reloaded.state().pendingExpanded, true);
+  reloaded.workflowId = 'another-workflow'; assert.equal(reloaded.state().pendingExpanded, false);
+});
+
+test('pending collapse remains usable in memory when browser preference storage is unavailable', t => {
+  pendingDOM(t); Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('fixture storage unavailable'); } });
+  const { ui } = harness(); ui.pendingHost = new PendingElement('section');
+  const turns = [{ id: 'old-error', status: 'error', user: { text: '失败事项' } }, { id: 'latest', status: 'complete' }];
+  ui.renderPending(conversationTurnGroups(turns)); ui.pendingHost.children[0].listeners.click();
+  ui.renderPending(conversationTurnGroups(turns)); assert.equal(ui.pendingHost.children[1].hidden, false);
+});
+
+test('pending rows allow closing chat issues while keeping reviews and failed business runs visible', t => {
+  pendingDOM(t); const { ui, run } = harness(); ui.pendingHost = new PendingElement('section'); run.status = 'error';
+  ui.state().pending = [{ id: 'review-one', kind: 'review', label: '待审核', context: { runId: run.id, nodeId: 'trim', attempt: 2 } }];
+  const turn = { id: 'old-error', status: 'error', user: { text: '失败事项', context: { runId: run.id } } }, closed = [];
+  ui.dismissTurn = value => closed.push(value.id); ui.renderPending(conversationTurnGroups([turn, { id: 'latest', status: 'complete' }]));
+  const nodes = pendingDOMDescendants(ui.pendingHost);
+  assert.ok(nodes.some(node => /^运行异常/.test(node.textContent || '')));
+  const close = nodes.filter(node => ['已处理', '不再处理'].includes(node.textContent)); assert.equal(close.length, 2);
+  close[0].listeners.click(); assert.deepEqual(closed, [turn.id]);
+});
+
+test('pending list counts an exact current review once while unmatched or unknown review attempts remain visible', t => {
+  pendingDOM(t); const { ui } = harness(); ui.pendingHost = new PendingElement('section');
+  const context = { runId: 'run-one', nodeId: 'trim', attempt: 2, attemptId: 'attempt-two' };
+  ui.state().pending = [{ id: 'review-one', kind: 'review', label: '待审核', context }];
+  const turn = { id: 'old-review', status: 'awaiting_action', user: { text: '通过' }, actions: [{ kind: 'review-approve', context }] }, latest = { id: 'latest', status: 'complete' };
+  ui.renderPending(conversationTurnGroups([turn, latest])); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 1/);
+  turn.actions[0].context = { ...context, attemptId: 'different-attempt' };
+  ui.renderPending(conversationTurnGroups([turn, latest])); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 2/);
+  turn.actions[0].context = { runId: context.runId, nodeId: context.nodeId, attempt: context.attempt };
+  ui.renderPending(conversationTurnGroups([turn, latest])); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 2/);
+});
+
+test('a retry targets its failed turn only while text and captured context remain unchanged', async () => {
+  const { ui, document, run } = harness(), failed = { id: 'failed-turn', status: 'error', user: { text: '检查采集失败', context: { runId: run.id, nodeId: 'trim' } } }; let request;
+  ui.state().conversation.turns = [failed]; ui.beginRetry(failed);
+  ui.api = async (_path, options) => { request = options.body; return snapshot(document.id, 2, [failed, { id: 'next', status: 'complete' }]); };
+  await ui.send(); assert.equal(request.retryOfTurnId, failed.id); assert.equal(ui.state().retryOfTurnId, null);
+  ui.beginRetry(failed); ui.state().draft = '另一个全新问题'; await ui.send(); assert.equal(request.retryOfTurnId, undefined);
+  ui.beginRetry(failed); ui.focusContext({ runId: run.id }); await ui.send(); assert.equal(request.retryOfTurnId, undefined);
+});
+
+test('uncertain network delivery retains the exact retry relation and idempotency key', async () => {
+  const { ui, document, run } = harness(), failed = { id: 'failed-turn', status: 'error', user: { text: '检查采集失败', context: { runId: run.id } } }, requests = [];
+  ui.state().conversation.turns = [failed]; ui.beginRetry(failed);
+  ui.api = async (_path, options) => { requests.push(structuredClone(options.body)); if (requests.length === 1) throw new Error('fixture network failure'); return snapshot(document.id, 2); };
+  await ui.send(); ui.state().draft = '发送后的草稿'; await ui.send(ui.state().retry);
+  assert.equal(requests[0].retryOfTurnId, failed.id); assert.equal(requests[1].retryOfTurnId, failed.id);
+  assert.equal(requests[0].clientMessageId, requests[1].clientMessageId); assert.equal(ui.state().draft, '发送后的草稿');
+});
+
+test('unconfirmed operation outcomes can load a new question without claiming the old operation was retried', async () => {
+  const { ui, document, run } = harness(), failed = { id: 'uncertain-operation', status: 'error', outcome: { action: 'rerun', status: 'unknown' }, user: { text: '检查上次操作', context: { runId: run.id } } }; let request;
+  ui.state().conversation.turns = [failed]; ui.beginRetry(failed);
+  ui.api = async (_path, options) => { request = options.body; return snapshot(document.id, 2); };
+  await ui.send(); assert.equal(request.retryOfTurnId, undefined);
+});
+
+test('a successful retry response does not clear another retry selected while it was sending', async () => {
+  const { ui, document, run } = harness(), gate = deferred(), original = { id: 'failed-first', status: 'error', user: { text: '检查失败', context: { runId: run.id } } }, next = { ...original, id: 'failed-second' };
+  ui.state().conversation.turns = [original, next]; ui.beginRetry(original); ui.api = async () => gate.promise;
+  const sending = ui.send(); ui.beginRetry(next); gate.resolve(snapshot(document.id, 2, [original, next])); await sending;
+  assert.equal(ui.state().draft, next.user.text); assert.equal(ui.state().retryOfTurnId, next.id);
+});
+
+test('a projected handled review remains in history without executable old review or dismissal controls', t => {
+  pendingDOM(t); const { ui } = harness(), turn = { id: 'old-review', status: 'awaiting_action', user: { text: '通过' },
+    assistant: { text: '请先选择对应审核版本。' }, actions: [{ id: 'approve', kind: 'review-approve', label: '通过并继续' }],
+    pendingState: { status: 'resolved', label: '已在其他入口处理' } };
+  const view = ui.turnView(turn), nodes = pendingDOMDescendants(view);
+  assert.ok(nodes.some(node => node.textContent === turn.assistant.text));
+  assert.ok(nodes.some(node => node.textContent === turn.pendingState.label));
+  assert.equal(nodes.some(node => ['通过并继续', '结束此事项', '载入消息重试'].includes(node.textContent)), false);
+  assert.equal(conversationTurnGroups([turn, { id: 'latest', status: 'complete' }]).unresolved.length, 0);
+});
+
 test('diagnostic progress names the stalled stage and freezes its elapsed time after failure', () => {
   const at = Date.parse('2026-01-01T00:00:10.000Z');
   const turn = { status: 'thinking', createdAt: '2026-01-01T00:00:00.000Z', assistant: {

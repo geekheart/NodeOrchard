@@ -324,6 +324,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/shared/workflow/workflow-components.mjs': 'workflow-components.mjs',
         '/shared/workflow/workflow-capability-contract.mjs': 'workflow-capability-contract.mjs',
         '/shared/workflow/workflow-conversation-commands.mjs': 'workflow-conversation-commands.mjs',
+        '/shared/workflow/workflow-conversation-issues.mjs': 'workflow-conversation-issues.mjs',
         '/shared/workflow/workflow-dataset.mjs': 'workflow-dataset.mjs',
         '/shared/workflow/workflow-inputs.mjs': 'workflow-inputs.mjs',
         '/shared/workflow/workflow-model.mjs': 'workflow-model.mjs',

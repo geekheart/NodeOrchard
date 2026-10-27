@@ -8,6 +8,8 @@
 
 顶部提示横幅右侧的关闭按钮可隐藏当前消息；后续新提示仍会显示，Hermes 连接与运行状态不受影响。
 
+待处理区默认折叠并记住每条工作流的展开选择；已完成、已由明确重试接续的聊天事项退出列表，原消息保留。人工审核和业务失败不会因 AI 回复完成而自动清除，具体规则见 [待处理事项](docs/workflow-conversation.md#待处理事项)。
+
 ## 运行与工作环境
 
 需要 Node.js ≥ 22.13。主应用使用 Node 内置模块，无需安装前端框架或独立数据库服务。**使用 AI 功能前，先按 [Hermes 官方指南](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)安装 Hermes Agent**，运行 `hermes model` 配置提供商和模型，再用 `hermes` 验证一次对话。当前适配已验证 Hermes 0.21.4。

@@ -6,12 +6,15 @@ import { planWorkflowConversation } from './workflows/workflow-conversation-plan
 import { sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from './app-diagnostics.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { ApplicationCapabilities } from './application-capabilities.mjs';
+import { projectConversationIssues, canRetryConversationTurn } from '../shared/workflow/workflow-conversation-issues.mjs';
 import { AssistantDiagnosticTurn, ASSISTANT_DIAGNOSTIC_LIMITS, compactDiagnosticContext, diagnosticScope, diagnosticRequestKey, validateDiagnosticArguments } from './assistant-diagnostic-turn.mjs';
 
 export const APPLICATION_CONVERSATION_ID = 'global-application';
 const execute = promisify(execFile);
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { httpStatus: status }); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const retryContext = value => Array.isArray(value) ? value.map(retryContext) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, retryContext(value[key])])) : value;
 const bounded = value => sanitizeDiagnosticEvidence(value);
 const check = signal => { if (signal?.aborted) fail('诊断已停止。', 409); };
 const object = (value, keys) => {
@@ -43,20 +46,34 @@ export class ApplicationAssistant {
   tools() { return this.capabilities.tools(); }
   save(turn) { this.db.prepare('UPDATE application_conversation_turns SET value=? WHERE id=?').run(JSON.stringify(turn), turn.id); }
   get() {
-    const turns = this.db.prepare('SELECT value FROM application_conversation_turns ORDER BY rowid DESC LIMIT 100').all().reverse().map(row => JSON.parse(row.value));
+    const turns = projectConversationIssues(this.db.prepare('SELECT value FROM application_conversation_turns ORDER BY rowid DESC LIMIT 100').all().reverse().map(row => JSON.parse(row.value)));
     return { conversation: { workflowId: APPLICATION_CONVERSATION_ID, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [] };
+  }
+  response(turn) {
+    const snapshot = this.get();
+    return { ...snapshot, turn: snapshot.conversation.turns.find(item => item.id === turn.id) || turn };
   }
   emit() { this.app.publish('application.conversation', null, this.get()); }
   async message(input) {
-    object(input, ['clientMessageId', 'text', 'page', 'context', 'intent', 'document']);
+    object(input, ['clientMessageId', 'text', 'page', 'context', 'intent', 'document', 'retryOfTurnId']);
     if (this.closed) fail('应用助手已关闭。', 409);
     if (typeof input.clientMessageId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.clientMessageId)) fail('消息 ID 无效。');
     if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 12000 || input.text.includes('\0')) fail('请输入最多 12000 字符的消息。');
     const context = object(input.context || {}, ['workflowId', 'runId', 'nodeId', 'runSelection']);
     const digest = hash(input), previous = this.db.prepare('SELECT digest,value FROM application_conversation_turns WHERE client_id=?').get(input.clientMessageId);
-    if (previous) { if (previous.digest !== digest) fail('相同消息 ID 不能对应不同内容。', 409); return { ...this.get(), turn: JSON.parse(previous.value) }; }
+    if (previous) { if (previous.digest !== digest) fail('相同消息 ID 不能对应不同内容。', 409); return this.response(JSON.parse(previous.value)); }
     if (this.active.size) fail('上一条诊断仍在进行，请等待或停止后继续。', 409);
-    const at = new Date().toISOString(), turn = { id: 'turn-' + randomUUID(), user: { text: input.text, context: {}, intent: 'auto' }, assistant: { text: '正在读取应用状态…' }, actions: [], status: 'thinking', createdAt: at, updatedAt: at };
+    if (input.retryOfTurnId !== undefined) {
+      if (typeof input.retryOfTurnId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.retryOfTurnId)) fail('重试原事项 ID 无效。');
+      const row = this.db.prepare('SELECT value FROM application_conversation_turns WHERE id=?').get(input.retryOfTurnId);
+      if (!row) fail('此对话中没有对应的重试事项。', 404);
+      const parent = JSON.parse(row.value);
+      if (!canRetryConversationTurn(parent)) fail('此事项不能作为重试对象；未确认的操作不能自动重放。', 409);
+      if (parent.user.text !== input.text || hash(retryContext(parent.user.context || {})) !== hash(retryContext(context))) fail('重试必须保持原消息和回复对象，请将新的问题单独发送。', 409);
+    }
+    const at = new Date().toISOString(), turn = { id: 'turn-' + randomUUID(), user: { text: input.text, context: structuredClone(context), intent: 'auto' },
+      ...(input.retryOfTurnId !== undefined ? { retryOfTurnId: input.retryOfTurnId } : {}),
+      assistant: { text: '正在读取应用状态…' }, actions: [], status: 'thinking', createdAt: at, updatedAt: at };
     this.db.prepare('INSERT INTO application_conversation_turns(id,client_id,digest,value) VALUES(?,?,?,?)').run(turn.id, input.clientMessageId, digest, JSON.stringify(turn));
     const controller = new AbortController(); this.active.set(turn.id, controller); this.emit();
     void (async () => {
@@ -77,25 +94,25 @@ export class ApplicationAssistant {
         finishDiagnostic(turn.assistant, turn.status, turn.assistant.text); }
       finally { this.active.delete(turn.id); if (!this.closed) { turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(); } }
     })();
-    return { ...this.get(), turn };
+    return this.response(turn);
   }
   action(turnId, input) {
     object(input, ['action']); const row = this.db.prepare('SELECT value FROM application_conversation_turns WHERE id=?').get(turnId);
     if (!row) fail('对话事项不存在。', 404);
     const turn = JSON.parse(row.value);
-    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return { ...this.get(), turn }; }
+    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return this.response(turn); }
     if (input.action === 'mark-applied') {
-      if (turn.outcome?.applied) return { ...this.get(), turn };
+      if (turn.outcome?.applied) return this.response(turn);
       if (turn.status !== 'proposed' || !turn.assistant.operations?.length || !turn.assistant.targetWorkflowId) fail('此事项没有可应用的工作流修改。', 409);
       const saved = this.app.workflowLibrary.get(turn.assistant.targetWorkflowId);
       if (saved.revision !== turn.assistant.expectedRevision || documentFingerprint(saved.document) !== turn.assistant.baseFingerprint) fail('工作流已变化，请重新生成修复建议。', 409);
       const applied = applyWorkflowOperations(saved.document, turn.assistant.operations);
       const updated = this.app.workflowLibrary.save({ document: applied.document, expectedRevision: saved.revision });
       turn.status = 'applied'; turn.updatedAt = new Date().toISOString(); turn.outcome = { action: 'mark-applied', status: 'complete', applied: true, workflowId: updated.id, revision: updated.revision, label: '工作流修改已保存；尚未执行节点。' };
-      this.save(turn); this.emit(); return { ...this.get(), turn };
+      this.save(turn); this.emit(); return this.response(turn);
     }
     if (input.action !== 'dismiss-turn' || !['proposed', 'error', 'interrupted', 'dismissed'].includes(turn.status)) fail('此事项当前不能结束。', 409);
-    turn.status = 'dismissed'; turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(); return { ...this.get(), turn };
+    turn.status = 'dismissed'; turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(); return this.response(turn);
   }
   async plan({ text, document, context = {}, history = [], page = {}, signal, onSession, onProgress, onCheckpoint, checkpoint } = {}) {
     check(signal);
