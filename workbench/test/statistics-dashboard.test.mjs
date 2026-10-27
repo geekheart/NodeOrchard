@@ -31,11 +31,11 @@ const fixtureData = () => {
     workflows: [first, second, deleted], supervisor: { conversationCount: 2, conversations: { turns: 3, pending: 1, modelCalls: 2, toolCalls: 5, elapsedMs: 5000 }, usage: { input: null, output: null, total: null, measuredRuns: 0, partialRuns: 0, unmeasuredRuns: 2 } },
     recentActivity: [{ kind: 'run', id: 'run-one', workflowId: first.id, title: first.title, status: 'error', at: '2026-10-27T01:00:00Z', durationMs: 20000 }] };
 };
-function fixture(t) {
+function fixture(t, options = {}) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: tag => new Element(tag), createElementNS: (_namespace, tag) => new Element(tag) } });
   t.after(() => descriptor ? Object.defineProperty(globalThis, 'document', descriptor) : delete globalThis.document);
-  const root = new Element('div'), refreshes = [], ui = new StatisticsDashboard(root, { onRefresh: () => refreshes.push(true) });
+  const root = new Element('div'), refreshes = [], ui = new StatisticsDashboard(root, { onRefresh: () => refreshes.push(true), ...options });
   return { root, ui, refreshes };
 }
 
@@ -48,6 +48,7 @@ test('dashboard renders real totals, both trend axes, workflow details, and supe
   assert.match(contents(f.ui.inspector), /采集 GitHub 排行榜/); assert.match(contents(f.ui.inspector), /fixture \/ model-one/);
   assert.match(contents(f.ui.inspector), /最近对话 · 1/); assert.match(contents(f.ui.inspector), /模型 2 \/ 工具 4/);
   assert.match(contents(f.ui.bottom), /总控助手/); assert.match(contents(f.ui.bottom), /采集 GitHub 排行榜/);
+  assert.doesNotMatch(contents(f.root), /统计口径|不能与累计 Token 等同|未采集 CPU、内存或订阅费用/);
   assert.deepEqual(data, before);
 });
 
@@ -107,13 +108,14 @@ test('the application renderer preserves selection through an uncached period be
   const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   const renderSource = source.slice(source.indexOf('function renderStatistics()'), source.indexOf('function invalidateStatistics()'));
   const state = { stats: new Map(), statsPending: new Set() }, picker = { value: '30' };
-  const render = new Function('$', 'state', 'statisticsDashboard', renderSource + '\nrenderStatistics();');
-  render(() => picker, state, f.ui);
+  const renderFunction = new Function('$', 'state', 'statisticsDashboard', 'statisticsHistory', renderSource + '\nrenderStatistics();');
+  const render = () => renderFunction(() => picker, state, f.ui, { loading: false, status: '', error: false });
+  render();
   assert.equal(f.ui.selectedWorkflow, 'workflow-b'); assert.equal(f.ui.data, data);
-  state.statsPending.add('30'); render(() => picker, state, f.ui);
+  state.statsPending.add('30'); render();
   assert.equal(f.ui.selectedWorkflow, 'workflow-b'); assert.equal(f.ui.refresh.disabled, true);
   const monthly = clone(data); monthly.period.days = 30; state.stats.set('30', { dashboard: monthly }); state.statsPending.clear();
-  render(() => picker, state, f.ui);
+  render();
   assert.equal(f.ui.selectedWorkflow, 'workflow-b'); assert.match(f.ui.updated.textContent, /30 天/);
 });
 
@@ -130,8 +132,41 @@ test('a known total without input/output breakdown is drawn as unclassified usag
 
 test('refresh errors keep existing data reviewable and the retry action only invokes the caller', t => {
   const f = fixture(t); f.ui.render(fixtureData()); f.ui.select('workflow-b'); f.ui.render(undefined, { error: '连接中断' });
+  assert.equal(f.ui.importHistory.hidden, true);
   assert.equal(f.ui.errorBox.hidden, false); assert.match(f.ui.errorBox.textContent, /连接中断/); assert.equal(f.ui.selectedWorkflow, 'workflow-b');
   f.ui.refresh.emit('click'); assert.deepEqual(f.refreshes, [true]); assert.match(contents(f.ui.tableWrap), /采集 GitHub/);
+});
+
+test('history import is optional, invokes only its callback, and independently fences duplicate clicks while refresh continues', t => {
+  const imports = [], f = fixture(t, { onImportHistory: () => imports.push(true) }); f.ui.render(fixtureData(), { loading: true });
+  assert.equal(f.ui.importHistory.hidden, false); assert.equal(f.ui.importHistory.disabled, false); assert.equal(f.ui.refresh.disabled, true);
+  f.ui.importHistory.emit('click'); f.ui.importHistory.emit('click');
+  assert.deepEqual(imports, [true]); assert.equal(f.ui.importHistory.disabled, true); assert.equal(f.ui.importHistory.textContent, '正在补齐…');
+  f.ui.render(undefined, { historyLoading: true, loading: false }); assert.equal(f.ui.importHistory.disabled, true); assert.equal(f.ui.refresh.disabled, false);
+  f.ui.render(undefined, { historyStatus: '已补齐 2 条历史记录' });
+  assert.equal(f.ui.importHistory.disabled, false); assert.equal(f.ui.historyResult.hidden, false); assert.equal(f.ui.historyResult.attributes.role, 'status'); assert.match(f.ui.historyResult.textContent, /2 条/);
+  assert.equal(f.ui.selectedWorkflow, 'workflow-a'); assert.equal(f.ui.data.workflows.length, 3);
+});
+
+test('history import failure reports a short alert without replacing existing statistics or changing selection', t => {
+  const f = fixture(t, { onImportHistory: () => {} }); f.ui.render(fixtureData()); f.ui.select('workflow-b');
+  f.ui.render(undefined, { historyStatus: { message: '历史读取失败', error: true } });
+  assert.equal(f.ui.historyResult.attributes.role, 'alert'); assert.equal(f.ui.selectedWorkflow, 'workflow-b'); assert.match(contents(f.ui.tableWrap), /采集 GitHub/);
+  f.ui.render(undefined, { historyStatus: '补齐失败', historyError: true }); assert.equal(f.ui.historyResult.attributes.role, 'alert');
+});
+
+test('historical request input never becomes current context occupancy, a percentage, or a fabricated sampling timestamp', t => {
+  const f = fixture(t), data = fixtureData();
+  data.workflows[0].context = { used: 4500, max: null, percent: null, capturedAt: null, historical: true, kind: 'last-request-input', source: 'hermes.persisted-usage-anchor' };
+  data.workflows[0].usage.historicalRuns = 2; f.ui.render(data);
+  const context = flatten(f.ui.inspector).find(item => item.className === 'sd-context-detail');
+  assert.match(contents(f.ui.tableWrap), /历史请求输入/); assert.match(contents(context), /历史上下文/); assert.match(contents(context), /最后请求输入/); assert.match(contents(context), /4,500 tokens/);
+  assert.match(contents(context), /模型容量 —/); assert.match(contents(context), /请求时间未记录/);
+  assert.doesNotMatch(contents(context), /10:00|10\/27|上下文快照|25\.0%|容量未上报/);
+  assert.equal(flatten(context).some(item => item.attributes.role === 'meter'), false);
+  assert.match(contents(f.ui.tableWrap), /历史补齐 2/); assert.match(contents(f.ui.inspector), /历史补齐\n2 次运行/);
+  data.workflows[0].context.percent = 99; data.workflows[0].context.max = 5000; f.ui.render(data);
+  assert.equal(flatten(f.ui.inspector).some(item => item.attributes.role === 'meter'), false); assert.doesNotMatch(contents(f.ui.tableWrap), /99\.0%/);
 });
 
 test('titles and errors are text nodes and statistics have no execution, deletion, or writable application requests', async t => {

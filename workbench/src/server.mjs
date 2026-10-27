@@ -96,6 +96,12 @@ export function createWorkbenchServer(config, application = new Application(conf
         if (!['7', '30'].includes(days)) return json(res, 400, { error: '统计周期只支持 7 天或 30 天。' });
         return json(res, 200, await application.statistics(Number(days)));
       }
+      if (req.method === 'POST' && path === '/api/statistics/history') {
+        if (requestURL.search) return json(res, 400, { error: '历史补齐不接受查询参数。' });
+        const body = await readJson(req, 1024);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return json(res, 400, { error: '历史补齐不接受自定义会话或路径。' });
+        return json(res, 200, await application.backfillHistoricalUsage());
+      }
       if (req.method === 'GET' && path === '/api/skills') return json(res, 200, await application.skills());
       const skillMatch = path.match(/^\/api\/skills\/([^/]+)$/);
       if (req.method === 'GET' && skillMatch) return json(res, 200, await application.skill(decodeURIComponent(skillMatch[1])));

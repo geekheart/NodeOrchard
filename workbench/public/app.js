@@ -455,10 +455,22 @@ function renderSkills() {
   const selected = state.skillDetails.get(state.route.name); if (!state.route.name) detail.replaceChildren(empty('选择一项技能', '', 'sparkles')); else if (!selected) detail.replaceChildren(empty('正在读取技能内容…', '', 'sparkles')); else if (selected.error) detail.replaceChildren(empty('无法读取技能内容', selected.error, 'sparkles')); else detail.replaceChildren(element('h2', '', skillDisplayName(selected)), element('span', 'skill-source mono', [selected.source || 'Hermes', skillVersionLabel(selected), skillDisplayName(selected) !== selected.name ? selected.name : ''].filter(Boolean).join(' · ')), element('p', '', selected.description || ''), element('pre', 'skill-content', selected.content || '这项技能未提供正文。'));
 }
 let statisticsDashboard, statisticsRefreshTimer;
+const statisticsHistory = { loading: false, status: '', error: false };
 function renderStatistics() {
   const days = $('statistics-period').value, data = state.stats.get(days);
-  statisticsDashboard ||= new StatisticsDashboard($('statistics-content'), { onRefresh: () => void loadStatistics(true) });
-  statisticsDashboard.render(data?.dashboard, { days: Number(days), loading: state.statsPending.has(days), error: data?.error || '' });
+  statisticsDashboard ||= new StatisticsDashboard($('statistics-content'), { onRefresh: () => void loadStatistics(true), onImportHistory: backfillStatisticsHistory });
+  statisticsDashboard.render(data?.dashboard, { days: Number(days), loading: state.statsPending.has(days), error: data?.error || '',
+    historyLoading: statisticsHistory.loading, historyStatus: statisticsHistory.status, historyError: statisticsHistory.error });
+}
+async function backfillStatisticsHistory() {
+  if (statisticsHistory.loading) return;
+  statisticsHistory.loading = true; statisticsHistory.status = ''; statisticsHistory.error = false; renderStatistics();
+  try {
+    const result = await api('/api/statistics/history', { method: 'POST', body: {} });
+    statisticsHistory.status = `已归属 ${result.attributedRuns ?? 0} 次运行 · ${result.contextSnapshots ?? 0} 个历史上下文`;
+    state.stats.clear(); await loadStatistics(true);
+  } catch (error) { statisticsHistory.error = true; statisticsHistory.status = `历史补齐失败：${safeText(error.message)}`; }
+  finally { statisticsHistory.loading = false; if (state.route.page === 'statistics') renderStatistics(); }
 }
 function invalidateStatistics() {
   state.stats.clear();
@@ -529,7 +541,7 @@ async function synchronize() {
 }
 function updateSessionViews() { renderShell(); if (state.route.page === 'board') workflowBoard?.renderPending(); if (state.route.page === 'conversations') conversationHub?.renderHistory(); if (state.route.page === 'task') { const session = selectedSession(); $('task-title').textContent = safeText(session?.title || '任务'); $('task-status').replaceWith(Object.assign(badge(session?.status), { id: 'task-status' })); renderTaskInfo(); renderComposer(); renderInspector(); } }
 function receiveEvent(event) {
-  if (/^(?:workflow\.(?:run|conversation|learning|lifecycle|document|artifact)|application\.conversation|session\.usage|message\.complete|session\.created|session\.deleted)/.test(event.type)) invalidateStatistics();
+  if (/^(?:workflow\.(?:run|conversation|learning|lifecycle|document|artifact)|application\.conversation|statistics\.history|session\.usage|message\.complete|session\.created|session\.deleted)/.test(event.type)) invalidateStatistics();
   const payload = event.payload || {}; const id = event.sessionId || payload.sessionId; const revision = ++state.eventRevision;
   if (id) state.sessionRevision.set(id, revision);
   if (id && (/^message\./.test(event.type) || /^request\./.test(event.type) || event.type === 'error')) state.turnRevision.set(id, revision);

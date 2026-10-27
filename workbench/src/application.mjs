@@ -5,6 +5,7 @@ import { HermesAdapter, redact } from './hermes-adapter.mjs';
 import { Store } from './store.mjs';
 import { collectWorkbenchStatistics } from './workbench-statistics.mjs';
 import { SessionUsage, sanitizeSessionUsage } from './session-usage.mjs';
+import { HistoricalUsage } from './historical-usage.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
 import { validatePreferences } from './preferences.mjs';
@@ -88,6 +89,7 @@ export class Application extends EventEmitter {
     this.assistantPermissionSettings = new AssistantPermissionSettings(this);
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
+    this.historicalUsage = new HistoricalUsage(this);
   }
 
   publish(type, sessionId, payload) {
@@ -159,6 +161,13 @@ export class Application extends EventEmitter {
     statistics.recentRuns = statistics.recentRuns.map(run => ({ ...run, error: redact(run.error) }));
     statistics.dashboard = collectWorkbenchStatistics(this, { days });
     return statistics;
+  }
+
+  async backfillHistoricalUsage() {
+    if (this.closed) throw new Error('工作台已关闭。');
+    const result = await this.historicalUsage.refresh();
+    if (!this.closed) this.publish('statistics.history', null, result);
+    return result;
   }
 
   async skills() {
@@ -555,6 +564,7 @@ export class Application extends EventEmitter {
 
   async close() {
     if (this.closed) return;
+    this.historicalUsage?.close?.();
     await this.conversations.close();
     await this.applicationAssistant.close();
     await this.assistantModel.close();

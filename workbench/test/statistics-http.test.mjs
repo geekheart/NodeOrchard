@@ -42,6 +42,34 @@ test('statistics HTTP exposes real empty workflow metrics without running models
   assert.deepEqual(hashes(f.app), before);
 });
 
+test('history import is an explicit CSRF-protected numeric cache write and never modifies business or live usage records', async t => {
+  const f = await fixture(t), start = new Date(Date.now() - 60000).toISOString(), end = new Date(Date.now() - 30000).toISOString();
+  const session = f.app.store.create({ title: '历史模型', cwd: f.app.config.workspaceRoot, storedSessionId: 'owned-history-session', runtimeSessionId: null, model: 'fixture', provider: 'fixture' });
+  const id = f.app.store.beginRun(session.id); f.app.store.finishRun(session.id, 'complete');
+  f.app.store.db.prepare('UPDATE runs SET started_at=?,completed_at=? WHERE id=?').run(start, end, id);
+  const before = hashes(f.app), calls = [];
+  f.adapter.state = 'ready'; f.app.backend.state = 'ready';
+  f.adapter.request = async (name, args) => {
+    calls.push({ name, args }); assert.equal(name, 'workbench.usage.history'); assert.deepEqual(args, { stored_session_ids: ['owned-history-session'] });
+    return { schemaVersion: 1, sessions: [{ storedSessionId: 'owned-history-session', found: true, source: 'hermes.state-db', tokensRecorded: true,
+      usage: { input: 120, output: 30, prompt: 170, completion: 30, total: 200, calls: 1, reasoning: 10, cache_read: 50, cache_write: 0 },
+      startedAt: start, endedAt: end, firstMessageAt: start, lastMessageAt: end, parentId: null, hasChildren: false, compressed: false,
+      context: { used: 170, max: null, percent: null, estimated: false, historical: true, kind: 'last-request-input', capturedAt: null, source: 'hermes.persisted-usage-anchor' }, modelUsage: [] }] };
+  };
+  const csrfToken = (await (await fetch(f.origin + '/api/bootstrap')).json()).csrfToken;
+  const post = (body, token = csrfToken, query = '') => fetch(f.origin + '/api/statistics/history' + query, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Workbench-Token': token }, body: JSON.stringify(body) });
+  assert.equal((await post({}, 'invalid')).status, 403);
+  assert.equal((await post({ stored_session_ids: ['foreign-session'] })).status, 400);
+  assert.equal((await post({}, csrfToken, '?profile=foreign')).status, 400); assert.equal(calls.length, 0);
+  const imported = await post({}); assert.equal(imported.status, 200); assert.equal((await imported.json()).attributedRuns, 1);
+  const again = await post({}); assert.equal(again.status, 200);
+  const dashboard = (await (await fetch(f.origin + '/api/statistics')).json()).dashboard;
+  assert.equal(dashboard.totals.usage.total, 200); assert.equal(dashboard.totals.usage.historicalRuns, 1);
+  const after = hashes(f.app);
+  for (const [table, hash] of Object.entries(before)) if (table !== 'hermes_usage_history') assert.equal(after[table], hash, table);
+});
+
 test('the real assistant dispatcher limits statistics to a workflow scope and honors permission changes', async t => {
   const f = await fixture(t), assistant = f.app.applicationAssistant, document = f.documents[0];
   const scope = await assistant.permissions.bind({ role: 'workflow', workflowId: document.id, document });

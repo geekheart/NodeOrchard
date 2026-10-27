@@ -9,8 +9,8 @@ function fixture(t) {
   db.exec(`CREATE TABLE workflow_documents(id TEXT PRIMARY KEY,revision INTEGER,document TEXT);
     CREATE TABLE workflow_lifecycle(workflow_id TEXT,lifecycle TEXT); CREATE TABLE workflow_library_meta(key TEXT,value TEXT);
     CREATE TABLE workflow_runs(id TEXT PRIMARY KEY,value TEXT); CREATE TABLE workflow_learning(id TEXT,value TEXT);
-    CREATE TABLE workflow_artifacts(id TEXT,value TEXT); CREATE TABLE sessions(id TEXT,model TEXT,provider TEXT);
-    CREATE TABLE runs(id TEXT,session_id TEXT,started_at TEXT); CREATE TABLE workflow_conversation_turns(id TEXT,workflow_id TEXT,value TEXT,private_value TEXT);
+    CREATE TABLE workflow_artifacts(id TEXT,value TEXT); CREATE TABLE sessions(id TEXT,model TEXT,provider TEXT,stored_session_id TEXT);
+    CREATE TABLE runs(id TEXT,session_id TEXT,started_at TEXT,status TEXT DEFAULT 'complete',completed_at TEXT DEFAULT '2026-10-27T01:01:00.000Z'); CREATE TABLE workflow_conversation_turns(id TEXT,workflow_id TEXT,value TEXT,private_value TEXT);
     CREATE TABLE application_conversation_turns(id TEXT,value TEXT); CREATE TABLE application_conversations(id TEXT);
     CREATE TABLE session_usage(session_id TEXT PRIMARY KEY,value TEXT); CREATE TABLE run_usage(run_id TEXT PRIMARY KEY,session_id TEXT,value TEXT);`);
   const app = { store: { db }, adapter: { request: () => assert.fail('statistics must never call Hermes') },
@@ -19,8 +19,8 @@ function fixture(t) {
   const document = (id, title = id) => db.prepare('INSERT INTO workflow_documents VALUES(?,?,?)').run(id, 1, JSON.stringify({ id, title, mode: 'execute', nodes: [{config: {code: 'PRIVATE_CODE'}}] }));
   const run = (id, workflowId = 'workflow-a', extra = {}) => put('workflow_runs', {id,workflowId,status:'complete',startedAt:at,completedAt:'2026-10-27T01:01:00.000Z',nodes:{},document:{title:workflowId},...extra});
   const model = (id, sessionId, usage, status = 'measured', startedAt = at) => {
-    db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(sessionId, 'fixture-model', 'fixture-provider');
-    db.prepare('INSERT INTO runs VALUES(?,?,?)').run(id, sessionId, startedAt);
+    db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').run(sessionId, 'fixture-model', 'fixture-provider', 'stored-' + sessionId);
+    db.prepare('INSERT INTO runs(id,session_id,started_at) VALUES(?,?,?)').run(id, sessionId, startedAt);
     if (usage) db.prepare('INSERT INTO run_usage VALUES(?,?,?)').run(id, sessionId, JSON.stringify({runId:id,sessionId,startedAt,status,usage}));
   };
   const turn = (id, workflowId, extra = {}) => {
@@ -159,4 +159,52 @@ test('new counter-only samples do not freshen a retained context snapshot or sup
   f.db.prepare('INSERT INTO session_usage VALUES(?,?)').run('old-context',JSON.stringify({capturedAt:at,contextCapturedAt:'2026-10-25T00:00:00Z',usage:{context_used:10,context_max:100}}));
   f.db.prepare('INSERT INTO session_usage VALUES(?,?)').run('new-context',JSON.stringify({capturedAt:'2026-10-26T00:00:00Z',contextCapturedAt:'2026-10-26T00:00:00Z',usage:{context_used:40,context_max:100}}));
   const context=f.read().workflows[0].context; assert.equal(context.sessionId,'new-context'); assert.equal(context.percent,40); assert.equal(context.capturedAt,'2026-10-26T00:00:00Z');
+});
+
+function historical(f, sessionId, runId, extra = {}) {
+  f.db.exec('CREATE TABLE IF NOT EXISTS hermes_usage_history(session_id TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  const run = f.db.prepare('SELECT * FROM runs WHERE id=?').get(runId);
+  const value = { sessionId, storedSessionId: 'stored-' + sessionId, found: true, source: 'hermes.state-db', importedAt: now.toISOString(),
+    tokensRecorded: true, usage: { input: 100, output: 10, prompt: 120, completion: 10, total: 130, calls: 1, cache_read: 20, cache_write: 0, reasoning: 5 },
+    firstMessageAt: run.started_at, firstUserMessageAt: run.started_at, lastMessageAt: run.completed_at, parentId: null, hasChildren: false, compressed: false,
+    allocation: { runId, reason: 'single-ended-local-run' },
+    context: { used: 120, max: null, percent: null, estimated: false, historical: true, kind: 'last-request-input', capturedAt: null, source: 'hermes.persisted-usage-anchor' }, ...extra };
+  f.db.prepare('INSERT INTO hermes_usage_history VALUES(?,?)').run(sessionId, JSON.stringify(value)); return value;
+}
+
+test('allocated historical metadata fills missing usage without writing live counters or inventing a context sample time', t => {
+  const f = fixture(t); f.document('workflow-a'); f.run('execution', 'workflow-a', { sessionId: 'history-session' });
+  f.model('model-run', 'history-session', null); historical(f, 'history-session', 'model-run'); const before = f.snapshot(), data = f.read(), row = data.workflows[0];
+  assert.equal(row.usage.total, 130); assert.equal(row.usage.input, 100); assert.equal(row.usage.output, 10); assert.equal(row.usage.historicalRuns, 1);
+  assert.equal(row.usage.measuredRuns, 1); assert.equal(row.usage.unmeasuredRuns, 0); assert.equal(data.totals.usage.total, 130);
+  assert.equal(data.daily.at(-1).usage.total, 130); assert.equal(row.context.used, 120); assert.equal(row.context.max, null);
+  assert.equal(row.context.historical, true); assert.equal(row.context.kind, 'last-request-input'); assert.equal(row.context.capturedAt, null);
+  assert.deepEqual(f.snapshot(), before);
+});
+
+test('historical fallback never adds to measured live usage and only replaces dominated partial values', t => {
+  const f = fixture(t); f.document('workflow-a');
+  for (const [name, status, total] of [['measured', 'measured', 125], ['partial', 'partial', 20], ['large', 'partial', 150], ['reset', 'reset', 10]]) {
+    f.run('execution-' + name, 'workflow-a', { sessionId: name });
+    f.model('model-' + name, name, { total, calls: 1 }, status); historical(f, name, 'model-' + name);
+  }
+  const row = f.read().workflows[0]; assert.equal(row.usage.total, 125 + 130 + 150 + 10);
+  assert.equal(row.usage.historicalRuns, 1); assert.equal(row.usage.measuredRuns, 2); assert.equal(row.usage.partialRuns, 2);
+});
+
+test('adding another local turn after importing a cumulative snapshot invalidates its historical run allocation', t => {
+  const f = fixture(t); f.document('workflow-a'); f.run('execution', 'workflow-a', { sessionId: 'history-session' });
+  f.model('model-run', 'history-session', null); historical(f, 'history-session', 'model-run'); assert.equal(f.read().workflows[0].usage.total, 130);
+  f.db.prepare('INSERT INTO runs(id,session_id,started_at) VALUES(?,?,?)').run('later-run', 'history-session', '2026-10-27T02:00:00.000Z');
+  const row = f.read().workflows[0]; assert.equal(row.usage.total, null); assert.equal(row.usage.historicalRuns, 0); assert.equal(row.usage.unmeasuredRuns, 2);
+});
+
+test('historical imports bucket by the original local run date and never supersede a genuine live context', t => {
+  const f = fixture(t); f.document('workflow-a'); f.run('execution', 'workflow-a', { sessionId: 'history-session' });
+  f.model('model-run', 'history-session', null, 'missing', '2026-10-21T01:00:00.000Z');
+  f.db.prepare('UPDATE runs SET completed_at=? WHERE id=?').run('2026-10-21T01:01:00.000Z', 'model-run');
+  historical(f, 'history-session', 'model-run');
+  f.db.prepare('INSERT INTO session_usage VALUES(?,?)').run('history-session', JSON.stringify({ capturedAt: at, usage: { context_used: 400, context_max: 1000, context_estimated: false } }));
+  const result = f.read(); assert.equal(result.daily[0].usage.total, 130); assert.equal(result.daily.at(-1).usage.total, null);
+  assert.equal(result.workflows[0].context.used, 400); assert.equal(result.workflows[0].context.percent, 40); assert.equal(result.workflows[0].context.historical, undefined);
 });

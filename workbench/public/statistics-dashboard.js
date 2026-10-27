@@ -23,7 +23,8 @@ const coverage = usage => {
   const measured = number(usage?.measuredRuns) ? usage.measuredRuns : 0, partial = number(usage?.partialRuns) ? usage.partialRuns : 0, missing = number(usage?.unmeasuredRuns) ? usage.unmeasuredRuns : 0;
   return measured + partial + missing ? `已采集 ${count(measured + partial)} / ${count(measured + partial + missing)}${partial ? ` · 部分 ${count(partial)}` : ''}` : '尚无用量记录';
 };
-const contextPercent = context => number(context?.percent) ? context.percent : number(context?.used) && number(context?.max) && context.max > 0 ? context.used / context.max * 100 : null;
+const historicalContext = context => context?.historical === true || context?.source === 'hermes.persisted-usage-anchor';
+const contextPercent = context => historicalContext(context) ? null : number(context?.percent) ? context.percent : number(context?.used) && number(context?.max) && context.max > 0 ? context.used / context.max * 100 : null;
 const heading = (index, title, note = '') => { const box = element('div', 'sd-section-heading'); box.append(element('span', 'sd-section-index', index), element('h3', '', title)); if (note) box.append(element('span', 'sd-section-note', note)); return box; };
 
 function metric(label, value, note, tone = '') {
@@ -65,15 +66,23 @@ function chart(daily, type) {
 }
 
 export class StatisticsDashboard {
-  constructor(root, { onRefresh = () => {} } = {}) {
-    Object.assign(this, { root, onRefresh, data: null, loading: false, error: '', days: 7, query: '', filter: 'all', sort: 'activity', selectedWorkflow: null });
+  constructor(root, { onRefresh = () => {}, onImportHistory = null } = {}) {
+    Object.assign(this, { root, onRefresh, onImportHistory, data: null, loading: false, error: '', historyLoading: false, historyStatus: '', historyError: false, days: 7, query: '', filter: 'all', sort: 'activity', selectedWorkflow: null });
     root.className = `${root.className || ''} statistics-dashboard`.trim();
     this.mount(); this.render(null);
   }
   mount() {
     this.header = element('header', 'sd-header');
     const title = element('div', 'sd-header-title'); title.append(element('span', 'sd-eyebrow', 'WORKFLOW / TELEMETRY'), element('h2', '', '运行观测'));
-    const status = element('div', 'sd-header-status'); this.updated = element('span', 'sd-updated'); this.updated.setAttribute('role', 'status'); this.refresh = button('刷新数据', () => this.onRefresh(), 'sd-refresh'); status.append(this.updated, this.refresh); this.header.append(title, status);
+    const status = element('div', 'sd-header-status'); this.updated = element('span', 'sd-updated'); this.updated.setAttribute('role', 'status');
+    this.historyResult = element('span', 'sd-history-status'); this.historyResult.hidden = true; this.historyResult.setAttribute('role', 'status');
+    this.importHistory = button('补齐历史', () => {
+      if (this.historyLoading || typeof this.onImportHistory !== 'function') return;
+      this.historyLoading = true; this.renderHistoryState();
+      try { this.onImportHistory(); } catch { this.historyLoading = false; this.historyStatus = '历史补齐未完成'; this.historyError = true; this.renderHistoryState(); }
+    }, 'sd-import-history');
+    this.importHistory.hidden = typeof this.onImportHistory !== 'function';
+    this.refresh = button('刷新数据', () => this.onRefresh(), 'sd-refresh'); status.append(this.updated, this.historyResult, this.importHistory, this.refresh); this.header.append(title, status);
     this.errorBox = element('p', 'sd-error'); this.errorBox.setAttribute('role', 'alert'); this.errorBox.hidden = true;
     this.readouts = element('section', 'sd-readouts'); this.readouts.setAttribute('aria-label', '统计总览');
     this.trends = element('section', 'sd-trends'); this.trends.setAttribute('aria-label', '每日趋势');
@@ -91,15 +100,21 @@ export class StatisticsDashboard {
     this.inspector = element('aside', 'sd-inspector'); this.inspector.setAttribute('aria-label', '选中工作流统计详情'); this.workspace.append(this.tableArea, this.inspector);
     this.bottom = element('section', 'sd-bottom'); this.root.replaceChildren(this.header, this.errorBox, this.readouts, this.trends, this.workspace, this.bottom);
   }
-  render(data, { loading = false, error = '', days = 7 } = {}) {
+  render(data, { loading = false, error = '', days = 7, historyLoading = false, historyStatus = '', historyError = false } = {}) {
     if (data !== undefined && !(data === null && (loading || error) && this.data)) this.data = data;
-    Object.assign(this, { loading, error, days }); this.root.setAttribute('aria-busy', String(loading)); this.refresh.disabled = loading;
+    Object.assign(this, { loading, error, days, historyLoading, historyStatus: typeof historyStatus === 'object' && historyStatus ? text(historyStatus.message || historyStatus.text) : text(historyStatus), historyError: historyError || !!historyStatus?.error }); this.root.setAttribute('aria-busy', String(loading)); this.refresh.disabled = loading;
+    this.renderHistoryState();
     this.refresh.textContent = loading ? '正在读取…' : '刷新数据'; this.errorBox.hidden = !error; this.errorBox.textContent = error ? `统计读取失败：${error}` : '';
     const zone = this.data?.period?.timeZone || 'Asia/Shanghai';
     this.updated.textContent = this.data ? `${this.data.period?.days || days} 天 · ${zone} · 更新 ${time(this.data.generatedAt, zone)}` : loading ? '正在读取本地统计' : '尚无统计数据';
     const rows = this.data?.workflows || [];
     if (!rows.some(row => row.id === this.selectedWorkflow)) this.selectedWorkflow = rows[0]?.id || null;
     this.renderReadouts(); this.renderTrends(); this.renderTable(); this.renderInspector(); this.renderBottom();
+  }
+  renderHistoryState() {
+    this.importHistory.disabled = this.historyLoading; this.importHistory.setAttribute('aria-busy', String(this.historyLoading)); this.importHistory.textContent = this.historyLoading ? '正在补齐…' : '补齐历史';
+    this.historyResult.hidden = !this.historyStatus; this.historyResult.textContent = this.historyStatus;
+    this.historyResult.className = `sd-history-status${this.historyError ? ' failure' : ''}`; this.historyResult.setAttribute('role', this.historyError ? 'alert' : 'status');
   }
   renderReadouts() {
     const totals = this.data?.totals, { conversation, execution, usage, storage } = values(totals);
@@ -141,9 +156,9 @@ export class StatisticsDashboard {
       name.append(choose, element('span', 'sd-workflow-meta', `${STATES[row.lifecycle] || '正常'} · ${row.mode === 'learn' ? '学习' : '执行'}`));
       tr.append(name, element('td', '', count(row.conversations?.turns)), element('td', '', count(row.execution?.runs)));
       const results = element('td', 'sd-run-counts'); results.append(element('span', 'success', count(row.execution?.complete)), element('span', 'sd-count-divider', ' / '), element('span', number(row.execution?.failed) && row.execution.failed > 0 ? 'failure' : '', count(row.execution?.failed))); tr.append(results);
-      const tokens = element('td', 'sd-token-cell'); tokens.append(element('strong', '', compact(row.usage?.total)), element('span', 'sd-cell-note', row.usage?.total === null || row.usage?.total === undefined ? '未采集' : coverage(row.usage))); tr.append(tokens);
+      const tokens = element('td', 'sd-token-cell'); tokens.append(element('strong', '', compact(row.usage?.total)), element('span', 'sd-cell-note', row.usage?.total === null || row.usage?.total === undefined ? '未采集' : coverage(row.usage))); if (row.usage?.historicalRuns > 0) tokens.append(element('span', 'sd-history-tag', `历史补齐 ${count(row.usage.historicalRuns)}`)); tr.append(tokens);
       const context = element('td', 'sd-context-cell'), ratio = contextPercent(row.context);
-      context.append(element('strong', '', ratio === null ? compact(row.context?.used) : `${ratio.toFixed(1)}%`), element('span', 'sd-cell-note', row.context ? ratio === null ? '容量未上报' : `${compact(row.context.used)} / ${compact(row.context.max)}` : '未采集'));
+      context.append(element('strong', '', ratio === null ? compact(row.context?.used) : `${ratio.toFixed(1)}%`), element('span', 'sd-cell-note', historicalContext(row.context) ? '历史请求输入' : row.context ? ratio === null ? '容量未上报' : `${compact(row.context.used)} / ${compact(row.context.max)}` : '未采集'));
       tr.append(context); tr.addEventListener('click', () => this.select(row.id)); body.append(tr);
     });
     table.append(head, body);
@@ -171,11 +186,14 @@ export class StatisticsDashboard {
       ['输入 Token', count(usage.input), 'input'], ['输出 Token', count(usage.output), 'output'], ['累计 Token', count(usage.total), 'cyan'],
       ['已采集模型请求', count(usage.calls), ''],
       ['采集覆盖', coverage(usage), ''], ['登记产物', `${count(artifacts.count)} · ${bytes(artifacts.registeredBytes)}`, ''], ['记录占用', bytes(storage.recordBytes), ''],
-    ]) facts.append(this.pair(label, value, tone)); this.inspector.append(facts);
-    const context = element('div', 'sd-context-detail'); context.append(heading('', '上下文快照'));
+    ]) facts.append(this.pair(label, value, tone)); if (usage.historicalRuns > 0) facts.append(this.pair('历史补齐', `${count(usage.historicalRuns)} 次运行`)); this.inspector.append(facts);
+    const context = element('div', 'sd-context-detail'); context.append(heading('', historicalContext(row.context) ? '历史上下文' : '上下文快照'));
     const ratio = contextPercent(row.context);
     if (!row.context) context.append(element('p', 'sd-empty-inline', '未采集上下文快照'));
-    else {
+    else if (historicalContext(row.context)) {
+      context.append(element('span', 'sd-cell-note', '最后请求输入'), element('strong', 'sd-context-value', `${compact(row.context.used)} tokens`),
+        element('span', 'sd-cell-note', `模型容量 ${compact(row.context.max)}`), element('span', 'sd-cell-note', row.context.capturedAt ? `请求时间 ${time(row.context.capturedAt, this.data?.period?.timeZone)}` : '请求时间未记录'));
+    } else {
       context.append(element('strong', 'sd-context-value', `${compact(row.context.used)} / ${compact(row.context.max)}`));
       const note = ratio === null ? '模型容量未上报' : `${ratio.toFixed(1)}%${row.context.estimated ? ' · 估算' : ''}`; context.append(element('span', 'sd-cell-note', note));
       if (ratio !== null) { const meter = element('div', 'sd-context-meter'); meter.setAttribute('role', 'meter'); meter.setAttribute('aria-label', '最近上下文占用'); meter.setAttribute('aria-valuemin', '0'); meter.setAttribute('aria-valuemax', '100'); meter.setAttribute('aria-valuenow', text(Math.max(0, Math.min(100, ratio)))); const fill = element('span', ratio >= 85 ? 'attention' : ''); fill.style.width = `${Math.max(0, Math.min(100, ratio))}%`; meter.append(fill); context.append(meter); }
@@ -203,8 +221,6 @@ export class StatisticsDashboard {
     const entries = this.data?.recentActivity || [];
     for (const entry of entries.slice(0, 8)) { const row = element('div', 'sd-activity-row'); row.append(element('span', 'sd-activity-time', time(entry.at, this.data?.period?.timeZone)), element('span', 'sd-activity-kind', entry.kind === 'run' ? '运行' : '对话'), element('span', 'sd-activity-title', entry.title || entry.workflowId || '总控助手'), element('span', failStatus(entry.status) ? 'failure' : '', STATUS[entry.status] || entry.status || '—')); activity.append(row); }
     if (!entries.length) activity.append(element('p', 'sd-empty-inline', '当前范围没有活动记录'));
-    const definitions = element('details', 'sd-definitions'); definitions.append(element('summary', '', '统计口径'));
-    definitions.append(element('p', '', '运行按开始时间统计；Token 为已采集的模型用量，缺失值不计为零。上下文是最近快照，不能与累计 Token 等同。记录占用为结构化记录大小，登记产物大小来自产物登记，不代表完整磁盘占用。未采集 CPU、内存或订阅费用。'));
-    this.bottom.replaceChildren(controls, activity, definitions);
+    this.bottom.replaceChildren(controls, activity);
   }
 }

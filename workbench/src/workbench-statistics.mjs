@@ -1,5 +1,6 @@
 import { sanitizeDiagnosticText } from './app-diagnostics.mjs';
 import { projectConversationIssues, conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
+import { historicalRunUsage } from './historical-usage.mjs';
 
 const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review', 'thinking']);
 const COMPLETE = new Set(['complete', 'completed', 'applied', 'dismissed']);
@@ -18,7 +19,7 @@ const conversationMetrics = () => ({ turns: 0, complete: 0, failed: 0, pending: 
 const executionMetrics = () => ({ runs: 0, complete: 0, failed: 0, interrupted: 0, unknown: 0, active: 0, successRate: null,
   totalDurationMs: 0, averageDurationMs: null, durationSamples: 0, nodeAttempts: 0, learningRuns: 0, lastAt: null });
 const usageMetrics = () => ({ input: null, output: null, prompt: null, completion: null, reasoning: null, total: null, calls: null,
-  measuredRuns: 0, unmeasuredRuns: 0, partialRuns: 0 });
+  measuredRuns: 0, unmeasuredRuns: 0, partialRuns: 0, historicalRuns: 0 });
 const group = () => ({ conversations: conversationMetrics(), execution: executionMetrics(), usage: usageMetrics(),
   context: null, artifacts: { count: 0, registeredBytes: 0, unknownSizes: 0 }, storage: { recordBytes: 0 }, models: [] });
 const day = date => ({ date, conversations: conversationMetrics(), execution: executionMetrics(), usage: usageMetrics() });
@@ -82,6 +83,7 @@ function addUsage(metrics, record) {
   const partial = !measured && record?.status !== 'missing' && ['input', 'output', 'prompt', 'completion', 'total', 'calls'].some(key => number(usage[key]) !== null);
   metrics[measured ? 'measuredRuns' : partial ? 'partialRuns' : 'unmeasuredRuns']++;
   if (!measured && !partial) return;
+  if (record.historical === true) metrics.historicalRuns++;
   for (const key of ['input', 'output', 'prompt', 'completion', 'reasoning', 'total', 'calls']) metrics[key] = addNullable(metrics[key], usage[key]);
 }
 function contextView(snapshot) {
@@ -222,7 +224,12 @@ export function collectWorkbenchStatistics(app, { days = 7, now = new Date(), ti
   }
   const snapshots = new Map(query('session_usage', 'SELECT session_id,value FROM session_usage').map(row => [row.session_id, parse(row.value)]));
   const runUsage = new Map(query('run_usage', 'SELECT run_id,value FROM run_usage').map(row => [row.run_id, parse(row.value)]));
-  const sessions = new Map(query('sessions', 'SELECT id,model,provider FROM sessions').map(row => [row.id, row]));
+  const sessions = new Map(query('sessions', 'SELECT id,model,provider,stored_session_id FROM sessions').map(row => [row.id, row]));
+  const histories = new Map(query('hermes_usage_history', 'SELECT session_id,value FROM hermes_usage_history').map(row => [row.session_id, parse(row.value)]));
+  const modelRuns = query('runs', 'SELECT id,session_id,started_at,completed_at,status FROM runs ORDER BY started_at,id');
+  const runsBySession = new Map(), storedCounts = new Map();
+  for (const session of sessions.values()) storedCounts.set(session.stored_session_id, (storedCounts.get(session.stored_session_id) || 0) + 1);
+  for (const run of modelRuns) { if (!runsBySession.has(run.session_id)) runsBySession.set(run.session_id, []); runsBySession.get(run.session_id).push(run); }
   const totals = { ...group(), workflowCount: workflows.size, activeWorkflows: 0, recycledWorkflows: 0, deletedWorkflows: 0, historicalWorkflows: 0 };
   const ordinary = { ...group(), sessionCount: 0 }, ownerOf = id => ambiguousSessions.has(id) ? ordinary : owners.get(id) === supervisorOwner ? supervisor : workflows.get(owners.get(id)) || ordinary;
   const modelMaps = new Map();
@@ -230,14 +237,29 @@ export function collectWorkbenchStatistics(app, { days = 7, now = new Date(), ti
     const owner = ownerOf(sessionId), context = contextView({ ...snapshot, sessionId });
     if (context && (!owner.context || (time(context.capturedAt) ?? -1) >= (time(owner.context.capturedAt) ?? -1))) owner.context = context;
   }
-  for (const row of query('runs', 'SELECT id,session_id,started_at FROM runs ORDER BY started_at,id')) {
+  const historicalContextRank = new Map();
+  for (const [sessionId, history] of histories) {
+    const session = sessions.get(sessionId), context = history?.context, owner = ownerOf(sessionId);
+    if (!session || history.sessionId !== sessionId || history.storedSessionId !== session.stored_session_id
+      || storedCounts.get(session.stored_session_id) !== 1 || context?.historical !== true || context.kind !== 'last-request-input'
+      || number(context.used) === null || (owner.context && !owner.context.historical)) continue;
+    const rank = time(runsBySession.get(sessionId)?.at(-1)?.started_at) ?? -1;
+    if (!owner.context || rank >= (historicalContextRank.get(owner) ?? -1)) {
+      owner.context = { used: context.used, max: null, percent: null, estimated: false, historical: true,
+        kind: 'last-request-input', source: 'hermes.persisted-usage-anchor', capturedAt: null, sessionId: text(sessionId, 128) };
+      historicalContextRank.set(owner, rank);
+    }
+  }
+  for (const row of modelRuns) {
     if (!inPeriod(row.started_at)) continue;
-    const owner = ownerOf(row.session_id), usage = runUsage.get(row.id), key = dayKey(row.started_at, formatter);
+    const session = sessions.get(row.session_id), history = histories.get(row.session_id);
+    const owner = ownerOf(row.session_id), usage = historicalRunUsage(history, session, runsBySession.get(row.session_id) || [],
+      storedCounts.get(session?.stored_session_id) || 0, runUsage.get(row.id)), key = dayKey(row.started_at, formatter);
     addUsage(owner.usage, usage); addUsage(totals.usage, usage);
     const globalDay = byDate.get(key), localDay = owner.daily?.find(item => item.date === key);
     if (globalDay) addUsage(globalDay.usage, usage); if (localDay) addUsage(localDay.usage, usage);
     if (!modelMaps.has(owner)) modelMaps.set(owner, new Map());
-    const models = modelMaps.get(owner), session = sessions.get(row.session_id), modelKey = `${session?.provider || ''}\0${session?.model || ''}`;
+    const models = modelMaps.get(owner), modelKey = `${session?.provider || ''}\0${session?.model || ''}`;
     if (!models.has(modelKey)) models.set(modelKey, { provider: text(session?.provider, 100), model: text(session?.model, 180) || '未记录模型', runs: 0, usage: usageMetrics() });
     const model = models.get(modelKey); model.runs++; addUsage(model.usage, usage);
   }
@@ -267,8 +289,8 @@ export function collectWorkbenchStatistics(app, { days = 7, now = new Date(), ti
     coverage: { measuredRuns: totals.usage.measuredRuns, partialRuns: totals.usage.partialRuns, unmeasuredRuns: totals.usage.unmeasuredRuns,
       ambiguousSessions: ambiguousSessions.size, historicalLearningSessionCoverage: 'partial' },
     notes: { execution: '工作流执行按顶层运行计数，含学习样本；子流程节点尝试和模型用量归入顶层工作流。成功率分母包含成功、失败、停止和结果未知，排除进行中。',
-      usage: 'Token 为所选期间模型运行的 Hermes 累计快照差值；未采集不补零，部分采集不代表完整消耗，总量不重复加算推理 Token。',
-      context: '上下文为最近一次已上报的模型会话快照；不跨会话相加，估算值单独标记。',
+      usage: 'Token 为所选期间模型运行的 Hermes 累计快照差值；历史仅在唯一会话与单次已结束运行及时间范围匹配时补齐，不与实时数据重复相加；未采集不补零，推理 Token 不重复加算。',
+      context: '实时上下文为最近一次已上报快照；历史锚点仅表示该会话最后 API 输入，未知容量和采样时间保持为空，不代表当前占用；不跨会话相加。',
       storage: '登记产物字节与记录字节是当前保留的累计登记数据，不等于实际磁盘占用。',
       history: '统计保留回收站及已删除工作流的历史消耗。旧学习评价与总控会话可能缺少模型归属。',
       unavailable: ['逐工作流 CPU / RAM 未采集', '订阅费用未采集'] } };

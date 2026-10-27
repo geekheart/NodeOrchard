@@ -350,6 +350,7 @@ class WorkflowGateway:
         self.server.register_method("workbench.assistant.prepare", self.assistant_prepare_rpc)
         self.server.register_method("workbench.assistant.images", self.assistant_images_rpc)
         self.server.register_method("workbench.assistant.history", self.assistant_history_rpc)
+        self.server.register_method("workbench.usage.history", self.usage_history_rpc)
         self.server.register_method("workbench.learning.memory.capture", self.memory_capture_rpc)
         self.server.register_method("workbench.learning.memory.release", self.memory_release_rpc)
         self.server.register_method("workbench.learning.memory.restore", self.memory_restore_rpc)
@@ -359,6 +360,7 @@ class WorkflowGateway:
             "workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish",
             "workbench.learning.prepare",
             "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history",
+            "workbench.usage.history",
             "workbench.learning.memory.capture", "workbench.learning.memory.release",
             "workbench.learning.memory.restore",
         }
@@ -910,6 +912,20 @@ class WorkflowGateway:
         return {"storedSessionId": params["stored_session_id"], "messages": bounded, "truncated": truncated,
                 "policy": {"readOnly": True, "agentCreated": False, "sessionResumed": False, "memoryRead": False, "reasoningIncluded": False}}
 
+    def usage_history(self, params):
+        """Read numeric metadata from the fixed native store without a live agent."""
+        from usage_history import read_usage_history, validate_request
+        ids = validate_request(params)
+        path_fn = getattr(self.server, "_launch_state_db_path", None)
+        _check_signature(path_fn, set(), "server._launch_state_db_path")
+        from hermes_state import SessionDB
+        _check_signature(SessionDB, {"db_path", "read_only"}, "SessionDB")
+        db = SessionDB(db_path=path_fn(), read_only=True)
+        try:
+            return read_usage_history(db, ids)
+        finally:
+            db.close()
+
     def _workspace(self, session) -> Path:
         if self.workspace_root is None or not self.workspace_root.is_dir():
             raise WorkflowPolicyError("WORKBENCH_GATEWAY_WORKSPACE_ROOT must name an existing workspace root.")
@@ -1416,6 +1432,12 @@ class WorkflowGateway:
             return self.server._ok(rid, self.assistant_history(params))
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
             return self.server._err(rid, 4100, str(exc))
+
+    def usage_history_rpc(self, rid, params):
+        try:
+            return self.server._ok(rid, self.usage_history(params))
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+            return self.server._err(rid, 4101, "Hermes usage history is unavailable or incompatible.")
 
 
 def main():
