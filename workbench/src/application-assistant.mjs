@@ -313,7 +313,11 @@ export class ApplicationAssistant {
       check(activeSignal);
       phase('capabilities', '准备当前能力与诊断范围');
       const modelRoute = pinnedModelRoute || decision?.modelRoute || await turn.wait(Promise.resolve(this.app.captureModelRoute?.()), activeSignal);
-      const directEdit = !readOnly && !!document && decision?.intent === 'workflow';
+      // The user explicitly requested a code proposal from a version-bound
+      // review card. Its natural-language content can correctly classify as
+      // feedback; preserve that classification and honor the structured action.
+      const revisionFeedback = context.requestKind === 'artifact-revision-proposal' && decision?.intent === 'feedback';
+      const directEdit = !readOnly && !!document && (decision?.intent === 'workflow' || revisionFeedback);
       if (directEdit) {
         const callContext = { ...selection, page, signal: activeSignal, text, history, onSession,
           permissionScope, sourceConversationId, diagnosticTurnId, deadlineAt, modelRoute, onProgress: modelProgress };

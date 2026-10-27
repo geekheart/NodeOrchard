@@ -576,11 +576,11 @@ export class WorkflowConversations {
           signal: controller.signal, startedAt: turn.createdAt, deadlineAt, ...hooks });
         if (controller.signal.aborted || this.closed) return;
         turn.user.intent = decision.intent; this.update(turn);
-        if (revision && ['feedback', 'skill'].includes(decision.intent)) {
+        if (revision && decision.intent === 'skill') {
           turn.status = 'complete'; turn.assistant.text = 'AI未将这条意见识别为节点修改请求，未生成候选或重做产物；原始意见已保留。';
           finishDiagnostic(turn.assistant, 'complete'); this.update(turn); this.emit(turn.workflowId); return;
         }
-        if (!readOnly && ['feedback', 'skill'].includes(decision.intent)) {
+        if (!readOnly && !revision && ['feedback', 'skill'].includes(decision.intent)) {
           const scope = await assistant.permissions.bind({ role: 'workflow', workflowId: turn.workflowId, document });
           await assistant.permissions.admit('workflow.inspect', { workflowId: turn.workflowId }, scope, { document });
           const diagnostics = { ...turn.assistant };
@@ -616,7 +616,7 @@ export class WorkflowConversations {
           finishDiagnostic(turn.assistant, 'complete'); this.update(turn); this.emit(turn.workflowId); return;
         }
       }
-      const proposalText = revision && decision?.intent === 'workflow'
+      const proposalText = revision && ['workflow', 'feedback'].includes(decision?.intent)
         ? `用户从产物审核卡明确请求生成节点修改候选。生产节点：${revision.target.id}（${revision.target.title}，${revision.target.type}）。按下列完整审核意见修改当前草稿中的生产能力，保持无关节点与人工审核。工具节点必须重新生成该节点的Python或JavaScript核心业务代码（executionMode=code），保留端口及输入输出合约；注册工具模式可转换为代码模式，禁止修改应用源码或内置工具实现。不能只改标题、超时、说明或原封不动重跑；无法实现时明确失败。只生成可审阅候选，不应用、不运行，不改旧运行快照。审核意见：\n${turn.user.text}`
         : turn.user.text;
       const result = await this.planner(this.app, { role: 'workflow', readOnly, decision, diagnosticTurnId: turn.id,
@@ -626,7 +626,7 @@ export class WorkflowConversations {
       if (this.closed || controller.signal.aborted) return;
       if (revision) {
         bindArtifactRevisionProposal(this.app, turn.workflowId, document, turn.user.revisionRequest);
-        if (decision?.intent === 'workflow') {
+        if (['workflow', 'feedback'].includes(decision?.intent)) {
           const candidate = result.operations?.length ? applyWorkflowOperations(document, result.operations).document : document;
           assertArtifactRevisionCodeChange(document, candidate, revision.target.id);
         }

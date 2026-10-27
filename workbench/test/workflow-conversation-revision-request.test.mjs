@@ -74,11 +74,22 @@ test('structured revision requests cannot bypass AI classification or approve th
   assert(f.prompts[0].title.includes('任务意图分类')); assert.deepEqual(f.app.workflows.get(f.run.id), before);
 });
 
+test('AI-classified feedback from an explicitly bound code-revision request generates code without relabeling the intent', async t => {
+  const f = await fixture(t); f.intent = 'feedback';
+  const before = f.app.workflows.get(f.run.id), turn = await send(f, '把海报文字改为中文，保留尺寸和背景颜色');
+  assert.equal(turn.user.intent, 'feedback'); assert.equal(turn.status, 'proposed');
+  assert.equal(f.prompts.length, 2); assert.equal(turn.assistant.operations.length, 1);
+  assert.equal(turn.assistant.operations[0].config.executionMode, 'code');
+  assert.deepEqual(f.app.workflows.get(f.run.id), before);
+  assert.equal((await f.app.conversations.validateProposal(f.document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint })).valid, true);
+});
+
 test('stale or foreign revision bindings and revoked permissions admit no model call or review mutation', async t => {
   const f = await fixture(t), before = f.app.workflows.get(f.run.id);
   for (const revisionRequest of [{ ...f.revisionRequest, attempt: 99 }, { ...f.revisionRequest, targetNodeId: 'other' }, { ...f.revisionRequest, extra: true }]) {
     await assert.rejects(send(f, '改成中文', { revisionRequest }));
   }
+  await assert.rejects(send(f, '改成中文', { revisionRequest: undefined, context: { requestKind: 'artifact-revision-proposal' } }));
   const permissions = f.app.assistantPermissionSettings.get();
   f.app.assistantPermissionSettings.save({ expectedRevision: permissions.revision, workflow: { ...permissions.workflow, workflowRead: false }, supervisor: permissions.supervisor });
   await assert.rejects(send(f, '改成中文'), /权限/);
