@@ -49,12 +49,12 @@ test('no shell, arbitrary files, source writes or model-supplied operations are 
 });
 
 test('global conversation is idempotent, survives restart and never repeats an uncertain turn', async t => {
-  const f = fixture(t, [{ text: '已读取全局状态。' }]);
+  const f = fixture(t, [{ intent: 'diagnose' }, { text: '已读取全局状态。' }]);
   const body = { clientMessageId: 'same-message', text: '检查整个应用' };
   const first = await f.assistant.message(body);
   for (let index = 0; index < 40 && f.assistant.get().conversation.turns[0].status === 'thinking'; index++) await new Promise(resolve => setImmediate(resolve));
   const duplicate = await f.assistant.message(body);
-  assert.equal(first.turn.id, duplicate.turn.id); assert.equal(f.calls.length, 1);
+  assert.equal(first.turn.id, duplicate.turn.id); assert.equal(f.calls.length, 2);
   await assert.rejects(f.assistant.message({ ...body, text: '不同内容' }), /相同消息/);
   await f.assistant.close();
   const next = new ApplicationAssistant(f.app); assert.equal(next.get().conversation.turns[0].status, 'complete'); await next.close();

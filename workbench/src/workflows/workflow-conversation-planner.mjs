@@ -9,6 +9,8 @@ const string = (value, limit) => typeof value === 'string' ? value.slice(0, limi
 const own = (value, key) => value && Object.getOwnPropertyDescriptor(value, key)?.value;
 const reserved = new Set(['__proto__', 'prototype', 'constructor']);
 const REVISION = /^sha256:[a-f0-9]{64}$/;
+const BASIC_TYPES = new Set(['input', 'tool', 'transform', 'validation', 'human', 'output']);
+const COMPLEX_TYPES = new Set(['subflow', 'foreach', 'loop', 'evaluation', 'improvement']);
 
 function plainJson(value, depth = 0, state = { count: 0 }) {
   if (++state.count > 40000 || depth > 40) throw failure('AI 返回的编辑方案过大或嵌套过深。');
@@ -33,7 +35,9 @@ function graphContext(document) {
         if (node.type === 'evaluation' && !['comparison', 'valuePath'].includes(key)) continue;
         if (node.type === 'improvement' && !['scope', 'targetSkillNodeIds'].includes(key)) continue;
         if (key === 'document') { if (value) config.embeddedWorkflow = { id: value.id, nodeCount: value.nodes.length }; continue; }
-        if (typeof value === 'string') config[key] = string(value, ['code', 'prompt'].includes(key) ? 3000 : 1200);
+        // Editing needs the exact business source; the final prompt size guard
+        // rejects oversized graphs instead of silently removing code tails.
+        if (typeof value === 'string') config[key] = key === 'code' ? value : string(value, key === 'prompt' ? 3000 : 1200);
         else if (key === 'fields') config[key] = value.slice(0, 30).map(field => ({ key: field.key, label: field.label, kind: field.kind, required: field.required,
           ...(field.extensions ? { extensions: field.extensions } : {}) }));
         else config[key] = value;
@@ -50,10 +54,21 @@ function selectionContext(context) {
   }
   return result;
 }
-function recentHistory(history) {
+function recentHistory(history, currentText, focused = false) {
   if (!Array.isArray(history)) return [];
-  return history.filter(row => ['user', 'assistant'].includes(own(row, 'role')) && typeof own(row, 'text') === 'string')
-    .slice(-6).map(row => ({ role: own(row, 'role'), text: string(own(row, 'text'), 3000) }));
+  const seen = new Set();
+  const rows = history.filter(row => ['user', 'assistant'].includes(own(row, 'role')) && typeof own(row, 'text') === 'string'
+    && !(own(row, 'role') === 'user' && own(row, 'text').trim() === currentText.trim())).filter(row => {
+      const key = own(row, 'role') + '\0' + own(row, 'text');
+      if (seen.has(key)) return false; seen.add(key); return true;
+    }).slice(-6);
+  let remaining = focused ? 4000 : 18000;
+  return rows.reverse().flatMap(row => {
+    if (!remaining) return [];
+    const value = own(row, 'text'), limit = Math.min(focused ? 1500 : 3000, remaining);
+    const text = string(value, limit); remaining -= text.length;
+    return [{ role: own(row, 'role'), text: text + (text.length < value.length ? '[历史长文本已省略]' : '') }];
+  }).reverse();
 }
 async function skillInventory(app, document) {
   const existing = document.nodes.filter(node => node.type === 'skill' && node.config.skillRef)
@@ -69,11 +84,52 @@ async function skillInventory(app, document) {
   } catch { return existing; }
 }
 
-function configCatalog(schemaVersion = 2) {
-  return NODE_TYPES.map(({ type }) => {
+function configCatalog(schemaVersion = 2, types = new Set(NODE_TYPES.map(row => row.type))) {
+  return NODE_TYPES.filter(row => types.has(row.type)).map(({ type }) => {
     const { defaults, allowedConfigKeys, enums } = workflowNodeContract(type, { schemaVersion });
     return { type, defaults, allowedConfigKeys, enums };
   });
+}
+
+function relevance(text) {
+  const query = text.toLowerCase(), terms = new Set(query.match(/[a-z][a-z0-9_.-]{2,}/g) || []);
+  const common = new Set(['输入', '输出', '节点', '工作', '流程', '生成', '获取', '项目', '数据', '完成', '帮我', '处理', '文件']);
+  for (const run of query.match(/[\p{Script=Han}]{2,}/gu) || []) {
+    for (let length = 2; length <= 4; length++) for (let index = 0; index <= run.length - length && terms.size < 400; index++) {
+      const token = run.slice(index, index + length); if (!common.has(token)) terms.add(token);
+    }
+  }
+  return row => {
+    const identity = String(row.ref || row.id || '').toLowerCase(), title = String(row.title || row.label || '').toLowerCase();
+    if (identity.length > 2 && query.includes(identity) || title.length > 1 && query.includes(title)) return 100;
+    const description = String(row.description || '').toLowerCase(); let score = 0;
+    for (const token of terms) score += (identity.includes(token) || title.includes(token) ? 4 : 0) + (description.includes(token) ? 1 : 0);
+    return score;
+  };
+}
+
+function plannerCatalogs(document, text, skills, profile) {
+  if (profile !== undefined && !['focused', 'full'].includes(profile)) throw failure('候选上下文配置无效。');
+  const full = profile === 'full' || document.nodes.length > 24 || document.nodes.some(node => COMPLEX_TYPES.has(node.type))
+    || /(?:子流程|组合节点|逐项|遍历|循环|学习|训练|evaluation|improvement|foreach|subflow|\bloop\b|全量契约|高级节点)/i.test(text);
+  const types = new Set(full ? NODE_TYPES.map(row => row.type) : [...BASIC_TYPES, ...document.nodes.map(node => node.type)]);
+  if (/(?:Skill|技能)/i.test(text)) types.add('skill');
+  if (/(?:条件|否则|分支|condition)/i.test(text)) types.add('condition');
+  if (/(?:汇总|并行|合并|merge)/i.test(text)) types.add('merge');
+  const score = relevance(text), usedTools = new Set(document.nodes.map(node => node.config.toolName).filter(Boolean));
+  const relevantTools = WORKFLOW_TOOLS.filter(row => !row.id.startsWith('hdk.') || usedTools.has(row.id) || score(row) >= 4);
+  const toolGroups = new Set(relevantTools.filter(row => row.id.startsWith('hdk.')).map(row => row.id.split('.')[1]));
+  const tools = full ? [...WORKFLOW_TOOLS] : WORKFLOW_TOOLS.filter(row => relevantTools.includes(row) || toolGroups.has(row.id.split('.')[1]));
+  const existing = new Set(document.nodes.map(node => node.config.skillRef).filter(Boolean));
+  const rankedSkills = skills.map((row, index) => ({ row, index, score: score(row) })).filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index).slice(0, 12).map(item => item.row);
+  const advertisedSkills = full ? skills : skills.filter(row => existing.has(row.ref) || rankedSkills.includes(row)
+    || /(?:Skill|技能)/i.test(text) && !rankedSkills.length && skills.indexOf(row) < 12);
+  if (advertisedSkills.length) types.add('skill');
+  return { types, tools, skills: advertisedSkills, selection: { profile: full ? 'full' : 'focused', nodeTypes: [...types],
+    tools: { total: WORKFLOW_TOOLS.length, included: tools.length, omitted: WORKFLOW_TOOLS.length - tools.length },
+    skills: { total: skills.length, included: advertisedSkills.length, omitted: skills.length - advertisedSkills.length },
+    note: full ? '完整真实目录。' : '本次相关契约子集；省略不表示能力不存在或未安装，现有节点及明确提及能力仍保留。' } };
 }
 
 function validateProposal(raw, document, skills, baseFingerprint, { checkRevisions = true } = {}) {
@@ -144,17 +200,19 @@ async function pinProposalSkills(app, raw, document, skills, baseFingerprint, si
 export async function planWorkflowConversation(appOrOptions, options) {
   const request = options === undefined ? appOrOptions : { ...options, app: appOrOptions };
   const { app, text, context, history, signal, onSession } = request || {};
-  const model = request.model || app?.learningModel;
+  const model = request.model || app?.assistantModel || app?.learningModel;
   if (typeof model?.generate !== 'function') throw failure('工作流 AI 暂不可用，请先连接 Hermes。', 409);
   if (typeof text !== 'string' || !text.trim() || text.length > 12000 || text.includes('\0')) throw failure('对话内容必须是非空文本，最多 12000 个字符。');
   if (signal?.aborted) throw failure('工作流对话已停止。', 409);
   const document = applyWorkflowOperations(request.document, []).document;
   const baseFingerprint = documentFingerprint(document);
   const skills = await skillInventory(app, document);
+  const catalogs = plannerCatalogs(document, text, skills, request.contractProfile);
   if (signal?.aborted) throw failure('工作流对话已停止。', 409);
   const source = {
     workflow: graphContext(document), selection: selectionContext(context),
-    recentConversation: recentHistory(history), userMessage: text,
+    recentConversation: recentHistory(history, text, catalogs.selection.profile === 'focused'), userMessage: text,
+    catalogSelection: catalogs.selection,
     // Only controller-projected findings are forwarded, never arbitrary run
     // objects, inputs, outputs, tool arguments, training data or reasoning.
     diagnosticEvidence: (Array.isArray(request.diagnosticEvidence) ? request.diagnosticEvidence : []).slice(-6).map(row =>
@@ -180,7 +238,8 @@ SYSTEM_RULES:
 - 不能新增操作种类、伪造对象 ID、改变工作流 mode/settings、定时 trigger/schedule/timezone 或传入 config.document。组合内部编辑请让用户进入组合节点。不能改写 origin 版本信息。
 - 默认端口：input 无输入且输出 out；output 输入 in 且输出 out/learning；condition 输入 in、输出 yes/no；improvement 输入 in 且无输出；其他节点输入 in、输出 out。evaluation 输出 object，improvement 输入 object，output 输入固定 any，foreach 输入输出固定 array。连接类型必须相同或任一侧为 any。不能形成环或给一个目标端口接入两根线。需要汇总并行分支时给 merge 定义多个具名 inputs（每项 id/label/type/required），outputs 定义 out；输出端口可用 valuePath 投影。不能删除必需的人工审核绕过审核。
 - 注册工具通过 add-node type=tool、config={executionMode:"tool",toolName:目录 ID} 使用。工具端口、资源和必需审核属性会按目录自动补全；请使用目录真实端口 ID。不要虚构工具或 MCP 名称。代码节点只保存为待审草稿，不会运行；没有必要时优先已注册工具。
-- 代码模式为 add-node type=tool、config={executionMode:"code",language:"python"或"javascript",code:"业务函数体"}，不要求toolName或预先注册专用工具。遵守USER_SOURCE_JSON里的runtimeContract；Python可通过context.outputDirectory生成文件并return路径。使用第三方库的方案须依据已确认的实际运行环境，不能声称已安装或已执行。
+- 代码模式为 add-node type=tool、config={executionMode:"code",language:"python"或"javascript",code:"业务函数体"}，不要求toolName或预先注册专用工具。遵守USER_SOURCE_JSON里的runtimeContract。Python 的 context 是普通 dict；input 按 JSON 类型解码，对象是 dict、数组是 list。对象字段用 input['key']/input.get('key')，上下文字段用 context['key']/context.get('key')，不能用点号属性访问。使用第三方库的方案须依据已确认的实际运行环境，不能声称已安装或已执行。
+- 生成PNG/JPEG/SVG等真实图片的代码或Skill必须连接human人工审核，审核后才能最终输出；可另存intermediate预览但不能代批。${source.runtimeContract.files.supported ? `文件先写入本次输出目录：JavaScript 使用 ${source.runtimeContract.files.directory.javascript}，Python 使用 ${source.runtimeContract.files.directory.python}，再返回path/files/artifacts真实绝对路径。` : 'schema1代码仅提供JSON返回契约；生成文件须先使用schema2。'}output.fileName仅保存回执，不将JSON转换成图片。原始网页、大段日志和图片base64不要塞入64KB JSON返回值。
 - runtimeEvidence是控制器本轮实际探测的结果，应沿用已确认的版本与模块可发现性；不能把“能找到模块”说成实际导入/运行成功，也不能在已有探测后再让用户贴源码证明。你的text描述修改意图即可；候选校验、应用与实际执行状态由控制器根据真实结果报告。
 - 用户要求将Skill替换成代码时，按editingContract.replacement的步骤添加新代码节点、重接原上下游、移除旧Skill，保留原位置和其它配置；不能只添加前置节点就声称完成。update-node不能改type，不能宣称保留原nodeId换型。
 - Skill 只能使用 SKILL_CATALOG 中的 ref 和 revision，或当前工作流已有 ref/version。目录只有名称而没有 revision 时，新建或明确更换 Skill 的操作保留 version 为空或省略，工作台会在返回提案前读取真实内容指纹；不要编造版本。保留已有固定版本，不因咨询、改名或其它节点修改而更新它。未知/未连接的 Skill 保持空引用并明确提示用户选择；不能编造已学习好、已运行或已验证的结论。
@@ -189,10 +248,10 @@ SYSTEM_RULES:
 - config 必须严格使用 CONFIG_CATALOG 对应类型的 allowedConfigKeys，不能自创字段。人工审核 human 的修改目标字段只能叫 reviewTargetNodeId（不是 modificationTargetNodeId/targetNodeId）；值为该审核节点上游生产能力的 ID 或已添加的本批 ref。human 常用配置为 {inputType:"text",outputType:"text",prompt:"请检查清理结果，通过后继续",reviewTargetNodeId:"trim",maxRevisions:3}。文本链中的 human 输入输出均设 text。output 的 inputType 固定 any，不能设置 outputType；用 stage 指定 final/intermediate，用 fileName 指定文件名。文本非空校验用 validation config={inputType:"text",outputType:"text",rules:[{valuePath:"",check:"nonempty"}]}。
 - 不编造文件路径或已知答案，不把历史运行、验证集样例/输入/输出和审核凭据填进 Skill 或工作流。对参考 Excel 等文件，不宣称存在直接上传即自动学习的入口；可先确认应学习的数据结构、格式与规则。反馈、图片修改和 Skill 优化继续在当前对话处理，不把用户转去独立反馈框；operations=[]，不要用改代码替代正式反馈。用户明确要求先准备改进配置时，可提出业务产物 → evaluation → improvement 的可审阅配置，只声明用户指定的 Skill，不改写旧运行或承诺学习完成。对于请求审核通过/要求修改，operations=[]，说明需在当前对话确认绑定到确切运行和版本的审核卡。
 - 用户只是讨论、提问、反馈或要求运行时 operations=[]。只有用户明确搭建或更改工作流时才提出编辑操作。保持其余节点和连线不变，避免无关改名、删除或重建。
-FOUNDATION_CATALOG=${JSON.stringify(NODE_TYPES.map(row => ({ type: row.type, label: row.label, description: row.description })))}
-CONFIG_CATALOG=${JSON.stringify(configCatalog(document.schemaVersion))}
-TOOL_CATALOG=${JSON.stringify(WORKFLOW_TOOLS.map(row => ({ id: row.id, label: row.label, inputType: row.inputType, outputType: row.outputType, reviewRequired: !!row.reviewRequired, ...(row.ports ? { ports: row.ports } : {}) })))}
-SKILL_CATALOG=${JSON.stringify(skills)}
+FOUNDATION_CATALOG=${JSON.stringify(NODE_TYPES.filter(row => catalogs.types.has(row.type)).map(row => ({ type: row.type, label: row.label, description: row.description })))}
+CONFIG_CATALOG=${JSON.stringify(configCatalog(document.schemaVersion, catalogs.types))}
+TOOL_CATALOG=${JSON.stringify(catalogs.tools.map(row => ({ id: row.id, label: row.label, inputType: row.inputType, outputType: row.outputType, reviewRequired: !!row.reviewRequired, ...(row.ports ? { ports: row.ports } : {}) })))}
+SKILL_CATALOG=${JSON.stringify(catalogs.skills)}
 USER_SOURCE_JSON=${JSON.stringify(source)}`;
   if (prompt.length > 195000) throw failure('当前工作流过大，无法一次提交给对话助手；请先将部分步骤封装为组合节点，再描述需要修改的部分。', 413);
   let modelPrompt = prompt; const revisions = new Map();
@@ -201,6 +260,7 @@ USER_SOURCE_JSON=${JSON.stringify(source)}`;
     // candidates. Only a received but invalid proposal gets one repair call.
     request.onProgress?.({ stage: attempt ? 'repair-proposal' : 'generate-proposal', label: attempt ? '正在修正未通过校验的候选（仅一次）' : '正在生成工作流修改候选', modelCall: true });
     const raw = await model.generate(modelPrompt, { signal, onSession, onProgress: request.onProgress,
+      ...(model.purpose === 'assistant' && request.modelRoute?.provider === 'openai-codex' ? { reasoningEffort: 'medium' } : {}),
       ...(request.deadlineAt !== undefined ? { deadlineAt: request.deadlineAt } : {}),
       ...(request.modelRoute ? { modelRoute: request.modelRoute } : {}), title: '工作流对话 · 搭建与修改' });
     if (signal?.aborted) throw failure('工作流对话已停止。', 409);

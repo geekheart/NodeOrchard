@@ -21,10 +21,16 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'supervisor-conversations-'));
   const config = { ...readConfig({ WORKBENCH_DATA_DIR: join(directory, 'data'), WORKBENCH_WORKSPACE_ROOT: join(directory, 'workspace') }),
     port: 0, workflowRunRoot: join(directory, 'runs') };
-  const f = { directory, config, prompts: [], events: [], modelResponse: () => ({ text: '已完成当前主题的诊断。' }) };
+  const f = { directory, config, prompts: [], events: [], classifications: [], modelResponse: () => ({ text: '已完成当前主题的诊断。' }) };
   f.open = async () => {
     f.adapter = new Offline(); f.app = new Application(config, f.adapter);
     f.app.captureModelRoute = async () => ({ provider: 'fixture-provider', model: 'fixture-model' });
+    // Keep topic/persistence fixtures independent of semantic model replies.
+    f.app.applicationAssistant.intentClassifier.classify = async options => {
+      const at = new Date().toISOString(); f.classifications.push(options.role);
+      options.onProgress?.({ stage: 'classify-intent', label: '识别对话任务', modelCall: true });
+      return { intent: 'diagnose', modelRoute: await f.app.captureModelRoute(), modelCalls: 1, startedAt: at, completedAt: at, durationMs: 0 };
+    };
     f.app.assistantModel.generate = async prompt => { f.prompts.push(prompt); return JSON.stringify(await f.modelResponse(prompt)); };
     f.app.on('event', event => f.events.push(event));
     f.bridge = createWorkbenchServer(config, f.app); f.origin = await f.bridge.listen();
@@ -152,11 +158,13 @@ test('the same client message ID can carry different content in distinct topics 
   const second = await f.message(b, 'B 的独立问题', { clientMessageId: 'shared-client' });
   const [ta, tb] = await Promise.all([f.finished(a, first.body.turn.id), f.finished(b, second.body.turn.id)]);
   assert.notEqual(ta.id, tb.id); assert.equal(ta.conversationId, a); assert.equal(tb.conversationId, b);
+  assert.equal(ta.assistant.progress.modelCalls, 2); assert.equal(tb.assistant.progress.modelCalls, 2);
   assert.equal(f.app.applicationAssistant.get(a).conversation.turns[0].user.text, 'A 的独立问题');
   assert.equal(f.app.applicationAssistant.get(b).conversation.turns[0].user.text, 'B 的独立问题');
   assert.equal(f.app.applicationAssistant.get().conversation.turns.length, 0);
   const repeated = await f.message(a, 'A 的独立问题', { clientMessageId: 'shared-client' });
   assert.equal(repeated.body.turn.id, ta.id); assert.equal(f.prompts.length, 2);
+  assert.equal(f.classifications.length, 2);
   assert.equal((await f.message(a, '另一问题', { clientMessageId: 'shared-client' })).status, 409);
 });
 
@@ -207,7 +215,9 @@ test('one active turn blocks only its own topic and independent topics can diagn
   const f = await fixture(t), a = await f.create('主题 A'), b = await f.create('主题 B'), pending = new Map();
   f.app.applicationAssistant.plan = async options => new Promise(resolve => { pending.set(options.sourceConversationId, resolve); });
   const first = await f.message(a, 'A 等待诊断'), second = await f.message(b, 'B 等待诊断');
-  assert.equal(first.status, 202); assert.equal(second.status, 202); assert.equal(pending.size, 2);
+  assert.equal(first.status, 202); assert.equal(second.status, 202);
+  for (let index = 0; index < 150 && pending.size < 2; index++) await delay(5);
+  assert.equal(pending.size, 2);
   assert.equal((await f.message(a, 'A 不应并发')).status, 409);
   assert.equal(f.app.applicationAssistant.get(a).conversation.turns.length, 1);
   pending.get(b)({ text: 'B 独立完成' }); await f.finished(b, second.body.turn.id);

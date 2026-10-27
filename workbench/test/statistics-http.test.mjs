@@ -92,12 +92,15 @@ test('the real assistant dispatcher limits statistics to a workflow scope and ho
 test('supervisor conversation model session ownership is retained for future usage attribution', async t => {
   const f = await fixture(t), assistant = f.app.applicationAssistant;
   f.app.captureModelRoute = async () => ({ provider: 'fixture', model: 'fixture' });
-  f.app.assistantModel.generate = async (_prompt, options) => { options.onSession('fixture-model-session'); return JSON.stringify({ text: '只读诊断完成。' }); };
+  f.app.assistantModel.generate = async (_prompt, options) => {
+    if (options.title === '应用对话 · 任务意图分类') { options.onSession('fixture-classification-session'); return JSON.stringify({ intent: 'diagnose' }); }
+    options.onSession('fixture-model-session'); return JSON.stringify({ text: '只读诊断完成。' });
+  };
   const id = assistant.createConversation({ clientConversationId: 'statistics-ownership', title: '用量归属' }).conversation.id;
   const result = await assistant.message({ clientMessageId: 'ownership-message', text: '只读检查当前应用状态' }, id);
   for (let index = 0; index < 100; index++) {
     const turn = assistant.get(id).conversation.turns.find(row => row.id === result.turn.id);
-    if (turn.status !== 'thinking') { assert.equal(turn.status, 'complete'); assert.deepEqual(turn.modelSessionIds, ['fixture-model-session']); return; }
+    if (turn.status !== 'thinking') { assert.equal(turn.status, 'complete'); assert.deepEqual(turn.modelSessionIds, ['fixture-classification-session', 'fixture-model-session']); return; }
     await delay(5);
   }
   assert.fail('fixture supervisor did not settle');

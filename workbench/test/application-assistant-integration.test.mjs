@@ -32,11 +32,18 @@ async function setup(t) {
   const directory = await mkdtemp(join(tmpdir(), 'application-assistant-http-'));
   const config = { ...readConfig({ WORKBENCH_DATA_DIR: join(directory, 'data'), WORKBENCH_WORKSPACE_ROOT: join(directory, 'workspace') }),
     port: 0, workflowRunRoot: join(directory, 'runs') };
-  const f = { directory, config, prompts: [] };
+  const f = { directory, config, prompts: [], classifications: [], classificationIntent: 'diagnose' };
   f.open = async () => {
     f.adapter = new Offline(); f.app = new Application(config, f.adapter);
     f.app.backend.state = 'ready';
     f.app.captureModelRoute = async () => ({ provider: 'fixture-provider', model: 'fixture-model' });
+    // These cases exercise the HTTP broker after a controlled classification;
+    // the separate intent-routing suite exercises the classifier model seam.
+    f.app.applicationAssistant.intentClassifier.classify = async options => {
+      const at = new Date().toISOString(); f.classifications.push({ role: options.role, intent: f.classificationIntent });
+      options.onProgress?.({ stage: 'classify-intent', label: '识别对话任务', modelCall: true });
+      return { intent: f.classificationIntent, modelRoute: await f.app.captureModelRoute(), modelCalls: 1, startedAt: at, completedAt: at, durationMs: 0 };
+    };
     f.app.assistantModel.generate = async (prompt, options) => { f.prompts.push({ prompt, options }); return JSON.stringify(await f.respond(prompt, options)); };
     f.bridge = createWorkbenchServer(config, f.app); f.origin = await f.bridge.listen();
     f.token = (await (await fetch(f.origin + '/api/bootstrap')).json()).csrfToken;
@@ -94,11 +101,13 @@ test('real Application HTTP global chat brokers tool evidence before its final a
   const request = { clientMessageId: 'global-request', text: '帮我检查应用为什么失败', page: { route: '#/board' } };
   const posted = await f.request('/api/app-assistant/messages', request); assert.equal(posted.status, 202);
   const turn = await f.finished('/api/app-assistant'); assert.equal(turn.status, 'complete'); assert.match(turn.assistant.text, /连接超时/);
+  assert.equal(turn.assistant.progress.modelCalls, f.prompts.length + 1);
   assert.deepEqual(turn.assistant.evidence.map(item => item.tool), ['workflows.list', 'session.history']);
   assert.deepEqual(f.adapter.calls.map(([method]) => method), ['session.history']);
   assert.deepEqual(businessState(f.app), before);
-  const count = f.prompts.length, duplicate = await f.request('/api/app-assistant/messages', request);
+  const count = f.prompts.length, classifications = f.classifications.length, duplicate = await f.request('/api/app-assistant/messages', request);
   assert.equal(duplicate.body.turn.id, turn.id); assert.equal(f.prompts.length, count);
+  assert.equal(f.classifications.length, classifications);
   assert.equal((await f.request('/api/app-assistant/messages', { ...request, text: 'changed' })).status, 409);
   assert.equal((await f.request('/api/app-assistant/messages', { ...request, clientMessageId: 'bad-origin' }, { Origin: 'http://other.invalid' })).status, 403);
 });
@@ -174,6 +183,7 @@ test('global diagnosis reads pre-restart Hermes history without resuming or repl
 
 test('a global workflow repair is a validated proposal until explicitly applied and repeated apply is idempotent', async t => {
   const f = await setup(t), { document, run } = populate(f), original = f.app.workflowLibrary.get(document.id);
+  f.classificationIntent = 'workflow';
   let step = 0;
   f.respond = prompt => {
     assert.equal(prompt.includes('TRAINING_ANSWER'), false);

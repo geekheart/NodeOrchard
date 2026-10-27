@@ -7,7 +7,7 @@ import { ApplicationAssistant } from '../src/application-assistant.mjs';
 import { NODE_TYPES, createDocument, createNode, connectNodes, nodeConfigurationContract } from '../shared/workflow/workflow-model.mjs';
 import { workflowCapabilityManifest, workflowNodeContract, codeRuntimeContract } from '../shared/workflow/workflow-capability-contract.mjs';
 import { applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
-import { OPERATION_LIMITS } from '../src/workflows/workflow-operations.mjs';
+import { OPERATION_LIMITS, executeOperation } from '../src/workflows/workflow-operations.mjs';
 import { DEFAULT_ASSISTANT_PERMISSIONS } from '../src/application-assistant-permissions.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from '../src/application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from '../src/application-conversation-hub.mjs';
@@ -44,6 +44,28 @@ test('node capability discovery covers every real node and derives configuration
   assert.equal(codeRuntimeContract().output.maxBytes, OPERATION_LIMITS.jsonBytes);
   assert.equal(codeRuntimeContract().policy.subprocessIsOsSandbox, false);
   assert.equal(codeRuntimeContract(1).files.supported, false);
+});
+
+test('code runtime discovery distinguishes Python dictionaries from JavaScript object properties', () => {
+  const runtime = codeRuntimeContract(2);
+  assert.deepEqual(runtime.files.directory, { javascript: 'context.outputDirectory', python: "context['outputDirectory']" });
+  assert.equal(runtime.python.contextType, 'dict');
+  assert.deepEqual(runtime.python.objectAccess, { required: "value['key']", optional: "value.get('key')" });
+  assert.match(runtime.python.inputRule, /JSON.*对象.*dict/);
+  assert.match(runtime.python.inputRule, /数组.*list/);
+  assert.equal(runtime.javascript.contextType, 'object');
+  for (const type of ['tool', 'transform']) assert.deepEqual(workflowNodeContract(type).runtime.files.directory, runtime.files.directory);
+});
+
+test('the advertised Python directory expression executes with plain dict context and JSON object input', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'python-context-contract-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const runtime = codeRuntimeContract(2);
+  const code = `return {'directory': ${runtime.files.directory.python}, 'title': input['title'], 'missing': input.get('missing'), 'plainDicts': type(context) is dict and type(input) is dict}`;
+  const result = await executeOperation({ node: { type: 'tool', config: { executionMode: 'code', language: 'python', code,
+    inputType: 'object', outputType: 'object', timeoutSeconds: 5 } }, input: { title: 'fixture-poster' },
+  cwd: directory, context: { outputDirectory: directory } });
+  assert.deepEqual(result.output, { directory, title: 'fixture-poster', missing: null, plainDicts: true });
 });
 
 test('capability tools and internal Skills are discoverable without inventing executable permissions', async t => {
@@ -131,7 +153,7 @@ test('the actual assistant broker discovers Python, probes runtime and proposes 
   assert.ok(source.capabilities.loadedSkills.some(skill => skill.name === 'author-code-node'));
   const innerSource = JSON.parse(calls.at(-1).split('USER_SOURCE_JSON=')[1]);
   assert.equal(innerSource.runtimeContract.python.sourceFormat, 'function-body');
-  assert.equal(innerSource.runtimeContract.files.directory, 'context.outputDirectory');
+  assert.deepEqual(innerSource.runtimeContract.files.directory, { javascript: 'context.outputDirectory', python: "context['outputDirectory']" });
   assert.equal(innerSource.runtimeEvidence[0].language, 'python');
   assert.ok(innerSource.runtimeEvidence[0].modules.some(row => row.name === 'json' && row.available));
   assert.deepEqual(result.validation, { editorValidated: true, applied: false, executed: false });

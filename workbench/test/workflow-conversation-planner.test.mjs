@@ -10,6 +10,103 @@ function fixture(response) {
   return { calls, app: { learningModel: { generate: async (prompt, options) => { calls.push({ prompt, options }); return typeof response === 'function' ? response(prompt, options) : JSON.stringify(response); } } } };
 }
 
+test('an empty-draft file task receives focused real contracts instead of unrelated catalogs', async () => {
+  const text = '无输入，帮我完成AI获取github每日热门前10项目，并生成一张图看完github前十项目的海报';
+  const { app, calls } = fixture({ text: '等待用户预览候选。', operations: [] });
+  app.skills = async () => ({ skills: [
+    { name: 'github', description: 'GitHub仓库公开数据读取', revision: 'sha256:' + 'a'.repeat(64) },
+    ...Array.from({ length: 99 }, (_, index) => ({ name: 'unrelated-' + index, description: '不相关目录元数据'.repeat(15) })),
+  ] });
+  await planWorkflowConversation(app, { text, document: document(), history: [{ role: 'user', text }] });
+  const prompt = calls[0].prompt;
+  assert(prompt.length <= 20000, `empty task prompt must stay within 20k characters, got ${prompt.length}`);
+  assert.equal(prompt.split(text).length - 1, 1, 'the current requirement appears only once');
+  const source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(source.catalogSelection.profile, 'focused');
+  assert(source.catalogSelection.tools.omitted > 0);
+  assert(source.catalogSelection.skills.omitted > 0);
+  const configs = JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
+  for (const type of ['input', 'tool', 'transform', 'validation', 'human', 'output']) assert(configs.some(row => row.type === type));
+  assert(!configs.some(row => row.type === 'improvement'));
+  assert.match(prompt, /图片.*human|图片.*人工审核/);
+  assert.match(prompt, /context\.outputDirectory/);
+  assert.equal(source.runtimeContract.policy.mayModifyApplicationSource, false);
+  assert.equal(prompt.includes('hdk.guide.annotate-front-zh'), false);
+});
+
+test('file generation instructions use each worker language actual context and input access rules', async () => {
+  const { app, calls } = fixture({ text: '候选待预览。', operations: [] });
+  await planWorkflowConversation(app, { text: '用 Python 从公开数据生成海报', document: document() });
+  const prompt = calls[0].prompt, rules = prompt.split('CONFIG_CATALOG=')[0];
+  assert.match(rules, /Python[^\n]*context\['outputDirectory'\]/);
+  assert.match(rules, /JavaScript[^\n]*context\.outputDirectory/);
+  assert.match(rules, /Python[^\n]*input[^\n]*dict/);
+  assert.equal(rules.includes('Python可通过context.outputDirectory'), false);
+  const source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.deepEqual(source.runtimeContract.files.directory, { javascript: 'context.outputDirectory', python: "context['outputDirectory']" });
+  assert.equal(source.runtimeContract.python.contextType, 'dict');
+});
+
+test('focused catalogs retain current typed nodes, used tools and exact pinned Skills', async () => {
+  const doc = document(); doc.nodes = [
+    createNode('condition', {}, { id: 'branch' }),
+    createNode('tool', {}, { id: 'native', config: { executionMode: 'tool', toolName: 'hdk.guide.prepare' } }),
+    createNode('skill', {}, { id: 'pinned', config: { skillRef: 'old-fixed-skill', version: 'sha256:old' } }),
+  ];
+  const { app, calls } = fixture({ text: '保留已有能力。', operations: [] });
+  app.skills = async () => ({ skills: Array.from({ length: 30 }, (_, index) => ({ name: 'unrelated-' + index })) });
+  await planWorkflowConversation(app, { text: '只解释这个节点', document: doc });
+  const prompt = calls[0].prompt, source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(source.catalogSelection.profile, 'focused');
+  assert(JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]).some(row => row.type === 'condition'));
+  assert(JSON.parse(prompt.match(/TOOL_CATALOG=(.*)\n/)[1]).some(row => row.id === 'hdk.guide.prepare'));
+  assert(JSON.parse(prompt.match(/SKILL_CATALOG=(.*)\n/)[1]).some(row => row.ref === 'old-fixed-skill' && row.revision === 'sha256:old'));
+});
+
+test('complex graphs and explicit full profiles keep complete real contracts instead of an incomplete basic subset', async () => {
+  for (const options of [
+    { document: { ...document(), nodes: [createNode('foreach', {}, { id: 'each' })] }, text: '解释当前节点' },
+    { document: document(), text: '创建有界循环和子流程' },
+    { document: document(), text: '解释可用能力', contractProfile: 'full' },
+  ]) {
+    const { app, calls } = fixture({ text: '候选尚未应用。', operations: [] });
+    await planWorkflowConversation(app, options);
+    const prompt = calls[0].prompt, source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
+    assert.equal(source.catalogSelection.profile, 'full');
+    assert.equal(source.catalogSelection.tools.omitted, 0);
+    const catalog = JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
+    assert(catalog.some(row => row.type === 'foreach'));
+    assert(catalog.some(row => row.type === 'improvement'));
+    assert.match(prompt, /hdk\.guide\.annotate-front-zh/);
+  }
+  const f = fixture({ text: 'invalid', operations: [] });
+  await assert.rejects(planWorkflowConversation(f.app, { text: '测试', document: document(), contractProfile: 'invented' }), /上下文配置无效/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('focused history is bounded and marks omissions without clipping the current requirement', async () => {
+  const current = '创建一个收集公开资料并输出摘要的固定任务，保留这一条完整需求。';
+  const { app, calls } = fixture({ text: '候选', operations: [] });
+  await planWorkflowConversation(app, { text: current, document: document(), history: [
+    ...Array.from({ length: 10 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: '历史' + index + 'x'.repeat(8000) })),
+    { role: 'user', text: current },
+  ] });
+  const source = JSON.parse(calls[0].prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(source.userMessage, current);
+  assert(source.recentConversation.map(row => row.text).join('').length <= 4100);
+  assert(source.recentConversation.some(row => row.text.includes('历史长文本已省略')));
+  assert.equal(calls[0].prompt.split(current).length - 1, 1);
+});
+
+test('a protected assistant controller is preferred while the original model route and deadline are retained', async () => {
+  let calls = 0, options;
+  const app = { assistantModel: { generate: async (_prompt, value) => { calls++; options = value; return '{"text":"候选","operations":[]}'; } },
+    learningModel: { generate: async () => { throw new Error('must not use a learning controller'); } } };
+  const modelRoute = { provider: 'fixture', model: 'pinned' }, deadlineAt = Date.now() + 120000;
+  await planWorkflowConversation(app, { text: '创建固定任务', document: document(), modelRoute, deadlineAt });
+  assert.equal(calls, 1); assert.deepEqual(options.modelRoute, modelRoute); assert.equal(options.deadlineAt, deadlineAt);
+});
+
 test('planner receives bounded diagnostic findings and reports its model and validation stages', async () => {
   const { app, calls } = fixture({ text: '依据已查到的采集错误提出建议。', operations: [] }), phases = [];
   await planWorkflowConversation(app, { text: '修复失败', document: document(), onProgress: value => phases.push(value),
@@ -20,6 +117,21 @@ test('planner receives bounded diagnostic findings and reports its model and val
   for (const secret of ['PRIVATE_RUN_INPUT', 'PRIVATE_OUTPUT', 'PRIVATE_REASONING', 'PRIVATE_TOKEN']) assert.equal(calls[0].prompt.includes(secret), false);
   assert.equal(typeof calls[0].options.onProgress, 'function');
   assert.ok(phases.some(value => value.stage === 'validate-proposal'));
+});
+
+test('only explicitly pinned Codex assistant candidates select medium while other routes and adapters inherit', async () => {
+  for (const purpose of ['assistant', 'learning', undefined]) {
+    for (const provider of ['openai-codex', 'fixture-provider', 'custom:fixture', undefined]) {
+      const { app, calls } = fixture({ text: '待审候选', operations: [] });
+      const model = { ...app.learningModel, ...(purpose ? { purpose } : {}) };
+      const modelRoute = provider ? Object.freeze({ provider, model: 'pinned-model' }) : undefined;
+      await planWorkflowConversation(app, { text: '创建一个工作流', document: document(), model, ...(modelRoute ? { modelRoute } : {}) });
+      const selectsMedium = purpose === 'assistant' && provider === 'openai-codex';
+      assert.equal(calls[0].options.reasoningEffort, selectsMedium ? 'medium' : undefined, `${purpose}/${provider}`);
+      assert.equal(Object.hasOwn(calls[0].options, 'reasoningEffort'), selectsMedium, `${purpose}/${provider} must omit an inherited override`);
+      assert.deepEqual(calls[0].options.modelRoute, modelRoute, 'the local policy never changes provider or model');
+    }
+  }
 });
 
 test('planner produces a validated proposal without applying, executing, approving or mutating workflow', async () => {

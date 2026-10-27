@@ -36,7 +36,7 @@
 
 能力返回实际存在的文件路径，由工作台登记为 opaque 产物 ID。预览和下载只接受产物 ID，不提供任意路径读取 URL。读取时重新核对真实路径和 SHA；已登记文件被修改后，原预览、原审核与复用引用失效。保存、预览和交付节点可以位于中间位置，不以唯一最终输出节点定义工作流是否结束。
 
-Skill 会话本身仍位于受管理工作区。输出到用户自定义根目录时，执行器按已声明的文件端口或 `artifacts / files / path` 回执确定性搬运实际文件并登记摘要，不因输出根目录而放开任意 Hermes 工作目录。代码／工具能力直接使用本次节点的 `context.outputDirectory`。
+Skill 会话本身仍位于受管理工作区。输出到用户自定义根目录时，执行器按已声明的文件端口或 `artifacts / files / path` 回执确定性搬运实际文件并登记摘要，不因输出根目录而放开任意 Hermes 工作目录。schema2 代码能力使用本次节点的输出目录：JavaScript 读取 `context.outputDirectory`，Python 读取 `context['outputDirectory']`。Python 的 `context` 是普通 `dict`；JSON 对象输入也解码为 `dict`，字段用 `input['key']` 或 `input.get('key')` 读取，不能用点号属性访问。数组输入为 `list`，代码须先按端口约定检查输入形状。
 
 ## 人工审核与重启
 

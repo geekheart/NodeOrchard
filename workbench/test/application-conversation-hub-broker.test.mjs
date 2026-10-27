@@ -24,7 +24,12 @@ async function fixture(t) {
   const records = ['OWN_WORKFLOW_EVIDENCE', 'FOREIGN_WORKFLOW_PRIVATE_SENTINEL'].map(title =>
     app.workflowLibrary.save({ document: createDocument({ schemaVersion: 2, title }), expectedRevision: 0 }));
   app.captureModelRoute = async () => ({ provider: 'fixture', model: 'fixture-model' });
-  const f = { app, adapter, records, prompts, reads, businessCalls, replies: [] };
+  const f = { app, adapter, records, prompts, reads, businessCalls, replies: [], classificationIntent: 'diagnose' };
+  // Delegation cases test the read-only broker after an explicit AI decision.
+  app.applicationAssistant.intentClassifier.classify = async options => {
+    const at = new Date().toISOString(); options.onProgress?.({ stage: 'classify-intent', label: '识别对话任务', modelCall: true });
+    return { intent: f.classificationIntent, modelRoute: await app.captureModelRoute(), modelCalls: 1, startedAt: at, completedAt: at, durationMs: 0 };
+  };
   const read = app.diagnostics.read.bind(app.diagnostics);
   app.diagnostics.read = (...args) => { reads.push(args[0]); return read(...args); };
   for (const name of ['start', 'rerun', 'approve']) app.workflows[name] = async () => { businessCalls.push(name); throw Error('No business operation allowed'); };
@@ -92,10 +97,12 @@ test('every registered mutation plus forged execution and foreign reads is rejec
 
 test('delegated natural-language run, review, learning and issue-close commands reach only the read-only broker', async t => {
   const f = await fixture(t), before = business(f);
-  for (const request of ['运行', '通过', '以后都按这个规则学习', '这个问题解决了']) {
+  for (const [request, intent] of [['运行', 'run'], ['通过', 'review'], ['以后都按这个规则学习', 'skill'], ['这个问题解决了', 'discuss']]) {
+    f.classificationIntent = intent;
     f.replies = [{ text: '当前是只读诊断，不执行此业务指令。' }];
     const turn = await completed(f, await f.delegate(request));
     assert.equal(turn.status, 'complete'); assert.deepEqual(turn.actions, []);
+    assert.equal(turn.user.intent, intent);
     assert.equal(turn.resolution, undefined); assert.equal(turn.outcome, undefined);
     assert.equal(sourceOf(f.prompts.at(-1)).permissionScope.readOnly, true);
     await assert.rejects(f.app.conversations.action(f.records[0].id, turn.id, { action: 'rerun' }), { httpStatus: 403 });

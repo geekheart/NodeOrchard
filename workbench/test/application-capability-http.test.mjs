@@ -20,6 +20,12 @@ async function fixture(t) {
   const config = { ...readConfig({ WORKBENCH_DATA_DIR: join(directory, 'data'), WORKBENCH_WORKSPACE_ROOT: join(directory, 'workspace') }),
     port: 0, hermesPython: process.env.WORKBENCH_TEST_PYTHON || 'python3', workflowRunRoot: join(directory, 'runs') };
   const adapter = new Offline(), app = new Application(config, adapter), bridge = createWorkbenchServer(config, app);
+  // Capability discovery is the concern here; freeform AI routing is covered
+  // through its real model seam in the intent-routing integration suite.
+  app.applicationAssistant.intentClassifier.classify = async options => {
+    const at = new Date().toISOString(); options.onProgress?.({ stage: 'classify-intent', label: '识别对话任务', modelCall: true });
+    return { intent: 'discuss', modelRoute: await app.captureModelRoute(), modelCalls: 1, startedAt: at, completedAt: at, durationMs: 0 };
+  };
   t.after(async () => { await bridge.close(); await rm(directory, { recursive: true, force: true }); });
   const origin = await bridge.listen(), token = (await (await fetch(origin + '/api/bootstrap')).json()).csrfToken;
   const request = async (path, body, headers = {}) => {
@@ -94,12 +100,17 @@ test('global HTTP discovers a code contract, checks only a fixed runtime probe a
     assert.equal(source.capabilities.features.find(feature => feature.id === 'execution').status, 'ui-only');
     if (prompts.length === 4) {
       const results = JSON.parse(prompt.split('\nTOOL_RESULTS_JSON=')[1]);
-      assert.equal(results[0].result.runtime.policy.mayModifyApplicationSource, false);
-      assert.equal(results[1].result.available, true);
-      assert.equal(results[1].result.modules.find(module => module.name === 'json').available, true);
-      assert.equal(results[1].result.libraryProbe, 'spec-only');
-      assert.equal(results[2].result.name, 'author-code-node');
-      assert.match(results[2].result.instructions, /workflow.propose/);
+      const node = results.find(row => row.tool === 'node.describe').result;
+      const runtimeRow = results.find(row => row.tool === 'runtime.inspect');
+      assert(runtimeRow, JSON.stringify(results.map(row => ({ tool: row.tool, error: row.result?.error }))));
+      const runtime = runtimeRow.result;
+      const skill = results.find(row => row.tool === 'assistant.skills.read').result;
+      assert.equal(node.runtime.policy.mayModifyApplicationSource, false);
+      assert.equal(runtime.available, true, JSON.stringify(runtime));
+      assert.equal(runtime.modules.find(module => module.name === 'json').available, true);
+      assert.equal(runtime.libraryProbe, 'spec-only');
+      assert.equal(skill.name, 'author-code-node');
+      assert.match(skill.instructions, /workflow.propose/);
     }
     return JSON.stringify(replies.shift());
   };

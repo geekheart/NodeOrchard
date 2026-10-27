@@ -64,33 +64,15 @@ function safeDocument(input, workflowId) {
   if (Buffer.byteLength(JSON.stringify(document)) > 2 * 1024 * 1024) fail('工作流文档过大。', 413);
   return document;
 }
-function directIntent(value, intent) {
+function directIntent(value) {
   const input = value.trim().replace(/[。！!]+$/, '');
   if (/^(?:(?:通过|审核通过|批准|同意通过)(?:[，,]?\s*继续(?:执行|汇总(?:验收)?|验收))?|通过[，,]\s*纳入\s*HDK)$/i.test(input)) return { action: 'review-approve' };
   if (/^(?:停止审核|停止本次运行|停止此分支|拒绝并停止|审核不通过并停止)$/.test(input)) return { action: 'review-stop' };
-  const revision = input.match(/^(?:需要修改|要求修改|修改意见|重新修改)[：:,，\s]+([\s\S]+)$/);
-  if (revision) return { action: 'review-revise', feedback: revision[1].trim() };
-  if (intent === 'redo' || /^(?:重做|重跑|重新运行)(?:此节点|这个节点|当前节点|该节点)?(?:[：:,，\s]+[\s\S]+)?$/.test(input)) {
-    return { action: 'rerun', feedback: input.replace(/^(?:重做|重跑|重新运行)(?:此节点|这个节点|当前节点|该节点)?[：:,，\s]*/, '').trim() };
-  }
+  if (/^(?:重做|重跑|重新运行)(?:此节点|这个节点|当前节点|该节点)?$/.test(input)) return { action: 'rerun' };
   return null;
 }
-// Automatic routing handles only explicit requests locally. Open questions and
-// ambiguous prose stay with the planner; mentioning learning is not permission
-// to start a learning batch.
-function conversationIntent(value, requested, context = {}) {
-  if (requested && requested !== 'auto') return requested;
-  const input = value.trim();
-  if (/[?？]\s*$|(?:可以|能否|能不能|可不可以|是否|如何|怎么|为什么|为何)/.test(input)
-    && !/^(?:请|帮我|把|将)/.test(input)) return 'discuss';
-  if (/(?:固定任务|默认输入|默认需求|一键运行|不(?:需要|用).{0,12}输入|无需.{0,12}输入|补全.{0,10}配置)/.test(input)) return 'workflow';
-  if (/(?:以后|今后|下次|后续|永久).{0,20}(?:都|按|采用|使用|保持|格式|规则)|(?:改进|优化|训练|学习|修改).{0,20}(?:Skill|技能)|(?:Skill|技能).{0,12}(?:改进|优化|训练|学习)/i.test(input)) return 'skill';
-  if (context.runId && !/(?:工作流|流程|节点|连线|默认配置)/.test(input)
-    && /(?:结果|产物|表格|Excel|文件|表头|列名|列顺序|字体|颜色|图片)/i.test(input)
-    && /(?:改|调整|不对|错误|缺|遗漏|需要|希望)/.test(input)) return 'feedback';
-  if (/^(?:反馈|记录反馈|保存反馈|产物反馈)[：:,，\s]|(?:这次|本次|这份|这个).{0,12}(?:结果|产物|表格|Excel|文件).{0,20}(?:不对|问题|需要|希望|改|调整)/i.test(input)) return 'feedback';
-  return /^(?:请|帮我|把|将|添加|删除|修改|设置|创建|搭建|调整|改成|改为|配置)/.test(input) ? 'workflow' : 'discuss';
-}
+// Only exact operational commands are handled locally. Free conversation is
+// classified by the protected AI before any specialized handler is selected.
 const artifactView = artifact => Object.fromEntries(['id', 'name', 'label', 'mimeType', 'sha256', 'size', 'kind', 'nodeId', 'attempt'].filter(key => artifact[key] !== undefined).map(key => [key, artifact[key]]));
 
 // The conversation is an interaction record. Run documents and artifacts remain
@@ -409,6 +391,20 @@ export class WorkflowConversations {
       }
     }
   }
+  prepareFeedbackRoute(turn, document, requestedContext, intent, automatic) {
+    const candidates = !requestedContext.runId ? this.feedbackRuns(turn.workflowId, requestedContext) : [];
+    const selected = candidates.length === 1 ? { ...requestedContext, runId: candidates[0].id } : requestedContext;
+    const bound = this.bindContext(turn.workflowId, selected, document);
+    turn.user.context = bound.context;
+    if (candidates.length > 1) {
+      turn.status = 'awaiting_action'; turn.assistant = { text: '有多份已结束结果，请在这里选择本条反馈对应的那一份。' };
+      turn.actions = candidates.map(run => ({ id: 'action-' + randomUUID(), kind: 'select-run', label: `${run.document.title || '本次结果'} · ${run.startedAt || run.id.slice(0, 8)} · ${run.status}`,
+        context: { ...requestedContext, runId: run.id } }));
+    } else if (intent === 'feedback' && !automatic && !bound.run) {
+      turn.status = 'awaiting_action'; turn.assistant = { text: '这条反馈会关联当前工作流，供后续修改参考。' };
+      turn.actions = [{ id: 'action-' + randomUUID(), kind: 'record-feedback', label: '保存反馈', context: bound.context, feedback: turn.user.text }];
+    } else this.prepareFeedback(turn, document, bound, intent, automatic);
+  }
   resultProducerContext(bound) {
     const run = bound.run, document = run.document;
     const outputs = document.nodes.filter(node => node.type === 'output' && node.config.stage !== 'intermediate');
@@ -477,8 +473,8 @@ export class WorkflowConversations {
     if (input.replyToTurnId !== undefined) { identifier(input.replyToTurnId, '回复事项 ID'); this.readTurn(workflowId, input.replyToTurnId); }
     const resolution = this.resolveIssueMessage(workflowId, input, document, requestedContext, requestDigest);
     if (resolution) return resolution;
-    let intent = conversationIntent(input.text, input.intent, requestedContext);
-    const automatic = !input.intent || input.intent === 'auto';
+    const automatic = !input.intent || input.intent === 'auto' || input.intent === 'redo';
+    let intent = automatic ? 'auto' : input.intent;
     const candidates = ['feedback', 'skill'].includes(intent) && !requestedContext.runId ? this.feedbackRuns(workflowId, requestedContext) : [];
     const selectedContext = candidates.length === 1 ? { ...requestedContext, runId: candidates[0].id } : requestedContext;
     const bound = this.bindContext(workflowId, selectedContext, document);
@@ -498,7 +494,7 @@ export class WorkflowConversations {
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
       .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic, page: input.page ? sanitizeDiagnosticEvidence(input.page) : null }));
     this.update(turn);
-    const direct = directIntent(input.text, intent);
+    const direct = directIntent(input.text);
     if (direct) {
       const candidates = direct.action.startsWith('review-') ? this.pending(workflowId) : [];
       const exact = !!bound.node && Number.isSafeInteger(input.context?.attempt) && input.context.attempt > 0
@@ -516,16 +512,7 @@ export class WorkflowConversations {
       return this.response(workflowId, turn);
     }
     if (intent === 'feedback' || intent === 'skill') {
-      if (candidates.length > 1) {
-        turn.status = 'awaiting_action'; turn.assistant = { text: '有多份已结束结果，请在这里选择本条反馈对应的那一份。' };
-        turn.actions = candidates.map(run => ({ id: 'action-' + randomUUID(), kind: 'select-run', label: `${run.document.title || '本次结果'} · ${run.startedAt || run.id.slice(0, 8)} · ${run.status}`,
-          context: { ...requestedContext, runId: run.id } }));
-      } else if (intent === 'feedback' && !automatic && !bound.run) {
-        // Existing explicit feedback callers may intentionally record a general
-        // workflow note. Automatic result feedback asks for a real result.
-        turn.status = 'awaiting_action'; turn.assistant = { text: '这条反馈会关联当前工作流，供后续修改参考。' };
-        turn.actions = [{ id: 'action-' + randomUUID(), kind: 'record-feedback', label: '保存反馈', context: bound.context, feedback: input.text }];
-      } else this.prepareFeedback(turn, document, bound, intent, automatic);
+      this.prepareFeedbackRoute(turn, document, requestedContext, intent, automatic);
       this.update(turn); this.emit(workflowId);
     } else {
       this.emit(workflowId);
@@ -543,13 +530,14 @@ export class WorkflowConversations {
       // A previous checkpoint never authorizes replaying proposals or operations.
       const checkpoint = previousTurns.findLast(item => ['error', 'interrupted'].includes(item.status) && item.assistant?.checkpoint)?.assistant.checkpoint;
       const history = previousTurns.slice(-10)
-        .flatMap(item => [{ role: 'user', text: item.user.text.slice(0, 3000) }, { role: 'assistant', text: item.assistant.text.slice(0, 3000) }]);
+        .flatMap(item => [{ role: 'user', text: item.user.text.slice(0, 3000), intent: item.user.intent, status: item.status },
+          { role: 'assistant', text: item.assistant.text.slice(0, 3000), intent: item.user.intent, status: item.status }]);
       // Never send inputs, outputs, artifact contents, training samples or validation
       // records to this planning session. Only the selected execution metadata.
       const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
       const page = privateValue.page;
-      const result = await this.planner(this.app, { role: 'workflow', readOnly, diagnosticTurnId: turn.id, operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
+      const hooks = {
         onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
           turn.assistant.text = message; if (progress) turn.assistant.progress = clone(progress);
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
@@ -558,7 +546,51 @@ export class WorkflowConversations {
           turn.assistant.checkpoint = clone(value); turn.assistant.evidence = clone(value.evidence || []);
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
         } },
-        onSession: sessionId => { if (!this.closed) { turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.update(turn); } } });
+        onSession: sessionId => { if (!this.closed) { turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.update(turn); } } };
+      const assistant = this.app.applicationAssistant, deadlineAt = Date.parse(turn.createdAt) + (assistant?.maxDurationMs || 360000);
+      let decision;
+      if (privateValue.automatic || readOnly) {
+        if (!assistant?.classify) fail('AI对话分类暂不可用，未选择默认处理方式。', 409);
+        decision = await assistant.classify({ role: 'workflow', readOnly, text: turn.user.text, document, context, history,
+          signal: controller.signal, startedAt: turn.createdAt, deadlineAt, ...hooks });
+        if (controller.signal.aborted || this.closed) return;
+        turn.user.intent = decision.intent; this.update(turn);
+        if (!readOnly && ['feedback', 'skill'].includes(decision.intent)) {
+          const scope = await assistant.permissions.bind({ role: 'workflow', workflowId: turn.workflowId, document });
+          await assistant.permissions.admit('workflow.inspect', { workflowId: turn.workflowId }, scope, { document });
+          const diagnostics = { ...turn.assistant };
+          this.prepareFeedbackRoute(turn, document, bound.context, decision.intent, true);
+          const reply = turn.assistant;
+          turn.assistant = { ...diagnostics, ...reply };
+          if (reply.operations?.length) await assistant.permissions.document(applyWorkflowOperations(document, reply.operations).document, scope, { baseDocument: document });
+          finishDiagnostic(turn.assistant, 'complete');
+          this.update(turn); this.emit(turn.workflowId); return;
+        }
+        if (!readOnly && ['run', 'review'].includes(decision.intent)) {
+          turn.status = 'complete'; turn.actions = []; turn.assistant.text = decision.intent === 'run'
+            ? '已识别运行请求。请使用当前对话的“运行当前流程”入口；这条自由对话没有开始、重试或停止运行。'
+            : '已识别审核请求。请在对应运行与尝试的审核卡上确认；这条自由对话没有批准或停止审核。';
+          // The classifier selects a handler, never authorizes a review. Keep
+          // free-form revision feedback usable through an explicit bound card.
+          const revision = decision.intent === 'review' && turn.user.text.trim().match(/^(?:需要修改|要求修改|修改意见|重新修改)[：:,，\s]+([\s\S]+)$/);
+          if (revision && revision[1].trim()) {
+            const scope = await assistant.permissions.bind({ role: 'workflow', workflowId: turn.workflowId, document });
+            await assistant.permissions.admit('workflow.inspect', { workflowId: turn.workflowId }, scope, { document });
+            const candidates = this.pending(turn.workflowId).filter(item => (!bound.context.runId || item.context.runId === bound.context.runId)
+              && (!bound.node || item.context.nodeId === bound.node.id && item.context.attemptId === bound.context.attemptId));
+            if (candidates.length) {
+              turn.status = 'awaiting_action'; turn.assistant.text = '修改意见已准备，请确认对应审核版本后执行。';
+              turn.actions = candidates.map(item => ({ id: 'action-' + randomUUID(), kind: 'review-revise',
+                label: `按修改意见重做「${item.label}」`, context: item.context, feedback: revision[1].trim() }));
+            }
+          }
+          finishDiagnostic(turn.assistant, 'complete'); this.update(turn); this.emit(turn.workflowId); return;
+        }
+      }
+      const result = await this.planner(this.app, { role: 'workflow', readOnly, decision, diagnosticTurnId: turn.id,
+        operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint,
+        signal: controller.signal, deadlineAt, startedAt: turn.createdAt, modelCallOffset: decision?.modelCalls || 0,
+        ...(decision?.modelRoute ? { modelRoute: decision.modelRoute } : {}), ...hooks });
       if (this.closed || controller.signal.aborted) return;
       this.app.workflowLibrary.assertRunnable(turn.workflowId);
       if (readOnly && (result.operations?.length || result.actions?.length)) fail('总控委派仅允许只读诊断，不能生成工作流修改或执行操作。', 403);
@@ -572,7 +604,8 @@ export class WorkflowConversations {
     } catch (error) {
       if (!this.closed) {
         turn.status = controller.signal.aborted ? 'interrupted' : 'error';
-        turn.assistant = { ...turn.assistant, text: redact(error.message).slice(0, 4000) };
+        const { operations, baseFingerprint, summary, ...diagnostics } = turn.assistant;
+        turn.actions = []; turn.assistant = { ...diagnostics, text: redact(error.message).slice(0, 4000) };
         finishDiagnostic(turn.assistant, turn.status, turn.assistant.text);
         turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
       }

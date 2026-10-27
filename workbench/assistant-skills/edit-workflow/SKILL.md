@@ -5,7 +5,7 @@ description: 搭建、配置或替换本应用工作流节点与连线，提出�
 
 # 修改用户指定的业务步骤
 
-1. 读取 `app.capabilities({section:"operations"})`，再按相关类型调用 `node.describe`，以实际编辑协议和端口约束为准。代码节点编写需要时加载 `assistant.skills.read({name:"author-code-node"})`。
+1. 先使用本轮已提供的编辑协议、节点契约和运行环境事实；仅缺少的部分再用 `app.capabilities`、`node.describe` 或内部代码Skill补齐。自由对话先由AI分类；创建／修改进入专用候选生成，不先重复发现整套诊断工具。
 2. 从当前草稿确定最小修改范围，保留未涉及节点、连线、固定 Skill 版本与用户已有配置。用户要求替换产出能力时，修改真正的产出步骤；增加一个前置配置节点不能算完成替换。
 3. 通过 `workflow.propose` 生成可审阅候选。当前 `update-node` 不能改类型；Skill 换成 Python 能力可在原坐标新增 `tool` 的代码模式节点，移除冲突旧连线、连接对应上下游，再移除旧 Skill。新节点使用新引用，按实际端口类型连接；检查人工审核目标和 Skill 改进范围中的旧引用。工具节点不能充当可学习的 Skill。此路径保留业务位置与职责，不承诺保留原 nodeId。
 4. 在同一对话展示修改明细，等待用户应用后再说明如何运行。`workflow.preflight` 是配置和输入准备检查，不等于新代码已成功执行。

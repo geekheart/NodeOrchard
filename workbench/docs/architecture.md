@@ -108,7 +108,7 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 
 ## 应用诊断
 
-`application-assistant.mjs` 在现有对话之下调度有界工具，`app-diagnostics.mjs` 只投影业务证据，`app-diagnostic-browser.mjs` 负责隔离浏览器取证。应用助手模型与学习评估使用独立托管会话、策略 RPC 与归属表；Hermes 原生工具保持关闭，应用能力由 Node 白名单执行。旧历史直接只读查询，不恢复任务。浏览器代理限制同源只读访问，图像以真实关键帧传给 Hermes。详细工具和边界见 [应用诊断](application-diagnostics.md)。
+`assistant-intent-classifier.mjs` 对自由消息先用独立小上下文进行AI分类；创建／修改进入候选生成，诊断进入工具取证，反馈和改进准备原有受控动作。分类不授予执行权限，精确运行／审核／结束事项命令保持原协议。`application-assistant.mjs` 在对应处理流程之下调度有界工具，`app-diagnostics.mjs` 只投影业务证据，`app-diagnostic-browser.mjs` 负责隔离浏览器取证。应用助手模型与学习评估使用独立托管会话、策略 RPC 与归属表；Hermes 原生工具保持关闭，应用能力由 Node 白名单执行。旧历史直接只读查询，不恢复任务。浏览器代理限制同源只读访问，图像以真实关键帧传给 Hermes。详细工具和边界见 [应用诊断](application-diagnostics.md)。
 
 对话入口在服务端绑定独立工作流或总控身份，工具目录与 dispatcher 共用角色、对象归属及目录准入。独立会话固定工作流与工作文件夹，总控按人工配置开放跨工作流管理和软件日志；模型提供的 ID 不改变身份。“设置 → 助手权限”通过独立的版本化设置接口保存，助手工具和未来 MCP 均没有修改入口。权限变更逐次校验，旧检查点不提升权限；具体规则见 [会话权限与人工设置](application-assistant-capabilities.md#会话权限与人工设置)。
 

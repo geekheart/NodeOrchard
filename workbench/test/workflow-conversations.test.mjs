@@ -30,9 +30,15 @@ function graph(review = false) {
 async function fixture(t, { http = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'workflow-conversation-'));
   const config = { ...readConfig({ WORKBENCH_DATA_DIR: join(directory, 'data'), WORKBENCH_WORKSPACE_ROOT: join(directory, 'workspace') }), port: 0 };
-  const f = { config, directory };
+  const f = { config, directory, classifiedIntent: 'discuss' };
   f.open = async () => {
     f.adapter = new Offline(); f.app = new Application(config, f.adapter);
+    // This fixture tests conversation state/action handling. The real protected
+    // classifier and its dispatch are exercised in intent-routing tests.
+    f.app.applicationAssistant.intentClassifier.classify = async options => {
+      options.onProgress?.({ stage: 'classify-intent', label: '识别对话任务', modelCall: true });
+      return { intent: f.classifiedIntent, modelRoute: { provider: 'fixture', model: 'fixture-model' }, modelCalls: 1 };
+    };
     if (http) { f.bridge = createWorkbenchServer(config, f.app); f.origin = await f.bridge.listen(); f.token = (await (await fetch(f.origin + '/api/bootstrap')).json()).csrfToken; }
   };
   f.close = async () => { if (f.bridge) { const bridge = f.bridge; f.bridge = null; await bridge.close(); } else if (!f.app.closed) await f.app.close(); };
@@ -46,6 +52,12 @@ async function fixture(t, { http = false } = {}) {
   await f.open(); return f;
 }
 const message = (document, text, extra = {}) => ({ clientMessageId: 'message-' + crypto.randomUUID(), text, document, ...extra });
+const settledMessage = async (f, workflowId, input) => {
+  const response = await f.app.conversations.message(workflowId, input);
+  if (response.turn.status !== 'thinking') return response;
+  const turn = await until(() => f.app.conversations.get(workflowId).conversation.turns.find(row => row.id === response.turn.id && row.status !== 'thinking'));
+  return { ...f.app.conversations.get(workflowId), turn };
+};
 const context = (run, nodeId = 'review') => ({ runId: run.id, nodeId, attempt: run.nodes[nodeId].attempt, attemptId: run.nodes[nodeId].attemptId,
   artifactIds: (run.nodes[nodeId].artifacts || []).map(item => item.id), artifactHashes: (run.nodes[nodeId].artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) });
 
@@ -226,12 +238,18 @@ test('exact human review reply executes once; an unbound reply lists candidates 
 
 test('review revise freezes old attempt and rejects stale, foreign run and foreign artifact replies', async t => {
   const f = await fixture(t), document = graph(true);
+  f.classifiedIntent = 'review';
   const started = await f.app.workflows.start({ document, input: '  abc  ' });
   const original = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'waiting_review' && run; });
   const other = graph(true);
   await assert.rejects(() => f.app.conversations.message(other.id, message(other, '通过', { context: context(original) })), /不属于此工作流/);
   await assert.rejects(() => f.app.conversations.message(document.id, message(document, '通过', { context: { ...context(original), artifactIds: ['foreign-artifact'] } })), /产物不属于/);
-  const changed = await f.app.conversations.message(document.id, message(document, '要求修改：保持精简', { context: context(original) }));
+  const proposal = await settledMessage(f, document.id, message(document, '要求修改：保持精简', { context: context(original) }));
+  assert.equal(proposal.turn.status, 'awaiting_action'); assert.equal(proposal.turn.outcome, undefined);
+  assert.equal(f.app.workflows.get(started.id).nodes.review.attemptId, original.nodes.review.attemptId);
+  const revise = proposal.turn.actions.find(action => action.kind === 'review-revise'); assert.ok(revise);
+  assert.equal(revise.feedback, '保持精简'); assert.equal(revise.context.attemptId, original.nodes.review.attemptId);
+  const changed = await f.app.conversations.action(document.id, proposal.turn.id, { action: revise.kind, actionId: revise.id });
   assert.equal(changed.turn.outcome.status, 'complete');
   const second = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'waiting_review' && run.nodes.review.attempt === 2 && run; });
   await assert.rejects(() => f.app.conversations.message(document.id, message(document, '通过', { context: context(original) })), /新版本/);
@@ -328,6 +346,61 @@ test('explicit rerun has exact scope and uncertain outcomes are durable without 
   await f.restart();
   const restored = f.app.conversations.get(document.id).conversation.turns.find(item => item.id === uncertain.turn.id);
   assert.equal(restored.outcome.status, 'unknown');
+});
+
+test('rerun-looking free conversation is AI-classified and cannot execute through a suffix or legacy redo label', async t => {
+  for (const [inputText, extra] of [
+    ['重新运行，但不要真的执行，只解释', {}],
+    ['重新运行此节点：先解释，不要重跑', {}],
+    ['重跑 只是问一下会发生什么', {}],
+    ['重做，如果需要修改就先别执行', {}],
+    ['重新运行，但不要真的执行，只解释', { intent: 'redo' }],
+  ]) await t.test(inputText + (extra.intent ? ' with legacy redo' : ''), async t => {
+    const f = await fixture(t), document = graph();
+    const started = await f.app.workflows.start({ document, input: '  unchanged  ' });
+    const original = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'complete' && run; });
+    const classified = [], classify = f.app.applicationAssistant.intentClassifier.classify;
+    f.app.applicationAssistant.intentClassifier.classify = options => { classified.push(options.text); return classify(options); };
+    f.app.conversations.planner = async () => ({ text: '这里只解释重跑行为，没有执行。' });
+    let reruns = 0;
+    const rerun = f.app.workflows.rerun.bind(f.app.workflows);
+    f.app.workflows.rerun = (...args) => { reruns++; return rerun(...args); };
+    const response = await settledMessage(f, document.id, message(document, inputText, { context: context(original, 'trim'), ...extra }));
+    assert.equal(reruns, 0, 'free conversation must not rerun a real bound node');
+    assert.deepEqual(classified, [inputText]);
+    assert.equal(response.turn.user.intent, 'discuss'); assert.equal(response.turn.outcome, undefined);
+    assert.equal(f.app.workflows.get(started.id).nodes.trim.attempt, original.nodes.trim.attempt);
+  });
+});
+
+test('review-revise-looking discussion is AI-classified without changing the waiting attempt', async t => {
+  const f = await fixture(t), document = graph(true);
+  const started = await f.app.workflows.start({ document, input: '  waiting for the user  ' });
+  const original = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'waiting_review' && run; });
+  const classified = [], classify = f.app.applicationAssistant.intentClassifier.classify;
+  f.app.applicationAssistant.intentClassifier.classify = options => { classified.push(options.text); return classify(options); };
+  f.app.conversations.planner = async () => ({ text: '只解释修改意见，不执行审核。' });
+  let approvals = 0;
+  const approve = f.app.workflows.approve.bind(f.app.workflows);
+  f.app.workflows.approve = (...args) => { approvals++; return approve(...args); };
+  const inputText = '要求修改：但先别真的修改，只解释这条意见';
+  const response = await settledMessage(f, document.id, message(document, inputText, { context: context(original) }));
+  assert.equal(approvals, 0, 'a natural language revision prefix is not review authorization');
+  assert.deepEqual(classified, [inputText]); assert.equal(response.turn.outcome, undefined);
+  const current = f.app.workflows.get(started.id);
+  assert.equal(current.status, 'waiting_review'); assert.equal(current.nodes.review.attemptId, original.nodes.review.attemptId);
+});
+
+test('AI-classified review feedback cannot prepare confirmation cards when workflow reading is disabled', async t => {
+  const f = await fixture(t), document = graph(true); f.classifiedIntent = 'review';
+  const started = await f.app.workflows.start({ document, input: '  preserve review  ' });
+  const original = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'waiting_review' && run; });
+  const settings = f.app.assistantPermissionSettings.get();
+  f.app.assistantPermissionSettings.save({ expectedRevision: settings.revision, workflow: { ...settings.workflow, workflowRead: false }, supervisor: settings.supervisor });
+  const response = await settledMessage(f, document.id, message(document, '要求修改：保持精简', { context: context(original) }));
+  assert.equal(response.turn.status, 'error'); assert.match(response.turn.assistant.text, /权限|未开放/);
+  assert.deepEqual(response.turn.actions, []); assert.equal(response.turn.outcome, undefined);
+  assert.equal(f.app.workflows.get(started.id).nodes.review.attemptId, original.nodes.review.attemptId);
 });
 
 test('message and action integrity rejects changed envelopes, stale plan receipts and learning samples', async t => {
@@ -468,7 +541,7 @@ test('ambiguous artifact ancestry asks for one Skill instead of broadening feedb
 test('automatic conversation treats learning questions as discussion rather than an executable learning request', async t => {
   const f = await fixture(t), document = graph(); let requests = 0;
   f.app.conversations.planner = async () => { requests++; return { text: '可以先讨论参考材料与期望。', operations: [] }; };
-  const response = await f.app.conversations.message(document.id, message(document, '我可以给已知的 Excel 作为学习对比吗？', { intent: 'auto' }));
+  const response = await settledMessage(f, document.id, message(document, '我可以给已知的 Excel 作为学习对比吗？', { intent: 'auto' }));
   const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(item => item.id === response.turn.id && item.status === 'complete'));
   assert.equal(turn.user.intent, 'discuss'); assert.equal(requests, 1); assert.deepEqual(turn.actions, []);
   assert.deepEqual(f.app.learning.list(), []); assert.deepEqual(f.adapter.calls, []);
@@ -476,13 +549,14 @@ test('automatic conversation treats learning questions as discussion rather than
 
 test('automatic feedback binds the only completed run and asks inside chat when several runs are available', async t => {
   const f = await fixture(t), document = graph();
+  f.classifiedIntent = 'feedback';
   const first = await f.app.workflows.start({ document, input: ' first ' });
   await until(() => f.app.workflows.get(first.id).status === 'complete');
-  const reply = await f.app.conversations.message(document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
+  const reply = await settledMessage(f, document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
   assert.equal(reply.turn.user.context.runId, first.id); assert.equal(reply.turn.actions[0].kind, 'record-feedback');
   const second = await f.app.workflows.start({ document, input: ' second ' });
   await until(() => f.app.workflows.get(second.id).status === 'complete');
-  const ambiguous = await f.app.conversations.message(document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
+  const ambiguous = await settledMessage(f, document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
   assert.equal(ambiguous.turn.status, 'awaiting_action'); assert.equal(ambiguous.turn.actions.length, 2);
   assert.ok(ambiguous.turn.actions.every(action => action.kind === 'select-run'));
   const action = ambiguous.turn.actions.find(action => action.context.runId === second.id);
@@ -493,11 +567,12 @@ test('automatic feedback binds the only completed run and asks inside chat when 
 
 test('a request for reusable rules prepares a reviewable scope without changing the workflow or requiring node configuration', async t => {
   const f = await fixture(t), source = multiSkillRun();
+  f.classifiedIntent = 'skill';
   const document = copy(source.document);
   document.nodes = document.nodes.filter(node => !['evaluation', 'improvement'].includes(node.type));
   const ids = new Set(document.nodes.map(node => node.id)); document.edges = document.edges.filter(edge => ids.has(edge.sourceNode) && ids.has(edge.targetNode));
   const before = copy(document);
-  const response = await f.app.conversations.message(document.id, message(document, '以后都按这个格式，只改进 fixture-2 的 Skill', { intent: 'auto', context: { nodeId: 'skill-2' } }));
+  const response = await settledMessage(f, document.id, message(document, '以后都按这个格式，只改进 fixture-2 的 Skill', { intent: 'auto', context: { nodeId: 'skill-2' } }));
   assert.equal(response.turn.status, 'proposed'); assert.equal(response.turn.actions[0].kind, 'mark-applied');
   const proposal = applyWorkflowOperations(document, response.turn.assistant.operations).document;
   const improvement = proposal.nodes.find(node => node.type === 'improvement');
@@ -508,7 +583,7 @@ test('a request for reusable rules prepares a reviewable scope without changing 
 
 test('explicit Skill learning without a completed run gives a chat next step instead of a doomed learning action', async t => {
   const f = await fixture(t), document = graph();
-  const reply = await f.app.conversations.message(document.id, message(document, '以后按这个格式', { intent: 'skill', context: { nodeId: 'output' } }));
+  const reply = await settledMessage(f, document.id, message(document, '以后按这个格式', { intent: 'skill', context: { nodeId: 'output' } }));
   assert.equal(reply.turn.status, 'complete'); assert.deepEqual(reply.turn.actions, []);
   assert.match(reply.turn.assistant.text, /运行当前流程|真实 Skill/);
   assert.deepEqual(f.app.learning.list(), []); assert.deepEqual(f.adapter.calls, []);
@@ -516,8 +591,9 @@ test('explicit Skill learning without a completed run gives a chat next step ins
 
 test('ordinary result edits offer a version-bound rerun in chat and do not change permanent rules', async t => {
   const f = await fixture(t), run = multiSkillRun(), document = run.document;
+  f.classifiedIntent = 'feedback';
   f.app.workflows.write.run(run.id, JSON.stringify(run));
-  const reply = await f.app.conversations.message(document.id, message(document, '把结果表头改成中文', { intent: 'auto', context: { runId: run.id, nodeId: 'skill-2' } }));
+  const reply = await settledMessage(f, document.id, message(document, '把结果表头改成中文', { intent: 'auto', context: { runId: run.id, nodeId: 'skill-2' } }));
   assert.equal(reply.turn.user.intent, 'feedback');
   const action = reply.turn.actions.find(action => action.kind === 'rerun'); assert.ok(action);
   assert.equal(action.context.nodeId, 'skill-2'); assert.equal(action.context.attemptId, run.nodes['skill-2'].attemptId);
@@ -527,15 +603,17 @@ test('ordinary result edits offer a version-bound rerun in chat and do not chang
 
 test('feedback never promises that fixed tools will interpret a natural-language revision', async t => {
   const f = await fixture(t), document = graph(), started = await f.app.workflows.start({ document, input: ' abc ' });
+  f.classifiedIntent = 'feedback';
   const run = await until(() => { const value = f.app.workflows.get(started.id); return value.status === 'complete' && value; });
-  const reply = await f.app.conversations.message(document.id, message(document, '这次结果需要改成大写', { intent: 'auto', context: { runId: run.id } }));
+  const reply = await settledMessage(f, document.id, message(document, '这次结果需要改成大写', { intent: 'auto', context: { runId: run.id } }));
   assert.deepEqual(reply.turn.actions.map(action => action.kind), ['record-feedback']);
   assert.deepEqual(f.adapter.calls, []);
 });
 
 test('automatic long-term feedback narrows a run-level reply to the unique upstream Skill', async t => {
   const f = await fixture(t), run = multiSkillRun(); f.app.workflows.write.run(run.id, JSON.stringify(run));
-  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后都按这个格式', { intent: 'auto', context: { runId: run.id } }));
+  f.classifiedIntent = 'skill';
+  const reply = await settledMessage(f, run.workflowId, message(run.document, '以后都按这个格式', { intent: 'auto', context: { runId: run.id } }));
   assert.equal(reply.turn.actions.length, 1); assert.equal(reply.turn.actions[0].kind, 'learn-feedback');
   assert.equal(reply.turn.actions[0].context.nodeId, 'skill-2');
   assert.equal(reply.turn.actions[0].context.attemptId, run.nodes['skill-2'].attemptId);
@@ -544,9 +622,10 @@ test('automatic long-term feedback narrows a run-level reply to the unique upstr
 
 test('adding permission for an explicit learning target is a reviewable draft change and cannot rewrite an old run', async t => {
   const f = await fixture(t), run = multiSkillRun();
+  f.classifiedIntent = 'skill';
   run.document.nodes.find(node => node.type === 'improvement').config.targetSkillNodeIds = ['skill-1'];
   f.app.workflows.write.run(run.id, JSON.stringify(run)); const before = copy(f.app.workflows.get(run.id));
-  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后只改进 fixture-2 的 Skill', { intent: 'auto', context: context(run, 'skill-2') }));
+  const reply = await settledMessage(f, run.workflowId, message(run.document, '以后只改进 fixture-2 的 Skill', { intent: 'auto', context: context(run, 'skill-2') }));
   assert.equal(reply.turn.status, 'proposed');
   const changed = applyWorkflowOperations(run.document, reply.turn.assistant.operations).document;
   assert.deepEqual(changed.nodes.find(node => node.type === 'improvement').config.targetSkillNodeIds, ['skill-2']);
@@ -555,13 +634,14 @@ test('adding permission for an explicit learning target is a reviewable draft ch
 
 test('an automatic named Skill request freezes and learns only that actual executed Skill', async t => {
   const f = await fixture(t), run = multiSkillRun(); f.app.workflows.write.run(run.id, JSON.stringify(run));
+  f.classifiedIntent = 'skill';
   let targetIds;
   f.app.learning.startFeedback = async request => {
     const record = f.app.feedback.learningRequest(request.runId, { feedbackRevision: request.feedbackRevision });
     targetIds = record.targets.map(target => target.nodeId);
     return { id: 'named-skill-learning', config: { trainableNodeIds: targetIds } };
   };
-  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后改进 fixture-1 Skill 的表格格式', { intent: 'auto' }));
+  const reply = await settledMessage(f, run.workflowId, message(run.document, '以后改进 fixture-1 Skill 的表格格式', { intent: 'auto' }));
   const action = reply.turn.actions[0];
   assert.equal(action.context.nodeId, 'skill-1'); assert.equal(action.context.attemptId, run.nodes['skill-1'].attemptId);
   const learned = await f.app.conversations.action(run.workflowId, reply.turn.id, { action: action.kind, actionId: action.id });
