@@ -1,4 +1,5 @@
 // Browser-safe metadata and validation shared by the planner and local executor.
+import { CODE_LANGUAGES, TOOL_EXECUTION_MODES } from './workflow-model.mjs';
 const capability = (domain, [id,label,resource,timeoutSeconds,inputs,projection,reviewRequired=false]) => ({
   id:`hdk.${domain}.${id}`, label, description:label+'；当前运行独立保存来源、产物和核验回执。',
   inputType:'object',outputType:'object',resource,reviewRequired,
@@ -69,7 +70,7 @@ export function validateWorkflowToolConfig(node) {
   }
   const config = node.config;
   const mode = config.executionMode;
-  if (!['code', 'tool'].includes(mode)) throw new Error('请选择代码或工具执行模式。');
+  if (!TOOL_EXECUTION_MODES.includes(mode)) throw new Error('请选择代码或工具执行模式。');
   for (const key of ['inputType', 'outputType']) {
     if (config[key] !== undefined && !TYPES.has(config[key])) throw new Error('工具与代码节点仅支持文本和 JSON 数据端口。');
   }
@@ -78,7 +79,7 @@ export function validateWorkflowToolConfig(node) {
     throw new Error('执行超时必须是 1–86400 秒的整数。');
   }
   if (mode === 'code') {
-    if (!['javascript', 'python'].includes(config.language)) throw new Error('代码语言仅支持 JavaScript 或 Python。');
+    if (!CODE_LANGUAGES.includes(config.language)) throw new Error('代码语言仅支持 JavaScript 或 Python。');
     if (typeof config.code !== 'string' || !config.code.trim() || config.code.length > 100000 || config.code.includes('\0')) {
       throw new Error('请输入非空代码函数体，最多 100000 个字符，且不能包含空字符。');
     }

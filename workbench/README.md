@@ -89,3 +89,11 @@ npm run check:git
 显式设置数据目录／工作环境的隔离实例在其隔离目录派生运行根；生产默认仍使用独立本机存储。
 
 更多说明：[完整操作指南](docs/user-guide.md) · [整体架构](docs/architecture.md) · [节点与恢复](docs/workflow-inputs-and-recovery.md) · [工程能力](hdk/ARCHITECTURE.md) · [协作规则](../AGENTS.md)。
+
+## 应用诊断
+
+右侧对话可主动发现真实应用能力，按需读取节点契约、执行环境、全局状态、运行错误、Hermes 工具记录和页面证据，并截图或短录制复现。无需手动复制应用已有说明或日志；流程修复及获准的业务代码配置在同一对话生成可审阅候选，应用和运行分别确认。截图使用专用只读浏览器，模型没有修改软件源码的工具。
+
+诊断先使用紧凑摘要和已有证据，再补查详情；重复读取会去重，独立只读检查可批量请求。当前气泡显示实际阶段与耗时，失败和重启保留已完成诊断进度，按有效期和上下文校验复用证据，不自动重放操作。具体限制见 [上下文、进度与中断](docs/application-diagnostics.md#上下文进度与中断)。
+
+新增功能同步维护能力目录、工具 schema／dispatch、内部 Skill 说明和回归。工具可用、仅能提案、仅界面支持和不可用分别声明；当前没有对外 MCP server，未来适配复用同一工具与权限实现。工具、依赖与验证边界见 [应用诊断说明](docs/application-diagnostics.md)，扩展流程见 [能力维护指南](docs/application-assistant-capabilities.md)。

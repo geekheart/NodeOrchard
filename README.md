@@ -346,3 +346,4 @@ Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人�
 感谢 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供 Agent、Skills 和记忆运行时；[Multica](https://github.com/multica-ai/multica) 为应用导航与工作流列表设计提供参考。可选转换器及内含第三方代码的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 **NodeOrchard 原创代码的项目许可证尚未选定。** 仓库公开不代表已经授予开源许可证；各第三方组件继续遵循其自身条款。
+右侧对话可调用全局诊断工具，按需读取运行与 Hermes 工具证据、截图或录制只读复现；精简上下文并复用有效证据，在原气泡显示阶段、耗时和中断前的诊断进度。详见 [应用诊断](workbench/docs/application-diagnostics.md)。

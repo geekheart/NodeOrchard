@@ -95,3 +95,23 @@
 @media (max-width: 760px) { .wf-editor.wf-chat-enabled .wf-body, .wf-editor.wf-chat-enabled.wf-chat-open .wf-body { position: relative; grid-template-columns: 0 minmax(0, 1fr) 0; } .wf-conversation { position: absolute; inset: 0 0 0 auto; width: min(370px, calc(100% - 24px)); border-left-color: var(--strong-line); box-shadow: -10px 0 30px #0002; z-index: 18; } .wf-conversation-resize { display: none; } .wf-conversation-messages { padding: 12px; } .wf-conversation-composer { padding: 10px 12px; } }
 @media (max-height: 720px) { .wf-conversation-heading { min-height: 49px; padding-top: 8px; padding-bottom: 8px; } .wf-conversation-composer textarea { min-height: 58px; } .wf-conversation-composer { padding-top: 8px; padding-bottom: 8px; } .wf-conversation-composer .wf-conversation-help { display: none; } .wf-conversation-pending { max-height: 30%; } }
 @media (prefers-reduced-motion: reduce) { .wf-conversation-messages { scroll-behavior: auto; } }
+.application-conversation-root { --wf-chat-width: 360px; flex: 0 0 var(--wf-chat-width); width: var(--wf-chat-width); min-width: 0; min-height: 0; }
+.application-conversation-root > .wf-body { height: 100%; display: flex; min-height: 0; }
+.application-conversation-root .wf-conversation { width: 100%; height: 100%; }
+.application-conversation-root.wf-chat-open > .wf-header-actions { display: none; }
+.application-conversation-root:not(.wf-chat-open) { width: auto; flex-basis: auto; }
+.application-conversation-root:not(.wf-chat-open) > .wf-header-actions { padding: 14px 8px; }
+.wf-conversation-evidence { margin-top: 12px; font-size: 11px; color: var(--muted); }
+.wf-conversation-evidence > a { display: block; padding: 5px 0; }
+.wf-conversation-diagnostic-progress { margin-top: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.wf-conversation-diagnostic-stage { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--secondary); font-size: 11px; line-height: 1.7; }
+.wf-conversation-diagnostic-stage > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.wf-conversation-diagnostic-time { flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.wf-conversation-diagnostic-progress .wf-conversation-message-scope { margin-top: 4px; font-variant-numeric: tabular-nums; }
+.wf-conversation-diagnostic-steps { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.7; }
+.wf-conversation-diagnostic-steps summary { cursor: pointer; }
+.wf-conversation-diagnostic-steps ol { margin-top: 6px; padding-left: 18px; max-height: 230px; overflow: auto; }
+.wf-conversation-diagnostic-steps li { margin-bottom: 5px; overflow-wrap: anywhere; }
+.wf-conversation-diagnostic-steps li > p { margin-top: 2px; white-space: pre-wrap; }
+@media (max-width: 950px) { .application-conversation-root { --wf-chat-width: 300px; } }
+@media (max-width: 650px) { .main-body:has(> .application-conversation-root:not([hidden])) { flex-direction: column; overflow: auto; } .application-conversation-root { flex: 0 0 auto; width: 100%; height: 60vh; } }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WorkflowConversationUI, conversationContext, conversationTurnGroups, canDismissConversationTurn } from '../public/workflow-conversation-ui.js';
+import { WorkflowConversationUI, conversationContext, conversationTurnGroups, canDismissConversationTurn, conversationDiagnosticProgress } from '../public/workflow-conversation-ui.js';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 
@@ -15,6 +15,30 @@ function harness() {
   ui.state().loaded = true; return { ui, document, run };
 }
 const snapshot = (id, revision, turns = []) => ({ conversation: { workflowId: id, revision, turns }, pending: [] });
+
+test('diagnostic progress names the stalled stage and freezes its elapsed time after failure', () => {
+  const at = Date.parse('2026-01-01T00:00:10.000Z');
+  const turn = { status: 'thinking', createdAt: '2026-01-01T00:00:00.000Z', assistant: {
+    progress: { stage: 'model-response', label: '等待模型响应', startedAt: '2026-01-01T00:00:05.000Z', modelCalls: 2, toolCalls: 1 },
+    checkpoint: { steps: [{ stage: 'tool', label: '读取工作流', status: 'complete', elapsedMs: 30 }, { stage: 'model-response', label: '等待模型响应', status: 'running' }] } } };
+  const live = conversationDiagnosticProgress(turn, at);
+  assert.equal(live.label, '等待模型响应'); assert.equal(live.elapsedMs, 5000); assert.equal(live.totalElapsedMs, 10000);
+  assert.equal(live.modelCalls, 2); assert.equal(live.completed, 1); assert.equal(live.active, true);
+  turn.status = 'error'; turn.updatedAt = '2026-01-01T00:03:05.000Z';
+  turn.assistant.progress = { ...turn.assistant.progress, status: 'error', completedAt: turn.updatedAt, elapsedMs: 180000 };
+  turn.assistant.checkpoint.steps[1].status = 'error';
+  const failed = conversationDiagnosticProgress(turn, at + 3600000);
+  assert.equal(failed.elapsedMs, 180000); assert.equal(failed.totalElapsedMs, 185000); assert.equal(failed.active, false);
+  assert.equal(failed.failed, 1); assert.equal(failed.steps[0].label, '读取工作流');
+  assert.equal(conversationDiagnosticProgress({ status: 'error', assistant: { text: '旧版错误' } }), null);
+});
+
+test('progress display projects stage metadata without exposing checkpoint tool payloads', () => {
+  const view = conversationDiagnosticProgress({ status: 'error', assistant: { progress: { label: '检查结果', elapsedMs: 5 },
+    checkpoint: { results: [{ result: { privatePayload: 'must not be displayed' } }], steps: [{ label: '读取记录', status: 'error', error: 'Bearer abcdefghijklmnop' }] } } });
+  assert.equal(JSON.stringify(view).includes('privatePayload'), false);
+  assert.equal(JSON.stringify(view).includes('abcdefghijklmnop'), false);
+});
 
 test('conversation scope captures the chosen node attempt and only attached artifacts for that node', () => {
   const { document, run, artifact } = fixture(); run.artifacts = [{ id: 'unrelated', sha256: 'b'.repeat(64), nodeId: 'another-node' }];

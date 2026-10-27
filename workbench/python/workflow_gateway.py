@@ -5,6 +5,8 @@ directory copy, keeps its native scaffold, and audits source/copy fingerprints.
 The session's skill_manage dispatch is denied, including deferred tool calls;
 ordinary terminal/file tools remain available with Hermes' normal approvals.
 Learning Skills explicitly declaring allowed-tools: [] are fully tool-free.
+Application assistant sessions are separately tool-free and memory-free;
+their diagnostic images are admitted only from a configured bounded root.
 This is an execution policy and integrity check, not an OS filesystem sandbox.
 
 Run with Hermes' interpreter and its root on PYTHONPATH:
@@ -15,6 +17,7 @@ WORKBENCH_GATEWAY_WORKSPACE_ROOT must identify the workbench workspace root.
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import inspect
 import json
@@ -23,6 +26,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import stat
 import threading
 import time
@@ -35,10 +39,22 @@ MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_BUNDLE_ENTRIES = 2048
 MAX_INPUT_BYTES = 64 * 1024
+MAX_DIAGNOSTIC_IMAGES = 4
+MAX_DIAGNOSTIC_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_DIAGNOSTIC_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_DIAGNOSTIC_HISTORY_MESSAGES = 200
+MAX_DIAGNOSTIC_HISTORY_BYTES = 256 * 1024
+MAX_DIAGNOSTIC_HISTORY_TEXT = 12000
+_HISTORY_PRIVATE_KEYS = frozenset({"reasoning", "reasoningcontent", "reasoningtext", "reasoningdetails", "thinking", "analysis",
+                                    "chainofthought", "encryptedcontent", "codexreasoningitems", "codexmessageitems"})
+_HISTORY_SECRET_KEYS = frozenset({"apikey", "token", "accesstoken", "refreshtoken", "authorization", "cookie", "setcookie",
+                                 "password", "secret", "credentials", "clientsecret", "privatekey"})
 OUTPUT_TYPES = frozenset({"any", "text", "number", "boolean", "object", "array", "fileRef"})
 _FORBIDDEN_FILES = frozenset({".env", "auth.json"})
 _BLOCK_MESSAGE = "Workbench execution mode does not permit skill_manage or modifying Skills."
 _NO_TOOLS_MESSAGE = "Workbench learning control sessions do not permit tool calls."
+_ASSISTANT_NO_TOOLS_MESSAGE = "Workbench assistant sessions do not permit native tool calls; use the application broker."
+_ASSISTANT_RUNTIME_MESSAGE = "Workbench assistant sessions do not permit the native subprocess runtime."
 _READ_ONLY_MEMORY_MESSAGE = "Workbench learning sessions do not permit memory writes or unscoped agent delegation."
 _UNSCOPED_AGENT_TOOLS = frozenset({"delegate_task", "cronjob_manage", "message_agent"})
 
@@ -53,6 +69,56 @@ def _sha256(data: bytes) -> str:
 
 def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _history_key(key):
+    return re.sub("[^a-z]", "", str(key).lower())
+
+
+def _history_text(value):
+    value = re.sub(r"<(?:think|thinking|analysis|reasoning)\b[^>]*>[\s\S]*?(?:</(?:think|thinking|analysis|reasoning)>|$)",
+                   "[internal reasoning omitted]", str(value), flags=re.IGNORECASE)
+    value = re.sub(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value, flags=re.IGNORECASE)
+    value = re.sub(r'((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|secret|authorization)["\']?\s*[:=]\s*["\']?)[^\s"\',;}\]&#]+',
+                   r"\1[REDACTED]", value, flags=re.IGNORECASE)
+    return value if len(value) <= MAX_DIAGNOSTIC_HISTORY_TEXT else value[:MAX_DIAGNOSTIC_HISTORY_TEXT] + "[truncated]"
+
+
+def _history_value(value, depth=0):
+    if depth > 8:
+        return "[truncated]"
+    if isinstance(value, str):
+        return _history_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value if not isinstance(value, float) or math.isfinite(value) else None
+    if isinstance(value, list):
+        return [_history_value(item, depth + 1) for item in value[:50]
+                if not isinstance(item, dict) or _history_key(item.get("type", "")) not in _HISTORY_PRIVATE_KEYS]
+    if isinstance(value, dict):
+        return {str(key): "[REDACTED]" if _history_key(key) in _HISTORY_SECRET_KEYS else _history_value(item, depth + 1)
+                for key, item in list(value.items())[:50]
+                if _history_key(key) not in _HISTORY_PRIVATE_KEYS and key not in {"__proto__", "prototype", "constructor"}}
+    return None
+
+
+def _history_content(content):
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content) if content.lstrip().startswith(("{", "[")) else None
+        except (ValueError, TypeError):
+            parsed = None
+        return _history_text(json.dumps(_history_value(parsed), ensure_ascii=False) if parsed is not None else content)
+    if isinstance(content, list):
+        return _history_text("\n".join(part if isinstance(part, str) else part["text"] for part in content
+            if isinstance(part, str) or isinstance(part, dict) and part.get("type") in {None, "text", "input_text", "output_text"}
+            and isinstance(part.get("text"), str)))
+    if isinstance(content, dict):
+        if content.get("type") in {"text", "input_text", "output_text"}:
+            return _history_text(content.get("text", ""))
+        if content.get("type"):
+            return ""
+        return _history_text(json.dumps(_history_value(content), ensure_ascii=False))
+    return ""
 
 
 def _plain_json(value, depth=0):
@@ -252,6 +318,8 @@ class WorkflowGateway:
         self.guarded_agents = weakref.WeakKeyDictionary()
         self.tool_free_sessions = set()
         self.tool_free_agents = weakref.WeakSet()
+        self.assistant_sessions = {}
+        self.assistant_agents = weakref.WeakKeyDictionary()
         self.memory_scopes = {}
         self.released_memory_scopes = set()
         self.memory_sessions = {}
@@ -279,6 +347,9 @@ class WorkflowGateway:
         self.server.register_method("workbench.skill.input", self.input_rpc)
         self.server.register_method("workbench.skill.finish", self.finish_rpc)
         self.server.register_method("workbench.learning.prepare", self.learning_prepare_rpc)
+        self.server.register_method("workbench.assistant.prepare", self.assistant_prepare_rpc)
+        self.server.register_method("workbench.assistant.images", self.assistant_images_rpc)
+        self.server.register_method("workbench.assistant.history", self.assistant_history_rpc)
         self.server.register_method("workbench.learning.memory.capture", self.memory_capture_rpc)
         self.server.register_method("workbench.learning.memory.release", self.memory_release_rpc)
         self.server.register_method("workbench.learning.memory.restore", self.memory_restore_rpc)
@@ -287,6 +358,7 @@ class WorkflowGateway:
         self.server._LONG_HANDLERS = frozenset(self.server._LONG_HANDLERS) | {
             "workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish",
             "workbench.learning.prepare",
+            "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history",
             "workbench.learning.memory.capture", "workbench.learning.memory.release",
             "workbench.learning.memory.restore",
         }
@@ -304,6 +376,13 @@ class WorkflowGateway:
 
     def _memory_binding(self, identities):
         return next((self.memory_sessions[identity] for identity in identities if identity in self.memory_sessions), None)
+
+    def _assistant_binding(self, identities):
+        return next((self.assistant_sessions[identity] for identity in identities if identity in self.assistant_sessions), None)
+
+    def _refuse_assistant_learning(self, session, sid):
+        if self.assistant_agents.get(session.get("agent")) or self._assistant_binding((sid, session.get("session_key"))):
+            raise WorkflowPolicyError("An assistant session cannot become a learning session or capture learning memory.")
 
     @staticmethod
     def _memory_call_blocked(binding, name, args):
@@ -340,6 +419,8 @@ class WorkflowGateway:
             bound = signature.bind(*args, **kwargs)
             name, ids = bound.arguments["function_name"], bound.arguments["ids"]
             identities = (getattr(ids, "session_id", None), getattr(ids, "task_id", None))
+            if self._assistant_binding(identities):
+                return json.dumps({"error": _ASSISTANT_NO_TOOLS_MESSAGE, "code": "workbench_assistant_tools_blocked"})
             if any(identity in self.tool_free_sessions for identity in identities if identity):
                 return json.dumps({"error": _NO_TOOLS_MESSAGE, "code": "workbench_learning_tools_blocked"})
             if self._memory_call_blocked(self._memory_binding(identities), name, bound.arguments["function_args"]):
@@ -380,6 +461,18 @@ class WorkflowGateway:
             if memory is not None and identity:
                 memory["identities"].add(identity)
                 self.memory_sessions[identity] = memory
+            try:
+                assistant = self.assistant_agents.get(agent)
+            except TypeError:
+                assistant = None
+            if assistant is not None:
+                for name in identities or {identity}:
+                    if name:
+                        assistant["identities"].add(name)
+                        self.assistant_sessions[name] = assistant
+                return _ASSISTANT_NO_TOOLS_MESSAGE, ref.args
+            if self._assistant_binding((identity,)):
+                return _ASSISTANT_NO_TOOLS_MESSAGE, ref.args
             if tool_free or identity in self.tool_free_sessions:
                 return _NO_TOOLS_MESSAGE, ref.args
             if self._memory_call_blocked(memory or self._memory_binding((identity,)), ref.name, ref.args):
@@ -398,6 +491,8 @@ class WorkflowGateway:
         def guarded_handle(*args, **kwargs):
             bound = handle_signature.bind(*args, **kwargs)
             identities = (bound.arguments.get("session_id"), bound.arguments.get("task_id"))
+            if self._assistant_binding(identities):
+                return json.dumps({"error": _ASSISTANT_NO_TOOLS_MESSAGE, "code": "workbench_assistant_tools_blocked"})
             if any(identity in self.tool_free_sessions for identity in identities if identity):
                 return json.dumps({"error": _NO_TOOLS_MESSAGE, "code": "workbench_learning_tools_blocked"})
             if self._memory_call_blocked(self._memory_binding(identities), bound.arguments["function_name"], bound.arguments["function_args"]):
@@ -418,10 +513,14 @@ class WorkflowGateway:
             try:
                 known_agent = agent in self.tool_free_agents
                 binding = self.memory_agents.get(agent) or self._memory_binding((sid, key))
+                assistant = self.assistant_agents.get(agent) or self._assistant_binding((sid, key))
             except TypeError:
                 known_agent = False
                 binding = self._memory_binding((sid, key))
-            if binding is not None:
+                assistant = self._assistant_binding((sid, key))
+            if assistant is not None:
+                self._guard_assistant_agent({"agent": agent, "session_key": key}, sid)
+            elif binding is not None:
                 # _sess may hold the RPC policy lock while awaiting this native
                 # build. Do not reacquire it here: native agent_ready remains
                 # closed until wiring finishes. Release never mutates bindings.
@@ -583,6 +682,233 @@ class WorkflowGateway:
         if session.get("running"):
             raise WorkflowPolicyError("Workflow session is still running.")
         return session, None
+
+    def _guard_assistant_agent(self, session, sid):
+        """An application-owned conversation: no native tools or learning memory.
+
+        The native gateway can rebuild an agent or refresh its model between
+        prepare and submit. Reapply policy at wiring AND the actual turn call.
+        Image bytes are attached here, after the gateway's configurable native
+        image router, so a text-routing setting cannot silently blind the model.
+        """
+        agent = session.get("agent")
+        if agent is None:
+            raise WorkflowPolicyError("Hermes assistant session has no compatible agent.")
+        if getattr(agent, "api_mode", "") == "codex_app_server":
+            raise WorkflowPolicyError(_ASSISTANT_RUNTIME_MESSAGE)
+        run = getattr(agent, "run_conversation", None)
+        _check_signature(run, {"user_message", "persist_user_message"}, "assistant.run_conversation")
+        existing_agent = self.assistant_agents.get(agent)
+        assistant = existing_agent or self._assistant_binding((sid, session.get("session_key")))
+        if assistant is None and (self.memory_agents.get(agent) or self._memory_binding((sid, session.get("session_key")))):
+            raise WorkflowPolicyError("A learning session cannot become an assistant session.")
+        if any(run["identities"] & {sid, session.get("session_key"), getattr(agent, "session_id", None)} for run in self.runs.values()):
+            raise WorkflowPolicyError("A Skill execution session cannot become an assistant session.")
+        identities = self._guard_memory_agent(session, sid, scope={"scope_id": None, "snapshot": None, "flags": (False, False)}, control=True)
+        assistant = assistant if assistant is not None else {"identities": set(), "images": []}
+        assistant["identities"].update(identities)
+        self.assistant_agents[agent] = assistant
+        for identity in assistant["identities"]:
+            self.assistant_sessions[identity] = assistant
+
+        def no_subprocess_runtime(*args, **kwargs):
+            raise WorkflowPolicyError(_ASSISTANT_RUNTIME_MESSAGE)
+
+        # That optional runtime has its OWN shell/patch tools and bypasses the
+        # Hermes dispatcher guards; deny it even if a fallback enables it later.
+        agent._run_codex_app_server_turn = no_subprocess_runtime
+        if existing_agent is None:
+            signature = inspect.signature(run)
+
+            def assistant_turn(*args, **kwargs):
+                bound = signature.bind(*args, **kwargs)
+                message = bound.arguments["user_message"]
+                if not isinstance(message, str):
+                    # No native image.attach / arbitrary content-parts bypass:
+                    # only this RPC's bounded diagnostic bytes are admitted.
+                    if not isinstance(message, list) or any(not isinstance(part, dict) or part.get("type") not in {"text", "input_text"}
+                            or not isinstance(part.get("text"), str) for part in message):
+                        raise WorkflowPolicyError("Assistant image content must be admitted through workbench.assistant.images.")
+                with self.lock:
+                    self._guard_assistant_agent({"agent": agent, "session_key": session.get("session_key")}, sid)
+                    # A native refresh must not restore a prompt cached with live memory.
+                    agent._cached_system_prompt = None
+                    agent._cached_system_prompt_static = None
+                    images, assistant["images"] = assistant["images"], []
+                if images:
+                    parts = [{"type": "text", "text": message}] if isinstance(message, str) else list(message)
+                    parts.extend(copy.deepcopy(images))
+                    bound.arguments["user_message"] = parts
+                    bound.arguments["persist_user_message"] = parts
+                return run(*bound.args, **bound.kwargs)
+
+            # Keep the public native signature for repeat prepares and rebuilds.
+            assistant_turn.__signature__ = signature
+            agent.run_conversation = assistant_turn
+        return assistant
+
+    def assistant_prepare(self, params, rid=None):
+        if not isinstance(params, dict) or set(params) != {"session_id"} or not isinstance(params["session_id"], str) or not params["session_id"]:
+            raise WorkflowPolicyError("Assistant preparation requires only a live session_id.")
+        with self.lock:
+            session, error = self._session(params, rid)
+            if error:
+                return error
+            self._workspace(session)
+            self._guard_assistant_agent(session, params["session_id"])
+            return {"policy": {"toolsAllowed": False, "applicationTools": "broker-only", "sourceMutationBlocked": True,
+                               "skillMutationBlocked": True, "memoryAllowed": False, "memoryWriteAllowed": False,
+                               "externalMemoryAllowed": False}}
+
+    @staticmethod
+    def _read_diagnostic_image(raw_path, root, declared_root=None):
+        if not isinstance(raw_path, str) or not raw_path or not Path(raw_path).is_absolute():
+            raise WorkflowPolicyError("Diagnostic images require absolute paths under WORKBENCH_DIAGNOSTICS_ROOT.")
+        # Resolve the trusted configured root, not the submitted path: walking
+        # every child with dir_fd + O_NOFOLLOW refuses symlink escape/races.
+        path = Path(os.path.abspath(raw_path))
+        # macOS /var and /tmp are aliases for /private/...; only normalize the
+        # trusted configured root's alias, never symlinks inside the input path.
+        if declared_root is not None and _under(path, declared_root):
+            path = root / path.relative_to(declared_root)
+        if not _under(path, root) or path == root:
+            raise WorkflowPolicyError("Diagnostic image is outside WORKBENCH_DIAGNOSTICS_ROOT.")
+        relative = path.relative_to(root)
+        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            for name in relative.parts[:-1]:
+                next_fd = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            fd = os.open(relative.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+            with os.fdopen(fd, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_DIAGNOSTIC_IMAGE_BYTES:
+                    raise WorkflowPolicyError("Diagnostic image must be a bounded regular image file.")
+                data = stream.read(MAX_DIAGNOSTIC_IMAGE_BYTES + 1)
+                after = os.fstat(stream.fileno())
+                if len(data) > MAX_DIAGNOSTIC_IMAGE_BYTES or (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                    raise WorkflowPolicyError("Diagnostic image changed or exceeded the size limit.")
+        finally:
+            os.close(directory_fd)
+        mime = ("image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else
+                "image/jpeg" if data.startswith(b"\xff\xd8\xff") else
+                "image/webp" if data.startswith(b"RIFF") and data[8:12] == b"WEBP" else None)
+        if mime is None:
+            raise WorkflowPolicyError("Diagnostic image must contain PNG, JPEG or WebP image data.")
+        return {"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")}}, len(data)
+
+    def assistant_images(self, params, rid=None):
+        if (not isinstance(params, dict) or set(params) != {"session_id", "images"}
+                or not isinstance(params["session_id"], str) or not params["session_id"]
+                or not isinstance(params["images"], list) or len(params["images"]) > MAX_DIAGNOSTIC_IMAGES):
+            raise WorkflowPolicyError("Assistant images require session_id and at most four diagnostic image paths.")
+        with self.lock:
+            session, error = self._session(params, rid)
+            if error:
+                return error
+            self._workspace(session)
+            assistant = self.assistant_agents.get(session.get("agent")) or self._assistant_binding((params["session_id"], session.get("session_key")))
+            if assistant is None:
+                raise WorkflowPolicyError("Diagnostic images are only available to prepared assistant sessions.")
+            declared = os.environ.get("WORKBENCH_DIAGNOSTICS_ROOT")
+            if not declared:
+                raise WorkflowPolicyError("WORKBENCH_DIAGNOSTICS_ROOT must configure the allowed image root.")
+            declared_root = Path(os.path.abspath(os.path.expanduser(declared)))
+            root = declared_root.resolve(strict=True)
+            if not root.is_dir():
+                raise WorkflowPolicyError("WORKBENCH_DIAGNOSTICS_ROOT must name a directory.")
+            images, total = [], 0
+            for path in params["images"]:
+                part, size = self._read_diagnostic_image(path, root, declared_root)
+                total += size
+                if total > MAX_DIAGNOSTIC_TOTAL_BYTES:
+                    raise WorkflowPolicyError("Diagnostic image attachments exceed the total byte limit.")
+                images.append(part)
+            # One next-turn batch; rejected batches leave the previous queue intact.
+            assistant["images"] = images
+            return {"attached": len(images), "mode": "native-content"}
+
+    def assistant_history(self, params):
+        """Read the fixed launch store without reopening a session or agent.
+
+        Node resolves and authorizes an owned ordinary business session before
+        calling this bridge. No profile, database path or runtime is accepted.
+        A dedicated native read_only handle avoids _get_db's writable startup.
+        """
+        if (not isinstance(params, dict) or set(params) != {"stored_session_id"}
+                or not isinstance(params["stored_session_id"], str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}", params["stored_session_id"])):
+            raise WorkflowPolicyError("Assistant history requires only a stored_session_id, never a file path.")
+        path_fn = getattr(self.server, "_launch_state_db_path", None)
+        _check_signature(path_fn, set(), "server._launch_state_db_path")
+        from hermes_state import SessionDB
+        _check_signature(SessionDB, {"db_path", "read_only"}, "SessionDB")
+        db = SessionDB(db_path=path_fn(), read_only=True)
+        try:
+            _check_signature(db.get_messages, {"session_id", "limit", "latest", "include_compacted"}, "SessionDB.get_messages")
+            rows = db.get_messages(params["stored_session_id"], limit=MAX_DIAGNOSTIC_HISTORY_MESSAGES + 1, latest=True, include_compacted=True)
+        finally:
+            db.close()
+        if not isinstance(rows, list):
+            raise WorkflowPolicyError("Hermes history store returned an incompatible transcript.")
+        messages, call_args = [], {}
+        for row in rows[-MAX_DIAGNOSTIC_HISTORY_MESSAGES:]:
+            if (not isinstance(row, dict) or row.get("role") not in {"user", "assistant", "tool"}
+                    or row.get("display_kind") == "hidden" or row.get("_compressed_summary")):
+                continue
+            content = _history_content(row.get("content"))
+            if row["role"] == "user" and content.lstrip().startswith("[System:"):
+                continue
+            message = {"role": row["role"], "text": content}
+            calls = []
+            for call in (row.get("tool_calls") or [])[:16]:
+                if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+                    continue
+                function = call["function"]
+                name = function.get("name")
+                if not isinstance(name, str) or not name or _history_key(name) in _HISTORY_PRIVATE_KEYS:
+                    continue
+                args = function.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
+                args = _history_value(args)
+                call_id = _history_text(call.get("id", ""))[:200]
+                calls.append({"id": call_id, "type": "function", "function": {"name": _history_text(name)[:200],
+                              "arguments": json.dumps(args, ensure_ascii=False)}})
+                if call_id:
+                    call_args[call_id] = (name, args)
+            if calls:
+                message["tool_calls"] = calls
+            if row["role"] == "tool":
+                call_id = row.get("tool_call_id", "")
+                name, args = call_args.get(call_id, (row.get("name", row.get("tool_name", "tool")), row.get("args")))
+                if _history_key(name) in _HISTORY_PRIVATE_KEYS:
+                    continue
+                message["name"] = _history_text(name)[:200]
+                if isinstance(call_id, str) and call_id:
+                    message["tool_call_id"] = _history_text(call_id)[:200]
+                if args is not None:
+                    message["args"] = _history_value(args)
+                if row.get("context") is not None:
+                    message["context"] = _history_value(row["context"])
+            if content or calls or row["role"] == "tool":
+                messages.append(message)
+        truncated = len(rows) > MAX_DIAGNOSTIC_HISTORY_MESSAGES or any("[truncated]" in json.dumps(message, ensure_ascii=False) for message in messages)
+        bounded, total = [], 1024
+        for message in reversed(messages):
+            size = len(json.dumps(message, ensure_ascii=False).encode("utf-8")) + 2
+            if total + size > MAX_DIAGNOSTIC_HISTORY_BYTES:
+                truncated = True
+                continue
+            bounded.append(message)
+            total += size
+        bounded.reverse()
+        return {"storedSessionId": params["stored_session_id"], "messages": bounded, "truncated": truncated,
+                "policy": {"readOnly": True, "agentCreated": False, "sessionResumed": False, "memoryRead": False, "reasoningIncluded": False}}
 
     def _workspace(self, session) -> Path:
         if self.workspace_root is None or not self.workspace_root.is_dir():
@@ -885,6 +1211,7 @@ class WorkflowGateway:
             if error:
                 return error
             self._workspace(session)
+            self._refuse_assistant_learning(session, params["session_id"])
             if any(run["sid"] == params["session_id"] for run in self.runs.values()):
                 raise WorkflowPolicyError("A Skill execution session cannot become a learning control session.")
             self._guard_learning_agent(session, params["session_id"], scope)
@@ -907,6 +1234,7 @@ class WorkflowGateway:
             if error:
                 return error
             self._workspace(session)
+            self._refuse_assistant_learning(session, params["session_id"])
             existing = self.memory_scopes.get(scope_id)
             if existing:
                 if existing["anchor"] != params["session_id"]:
@@ -1068,6 +1396,26 @@ class WorkflowGateway:
             return result if "jsonrpc" in result else self.server._ok(rid, result)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return self.server._err(rid, 4094, str(exc))
+
+    def assistant_prepare_rpc(self, rid, params):
+        try:
+            result = self.assistant_prepare(params, rid)
+            return result if "jsonrpc" in result else self.server._ok(rid, result)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return self.server._err(rid, 4098, str(exc))
+
+    def assistant_images_rpc(self, rid, params):
+        try:
+            result = self.assistant_images(params, rid)
+            return result if "jsonrpc" in result else self.server._ok(rid, result)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return self.server._err(rid, 4099, str(exc))
+
+    def assistant_history_rpc(self, rid, params):
+        try:
+            return self.server._ok(rid, self.assistant_history(params))
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            return self.server._err(rid, 4100, str(exc))
 
 
 def main():

@@ -49,6 +49,57 @@ const message = (document, text, extra = {}) => ({ clientMessageId: 'message-' +
 const context = (run, nodeId = 'review') => ({ runId: run.id, nodeId, attempt: run.nodes[nodeId].attempt, attemptId: run.nodes[nodeId].attemptId,
   artifactIds: (run.nodes[nodeId].artifacts || []).map(item => item.id), artifactHashes: (run.nodes[nodeId].artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) });
 
+test('failed diagnosis retains completed evidence and its failed stage across restart and offers it to the next request', async t => {
+  const f = await fixture(t), document = graph();
+  const saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const at = new Date().toISOString(), receipt = { tool: 'workflow.inspect', status: 'complete', at };
+  const checkpoint = { version: 1, scope: 'fixture-scope', createdAt: at, updatedAt: at, evidence: [receipt], results: [],
+    steps: [{ stage: 'tool', label: '读取工作流', status: 'complete', startedAt: at, completedAt: at },
+      { stage: 'model-response', label: '等待模型响应', status: 'running', startedAt: at }] };
+  f.app.conversations.planner = async (_app, options) => {
+    options.onProgress('正在等待模型响应', { stage: 'model-response', label: '等待模型响应', startedAt: at, elapsedMs: 12, modelCalls: 2, toolCalls: 1 });
+    options.onCheckpoint?.(checkpoint);
+    throw Object.assign(Error('应用助手等待模型响应超时'), { code: 'MODEL_TIMEOUT', phase: 'model-response', elapsedMs: 180000 });
+  };
+  const response = await f.app.conversations.message(document.id, message(document, '检查为什么失败', { intent: 'discuss' }));
+  const failed = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'error'));
+  assert.deepEqual(failed.assistant.evidence, [receipt]);
+  assert.equal(failed.assistant.progress.stage, 'model-response');
+  assert.equal(failed.assistant.progress.status, 'error');
+  assert.equal(failed.assistant.checkpoint.steps[0].status, 'complete');
+  assert.equal(failed.assistant.checkpoint.steps[1].status, 'error');
+  await f.restart();
+  const restored = f.app.conversations.get(document.id).conversation.turns[0];
+  assert.deepEqual(restored.assistant.checkpoint, failed.assistant.checkpoint);
+  let offered;
+  f.app.conversations.planner = async (_app, options) => { offered = options.checkpoint; return { text: '沿用仍有效的只读证据' }; };
+  const next = await f.app.conversations.message(document.id, message(document, '继续分析', { intent: 'discuss' }));
+  await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === next.turn.id && turn.status === 'complete'));
+  assert.deepEqual(offered, failed.assistant.checkpoint);
+  assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('restart interrupts the unfinished diagnostic stage while retaining completed checks', async t => {
+  const f = await fixture(t), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const at = new Date().toISOString();
+  f.app.conversations.planner = async (_app, options) => {
+    options.onProgress('等待模型响应', { stage: 'model-response', label: '等待模型响应', startedAt: at });
+    options.onCheckpoint?.({ version: 1, scope: 'restart-fixture', createdAt: at, updatedAt: at, evidence: [{ tool: 'workflow.inspect', status: 'complete', at }], results: [],
+      steps: [{ stage: 'tool', label: '读取工作流', status: 'complete', startedAt: at, completedAt: at }, { stage: 'model-response', label: '等待模型响应', status: 'running', startedAt: at }] });
+    return new Promise(() => {});
+  };
+  const response = await f.app.conversations.message(document.id, message(document, '检查工作流', { intent: 'discuss' }));
+  await until(() => f.app.conversations.get(document.id).conversation.turns[0].assistant.checkpoint);
+  await f.restart();
+  const restored = f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id);
+  assert.equal(restored.status, 'interrupted'); assert.equal(restored.assistant.progress.status, 'interrupted');
+  assert.equal(restored.assistant.checkpoint.steps[0].status, 'complete');
+  assert.equal(restored.assistant.checkpoint.steps[1].status, 'interrupted');
+  assert.equal(restored.assistant.evidence[0].tool, 'workflow.inspect');
+  assert.deepEqual(f.app.workflows.list(), []);
+});
+
 test('conversation feedback persists without a model or Skill and never changes workflow documents', async t => {
   const f = await fixture(t), document = graph();
   const saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });

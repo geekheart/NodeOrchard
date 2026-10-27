@@ -7,9 +7,12 @@ import { WorkflowVersioningUI } from './workflow-versioning-ui.js';
 import { appendDiagnosticEvent, safeText, redact } from '../shared/diagnostics.mjs';
 import { diagnosticDetails } from './diagnostic-events.js';
 import { HermesModelUI } from './hermes-model-ui.js';
+import { createAppDiagnosticClient } from './app-diagnostic-client.js';
+import { ApplicationConversationUI } from './application-conversation-ui.js';
 
 const $ = (id) => document.getElementById(id);
-let workflowEditor, workflowBoard, workflowLibraryClient, routeLoad = 0;
+let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, routeLoad = 0;
+const diagnosticCapture = new URLSearchParams(location.search).get('diagnosticCapture') === 'readonly';
 const sidebarMedia = matchMedia('(max-width:720px)');
 let sidebarCollapsed = false, sidebarMobileOpen = false;
 try { sidebarCollapsed = localStorage.getItem('workbench-sidebar-collapsed') === 'true'; } catch {}
@@ -25,6 +28,10 @@ const state = {
   stats: new Map(), statsPending: new Set(), settings: null, settingsLoading: false, saving: false, settingsDirty: false,
   eventRevision: 0, sessionRevision: new Map(), turnRevision: new Map(), messageRevision: new Map(), requestsRevision: 0, backendRevision: 0, lastEventId: null,
 };
+const appDiagnosticClient = createAppDiagnosticClient({ getState: () => ({ page: state.route?.page,
+  workflowId: state.route?.page === 'workflows' ? workflowEditor?.doc?.id : null,
+  runId: state.route?.page === 'workflows' ? workflowEditor?.runtime?.currentRun?.()?.id : null,
+  canvasClosed: workflowEditor?.settings?.canvasClosed, transport: state.transport, backendState: state.backend?.state }) });
 const backendLabels = { stopped: '尚未连接', starting: '连接中', ready: '已连接', error: '连接异常', disconnected: '已断开' };
 const sessionLabels = { idle: '空闲', ready: '已就绪', running: '进行中', busy: '进行中', waiting: '待处理', complete: '已完成', completed: '已完成', interrupted: '已停止', stopped: '已停止', unknown: '待确认', error: '失败', failed: '失败', disconnected: '未恢复' };
 const pageLabels = { board: '工作流看板', workflows: '节点编辑器', projects: '项目', skills: 'Skills', statistics: '统计', settings: '设置', task: '任务' };
@@ -68,9 +75,11 @@ function notify(text, error = false) { $('notice').hidden = !text; $('notice-tex
 async function api(path, { method = 'GET', body } = {}) {
   const headers = { Accept: 'application/json' };
   if (method !== 'GET') { if (!state.csrfToken) throw new Error('工作台尚未就绪，请刷新后重试。'); headers['Content-Type'] = 'application/json'; headers['X-Workbench-Token'] = state.csrfToken; }
-  const response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  let response;
+  try { response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+  catch (error) { appDiagnosticClient.recordRequest(path, 0, error.message); throw error; }
   let result; try { result = await response.json(); } catch { throw new Error(`服务响应无法读取（HTTP ${response.status}）。`); }
-  if (!response.ok) { const error = new Error(safeText(result.error || `请求失败（HTTP ${response.status}）。`)); error.httpStatus = response.status; throw error; } return result;
+  if (!response.ok) { const error = new Error(safeText(result.error || `请求失败（HTTP ${response.status}）。`)); error.httpStatus = response.status; appDiagnosticClient.recordRequest(path, response.status, error.message); throw error; } return result;
 }
 const hermesModels = new HermesModelUI({
   api, context: () => ({ backend: state.backend, connecting: state.connecting, csrfToken: state.csrfToken }), connect: connectBackend,
@@ -128,6 +137,9 @@ function renderShell() {
   const route = state.route || { page: 'board' }; const parent = route.page === 'task' ? 'board' : route.page;
   document.body.classList.toggle('workflow-active', route.page === 'workflows');
   document.body.classList.toggle('board-active', route.page === 'board');
+  const showApplicationChat = route.page !== 'workflows' && route.page !== 'task';
+  $('global-conversation-root').hidden = !showApplicationChat;
+  if (showApplicationChat && state.bootstrapped && !applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
   renderSidebar();
   for (const nav of document.querySelectorAll('[data-nav]')) { nav.classList.toggle('active', nav.dataset.nav === parent); if (nav.dataset.nav === parent) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
   const crumb = $('breadcrumb'); crumb.replaceChildren(link('#/board', '个人空间'), element('span', 'separator', '/'));
@@ -197,7 +209,8 @@ function ensureWorkflowEditor() {
     api, connect: connectBackend, getBackend: () => state.backend,
     getRequests: () => [...state.requests.values()], taskURL,
   });
-  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, getBackend: () => state.backend });
+  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() });
+  if (diagnosticCapture) workflowEditor.conversation.schedulePoll = () => {};
   workflowEditor.conversation.connectRuntime(workflowEditor.runtime);
   workflowLibraryClient = new WorkflowLibraryClient(workflowEditor, { api,
     onDocumentChange(id) {
@@ -529,10 +542,11 @@ function receiveEvent(event) {
   if (event.type === 'workflow.lifecycle') workflowLibraryClient?.handleLifecycle(event.payload);
   workflowEditor?.runtime?.handleEvent(event);
   workflowEditor?.conversation?.onEvent(event);
+  applicationConversation?.onEvent(event);
   workflowBoard?.handleEvent(event);
 }
 function scheduleReconnect() { if (state.closed || state.reconnectTimer) return; state.reconnectTimer = setTimeout(async () => { state.reconnectTimer = null; const ok = await synchronize(); if (ok) openEvents(); else scheduleReconnect(); }, Math.min(1000 * 2 ** state.retry++, 10000)); }
-function openEvents() { if (state.closed) return; state.source?.close(); const source = new EventSource(`/api/events?after=${state.lastEventId ?? 0}`); state.source = source; source.onopen = () => { if (state.source !== source) return; state.retry = 0; state.transport = 'live'; renderBackend(); }; source.onmessage = ({ data }) => { if (state.source !== source) return; try { const event = JSON.parse(data); if (typeof event.id === 'number' && event.id <= (state.lastEventId ?? -1)) return; receiveEvent(event); if (typeof event.id === 'number') state.lastEventId = event.id; } catch (error) { notify(`无法处理事件：${error.message}`, true); } }; source.onerror = () => { if (state.source !== source) return; source.close(); state.source = null; state.transport = 'reconnecting'; renderBackend(); scheduleReconnect(); }; }
+function openEvents() { if (diagnosticCapture) { state.transport = 'diagnostic-readonly'; return; } if (state.closed) return; state.source?.close(); const source = new EventSource(`/api/events?after=${state.lastEventId ?? 0}`); state.source = source; source.onopen = () => { if (state.source !== source) return; state.retry = 0; state.transport = 'live'; renderBackend(); }; source.onmessage = ({ data }) => { if (state.source !== source) return; try { const event = JSON.parse(data); if (typeof event.id === 'number' && event.id <= (state.lastEventId ?? -1)) return; receiveEvent(event); if (typeof event.id === 'number') state.lastEventId = event.id; } catch (error) { notify(`无法处理事件：${error.message}`, true); } }; source.onerror = () => { if (state.source !== source) return; source.close(); state.source = null; state.transport = 'reconnecting'; renderBackend(); scheduleReconnect(); }; }
 async function connectBackend() { if (state.connecting) return; state.connecting = true; state.newTaskError = ''; notify(''); renderBackend(); try { const result = await api('/api/connect', { method: 'POST', body: {} }); state.backend = result.backend || result; state.skills = null; await Promise.allSettled([loadSettings(), synchronize(), hermesModels.refresh({ preserveSelection: true })]); await loadRouteData(); notify('Hermes 已连接。'); return true; } catch (error) { notify(`连接失败：${error.message}`, true); if ($('new-task-dialog').open) state.newTaskError = safeText(error.message); return false; } finally { state.connecting = false; renderBackend(); } }
 
 $('new-task-button').addEventListener('click', () => { if (state.route.page === 'workflows') void createWorkflow().catch(error => notify(`工作流创建失败：${error.message}`, true)); else openNewTask(); });

@@ -29,6 +29,8 @@ export const NODE_TYPES = freezeRows([
 
 const TYPES = new Map(NODE_TYPES.map(row => [row.type, row]));
 const PORT_TYPES = new Set(['any', 'text', 'number', 'boolean', 'object', 'array', 'fileRef', 'folderRef', 'image', 'artifactRef', 'artifactBundle']);
+export const CODE_LANGUAGES = Object.freeze(['javascript', 'python']);
+export const TOOL_EXECUTION_MODES = Object.freeze(['code', 'tool']);
 const LIMITS = Object.freeze({ nodes: 200, edges: 1000, coordinate: 100000, iterations: 1000 });
 const DEFAULTS = {
   input: { outputType: 'fileRef', fieldName: 'input', required: true,
@@ -210,10 +212,10 @@ function configFor(type, input = {}, v2 = true) {
       if (typeof value !== 'boolean') fail('required 必须是布尔值。');
       result[key] = value;
     } else if (key === 'executionMode') {
-      if (!['code', 'tool'].includes(value)) fail('执行方式仅支持 code 或 tool。');
+      if (!TOOL_EXECUTION_MODES.includes(value)) fail('执行方式仅支持 code 或 tool。');
       result[key] = value;
     } else if (key === 'language') {
-      if (!['javascript', 'python'].includes(value)) fail('代码语言仅支持 javascript 或 python。');
+      if (!CODE_LANGUAGES.includes(value)) fail('代码语言仅支持 javascript 或 python。');
       result[key] = value;
     } else if (key === 'comparison') {
       if (!['exact', 'model'].includes(value)) fail('产物对比方式仅支持 exact 或 model。');
@@ -243,6 +245,21 @@ export function createDocument(options = {}) {
     mode: 'execute', nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 },
     ...(version === 2 ? { settings: cleanSettings(options.settings) } : {}),
   };
+}
+
+// The editor, assistant and adapters derive configuration discovery from the
+// same defaults and admitted keys as configFor, rather than a copied catalog.
+export function nodeConfigurationContract(type, { schemaVersion = 2 } = {}) {
+  nodeType(type);
+  if (![1, 2].includes(schemaVersion)) fail('仅支持 schemaVersion 1 或 2。');
+  const defaults = configFor(type, {}, schemaVersion === 2);
+  const allowedConfigKeys = [...new Set([...Object.keys(DEFAULTS[type]), ...(type === 'input' ? ['defaultValue'] : []),
+    ...(schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])])];
+  const enums = { language: [...CODE_LANGUAGES], executionMode: [...TOOL_EXECUTION_MODES], inputType: [...PORT_TYPES], outputType: [...PORT_TYPES],
+    failurePolicy: ['stop', 'retry'], trigger: ['manual', 'schedule'], comparison: ['exact', 'model'], scope: ['skills'], stage: ['final', 'intermediate'],
+    resource: ['default', 'model', 'eda', 'browser', 'drawio', 'memory', 'build'], sourceKind: ['value', 'file', 'folder', 'image'] };
+  return { type, schemaVersion, defaults, allowedConfigKeys,
+    enums: Object.fromEntries(Object.entries(enums).filter(([key]) => allowedConfigKeys.includes(key))) };
 }
 
 export function createNode(type, position = { x: 0, y: 0 }, options = {}) {

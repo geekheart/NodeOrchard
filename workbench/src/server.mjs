@@ -24,6 +24,7 @@ async function readJson(req, limit = 1000000) {
 export function createWorkbenchServer(config, application = new Application(config)) {
   const csrfToken = randomBytes(24).toString('hex');
   const clients = new Set();
+  const publicEvent = event => !event.sessionId || !application.assistantModel?.ownsSession(event.sessionId);
   const json = (res, code, data) => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(data));
@@ -45,6 +46,27 @@ export function createWorkbenchServer(config, application = new Application(conf
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: '需要 application/json。' });
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { ...application.bootstrap(), eventCursor: application.sequence, csrfToken });
+      if (req.method === 'GET' && path === '/api/app-capabilities') {
+        if ([...requestURL.searchParams.keys()].some(key => !['section', 'schemaVersion'].includes(key))
+          || [...new Set(requestURL.searchParams.keys())].some(key => requestURL.searchParams.getAll(key).length > 1)) return json(res, 400, { error: '能力目录查询参数无效。' });
+        const schemaVersion = requestURL.searchParams.get('schemaVersion');
+        if (schemaVersion !== null && !['1', '2'].includes(schemaVersion)) return json(res, 400, { error: '能力目录版本无效。' });
+        return json(res, 200, await application.applicationAssistant.capabilities.read('app.capabilities', {
+          ...(requestURL.searchParams.has('section') ? { section: requestURL.searchParams.get('section') } : {}),
+          ...(schemaVersion !== null ? { schemaVersion: Number(schemaVersion) } : {}),
+        }));
+      }
+      if (req.method === 'GET' && path === '/api/app-assistant') return json(res, 200, application.applicationAssistant.get());
+      if (req.method === 'POST' && path === '/api/app-assistant/messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000)));
+      const assistantAction = path.match(/^\/api\/app-assistant\/turns\/([A-Za-z0-9_-]+)\/action$/);
+      if (req.method === 'POST' && assistantAction) return json(res, 200, application.applicationAssistant.action(assistantAction[1], await readJson(req, 4096)));
+      const diagnosticCapture = path.match(/^\/api\/app-diagnostics\/captures\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
+      if (req.method === 'GET' && diagnosticCapture) {
+        const file = await application.applicationAssistant.captureFile(diagnosticCapture[1], diagnosticCapture[2]);
+        const content = await readFile(file.path);
+        res.writeHead(200, { 'Content-Type': file.mimeType, 'Cache-Control': 'no-store', 'Content-Length': content.length });
+        return res.end(content);
+      }
       if (req.method === 'GET' && path === '/api/settings') return json(res, 200, await application.settings());
       if (req.method === 'POST' && path === '/api/settings') return json(res, 200, await application.saveSettings(await readJson(req)));
       if (req.method === 'GET' && path === '/api/models') return json(res, 200, await application.modelOptions());
@@ -66,7 +88,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         }
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
         res.write(': connected\n\n');
-        if (hasCursor) for (const event of application.events.filter(e => e.id > lastId)) res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
+        if (hasCursor) for (const event of application.events.filter(e => e.id > lastId && publicEvent(e))) res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
         clients.add(res);
         req.on('close', () => clients.delete(res));
         return;
@@ -201,6 +223,11 @@ export function createWorkbenchServer(config, application = new Application(conf
       }
       const artifactMatch = path.match(/^\/api\/workflow-v2\/artifacts\/([^/]+)$/);
       if (req.method === 'GET' && artifactMatch) {
+        if (req.headers['x-nodeorchard-diagnostic'] === 'readonly') {
+          const artifact = application.workflowFiles.getArtifact(decodeURIComponent(artifactMatch[1]));
+          const run = application.workflows.get(artifact.runId);
+          if (run.learningId || run.memoryScopeId || run.document?.mode === 'learn') return json(res, 403, { error: '诊断截图不能读取学习与验证样本产物。' });
+        }
         const { record, data } = await application.workflowFiles.readArtifact(decodeURIComponent(artifactMatch[1]));
         const download = requestURL.searchParams.get('download') === '1' || !/^(image\/|application\/pdf|text\/plain|application\/json)/.test(record.mimeType);
         res.writeHead(200, { 'Content-Type': record.mimeType, 'Content-Length': data.length, 'Cache-Control': 'no-store',
@@ -267,6 +294,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/hermes-model-ui.js': ['hermes-model-ui.js', 'text/javascript'],
         '/': ['index.html', 'text/html'],
         '/app.js': ['app.js', 'text/javascript'],
+        '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
+        '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],
         '/style.css': ['style.css', 'text/css'],
         '/workflow-editor.js': ['workflow-editor.js', 'text/javascript'],
@@ -293,6 +322,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       const sharedAssets = {
         '/shared/diagnostics.mjs': '../diagnostics.mjs',
         '/shared/workflow/workflow-components.mjs': 'workflow-components.mjs',
+        '/shared/workflow/workflow-capability-contract.mjs': 'workflow-capability-contract.mjs',
         '/shared/workflow/workflow-conversation-commands.mjs': 'workflow-conversation-commands.mjs',
         '/shared/workflow/workflow-dataset.mjs': 'workflow-dataset.mjs',
         '/shared/workflow/workflow-inputs.mjs': 'workflow-inputs.mjs',
@@ -321,6 +351,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       ...(Array.isArray(error.details) ? { errors: error.details } : {}) }); }
   });
   const onEvent = event => {
+    if (!publicEvent(event)) return;
     const frame = `id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of clients) {
       if (client.writableLength > 2000000 || client.destroyed) { client.destroy(); clients.delete(client); }
@@ -335,6 +366,7 @@ export function createWorkbenchServer(config, application = new Application(conf
     async listen() {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
       origin = `http://${config.host}:${server.address().port}`;
+      application.diagnosticBrowser?.setOrigin(origin);
       return origin;
     },
     async close() {

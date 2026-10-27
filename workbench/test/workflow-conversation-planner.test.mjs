@@ -10,6 +10,18 @@ function fixture(response) {
   return { calls, app: { learningModel: { generate: async (prompt, options) => { calls.push({ prompt, options }); return typeof response === 'function' ? response(prompt, options) : JSON.stringify(response); } } } };
 }
 
+test('planner receives bounded diagnostic findings and reports its model and validation stages', async () => {
+  const { app, calls } = fixture({ text: '依据已查到的采集错误提出建议。', operations: [] }), phases = [];
+  await planWorkflowConversation(app, { text: '修复失败', document: document(), onProgress: value => phases.push(value),
+    diagnosticEvidence: [{ tool: 'workflow.run', runId: 'run-old', error: 'FETCH_FAILED',
+      input: 'PRIVATE_RUN_INPUT', output: 'PRIVATE_OUTPUT', reasoning: 'PRIVATE_REASONING', token: 'PRIVATE_TOKEN' }] });
+  const source = JSON.parse(calls[0].prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(source.diagnosticEvidence[0].error, 'FETCH_FAILED');
+  for (const secret of ['PRIVATE_RUN_INPUT', 'PRIVATE_OUTPUT', 'PRIVATE_REASONING', 'PRIVATE_TOKEN']) assert.equal(calls[0].prompt.includes(secret), false);
+  assert.equal(typeof calls[0].options.onProgress, 'function');
+  assert.ok(phases.some(value => value.stage === 'validate-proposal'));
+});
+
 test('planner produces a validated proposal without applying, executing, approving or mutating workflow', async () => {
   const doc = document(), before = structuredClone(doc), { app, calls } = fixture({ text: '添加文本入口和输出，请预览后应用。', operations: [
     { op: 'add-node', ref: 'input', type: 'input', config: { outputType: 'text' } },
@@ -90,6 +102,59 @@ test('only actual catalog Skill refs and exact revisions can be proposed, with n
   assert.equal((await planWorkflowConversation(app, { text: '添加该 Skill', document: document() })).operations.length, 1); assert.equal(calls[0].prompt.includes('SKILL_CONTENT_SECRET'), false);
   response.operations[0].config.skillRef = 'invented'; await assert.rejects(planWorkflowConversation(app, { text: '添加', document: document() }), /不存在的 Skill/);
   response.operations[0].config.skillRef = 'real-skill'; response.operations[0].config.version = 'made-up-version'; await assert.rejects(planWorkflowConversation(app, { text: '添加', document: document() }), /未经目录确认/);
+});
+
+test('real metadata-only catalogs lazily pin only Skills used by a proposal without exposing their content', async () => {
+  const revision = 'sha256:' + 'a'.repeat(64), detailReads = [], doc = document(), before = structuredClone(doc);
+  const { app, calls } = fixture({ text: '使用真实 Skill 并固定本次版本。', operations: [
+    { op: 'add-node', ref: 'first', type: 'skill', config: { skillRef: 'github' } },
+    { op: 'add-node', ref: 'second', type: 'skill', config: { skillRef: 'github', version: '' } },
+  ] });
+  app.skills = async () => ({ connected: true, skills: Array.from({ length: 100 }, (_, index) => ({ name: index === 0 ? 'github' : 'unused-' + index, description: '仅目录元数据' })) });
+  app.skill = async ref => { detailReads.push(ref); return { name: ref, content: 'PRIVATE_SKILL_BODY', revision }; };
+  const result = await planWorkflowConversation(app, { text: '添加两个 GitHub Skill 节点', document: doc });
+  assert.deepEqual(detailReads, ['github']); assert.equal(calls.length, 1);
+  assert.ok(result.operations.every(operation => operation.config.version === revision));
+  assert.equal(calls[0].prompt.includes('PRIVATE_SKILL_BODY'), false); assert.equal(JSON.stringify(result).includes('PRIVATE_SKILL_BODY'), false); assert.deepEqual(doc, before);
+});
+
+test('switching a Skill pins its new reference while an untouched existing version stays fixed', async () => {
+  const doc = document(), oldRevision = 'sha256:' + 'b'.repeat(64), newRevision = 'sha256:' + 'c'.repeat(64), reads = [];
+  doc.nodes = [createNode('skill', {}, { id: 'replace', config: { skillRef: 'old-skill', version: oldRevision } }),
+    createNode('skill', {}, { id: 'keep', config: { skillRef: 'old-skill', version: oldRevision } })];
+  const { app } = fixture({ text: '仅更换指定 Skill。', operations: [{ op: 'update-node', nodeId: 'replace', config: { skillRef: 'xlsx' } }, { op: 'update-node', nodeId: 'keep', title: '保留固定版本' }] });
+  app.skills = async () => ({ skills: [{ name: 'old-skill' }, { name: 'xlsx' }] });
+  app.skill = async ref => { reads.push(ref); return { name: ref, revision: newRevision, content: 'PRIVATE_REPLACEMENT_BODY' }; };
+  const result = await planWorkflowConversation(app, { text: '只将第一个节点换为 xlsx', document: doc });
+  assert.deepEqual(reads, ['xlsx']); assert.equal(result.operations[0].config.version, newRevision); assert.equal(result.operations[1].config, undefined); assert.equal(doc.nodes[1].config.version, oldRevision);
+});
+
+test('reselecting the same fixed Skill preserves its old version even if the proposal leaves version empty', async () => {
+  const doc = document(), revision = 'sha256:' + 'e'.repeat(64); doc.nodes = [createNode('skill', {}, { id: 'pinned', config: { skillRef: 'github', version: revision } })];
+  const { app } = fixture({ text: '调整名称并保留原版本。', operations: [{ op: 'update-node', nodeId: 'pinned', title: '新的节点名称', config: { skillRef: 'github', version: '' } }] });
+  app.skills = async () => ({ skills: [{ name: 'github' }] }); app.skill = async () => { throw Error('must not read a new version'); };
+  const result = await planWorkflowConversation(app, { text: '改名，保持原来的 Skill', document: doc }); assert.equal(result.operations[0].config.version, revision);
+});
+
+test('invalid graph proposals never read Skill details and cancellation after a detail read never returns a proposal', async () => {
+  const malformed = fixture({ text: '无效结构。', operations: [{ op: 'add-node', ref: 'skill', type: 'skill', config: { skillRef: 'github' } }, { op: 'connect', sourceNode: 'missing', sourcePort: 'out', targetNode: 'skill', targetPort: 'in' }] }); let reads = 0;
+  malformed.app.skills = async () => ({ skills: [{ name: 'github' }] }); malformed.app.skill = async () => { reads++; return {}; };
+  await assert.rejects(planWorkflowConversation(malformed.app, { text: '测试无效结构', document: document() }), /无效/); assert.equal(reads, 0);
+  const controller = new AbortController(), cancelled = fixture({ text: '添加真实 Skill。', operations: [{ op: 'add-node', ref: 'skill', type: 'skill', config: { skillRef: 'github' } }] });
+  cancelled.app.skills = async () => ({ skills: [{ name: 'github' }] }); cancelled.app.skill = async () => { controller.abort(); return { name: 'github', revision: 'sha256:' + 'f'.repeat(64), content: 'PRIVATE_CANCELLED_CONTENT' }; };
+  await assert.rejects(planWorkflowConversation(cancelled.app, { text: '添加节点', document: document(), signal: controller.signal }), /已停止/); assert.equal(cancelled.calls.length, 1);
+});
+
+test('discussion does not fetch Skill bodies and unavailable exact versions fail without a model repair', async () => {
+  const discussion = fixture({ text: '解释这个工作流。', operations: [] }); let reads = 0;
+  discussion.app.skills = async () => ({ skills: [{ name: 'github' }] }); discussion.app.skill = async () => { reads++; throw Error('PRIVATE_DETAIL_ERROR'); };
+  await planWorkflowConversation(discussion.app, { text: '解释流程', document: document() }); assert.equal(reads, 0);
+  for (const detail of [null, { name: 'other', revision: 'sha256:' + 'd'.repeat(64) }, { name: 'github', revision: 'invalid' }]) {
+    const { app, calls } = fixture({ text: '添加 GitHub。', operations: [{ op: 'add-node', ref: 'github', type: 'skill', config: { skillRef: 'github' } }] });
+    app.skills = async () => ({ skills: [{ name: 'github' }] }); app.skill = async () => { if (!detail) throw Error('PRIVATE_DETAIL_ERROR'); return detail; };
+    await assert.rejects(planWorkflowConversation(app, { text: '添加 GitHub', document: document() }), error => /无法确认.*固定版本/.test(error.message) && !error.message.includes('PRIVATE_DETAIL_ERROR'));
+    assert.equal(calls.length, 1);
+  }
 });
 
 test('existing pinned Skills remain valid while catalog is disconnected', async () => {

@@ -13,6 +13,25 @@ const TURN_STATUS = { thinking: '正在思考', queued: '正在准备', proposed
 const unresolved = turn => ['thinking', 'queued', 'proposed', 'awaiting_action', 'error', 'interrupted'].includes(turn.status) && !turn.outcome?.applied;
 const image = item => /^image\//.test(item.mimeType || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(item.name || item.path || '');
 const safeArtifactURL = value => typeof value === 'string' && /^\/api\/workflow-v2\/artifacts\/[A-Za-z0-9_-]+(?:\?download=1)?$/.test(value) ? value : null;
+const duration = milliseconds => { const seconds = Math.floor(Math.max(0, milliseconds || 0) / 1000); return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; };
+const elapsed = (startedAt, end, fallback = 0) => Number.isFinite(Date.parse(startedAt)) && Number.isFinite(end) ? Math.max(0, end - Date.parse(startedAt)) : Math.max(0, Number(fallback) || 0);
+
+// Only stage metadata belongs in the message bubble. Checkpoint results are
+// evidence for the broker and may contain large logs or business documents.
+export function conversationDiagnosticProgress(turn, at = Date.now()) {
+  const progress = turn?.assistant?.progress, checkpoint = turn?.assistant?.checkpoint;
+  if (!progress && !checkpoint?.steps?.length) return null;
+  const active = ['thinking', 'queued'].includes(turn.status), end = active ? at : Date.parse(progress?.completedAt || turn.updatedAt);
+  const steps = (checkpoint?.steps || []).slice(-40).map(step => ({ label: clean(step.label || step.tool || step.stage || '检查').slice(0, 240),
+    status: step.status, elapsedMs: Number(step.elapsedMs) || 0, ...(step.error ? { error: clean(step.error).slice(0, 400) } : {}) }));
+  return { label: clean(progress?.label || steps.at(-1)?.label || '整理诊断结果').slice(0, 240), active,
+    elapsedMs: active ? elapsed(progress?.startedAt, at, progress?.elapsedMs) : Number.isFinite(progress?.elapsedMs) ? progress.elapsedMs : elapsed(progress?.startedAt, end),
+    totalElapsedMs: elapsed(turn.createdAt, active ? at : Date.parse(turn.updatedAt), progress?.elapsedMs),
+    modelCalls: Math.max(0, Number(progress?.modelCalls) || 0), toolCalls: Math.max(0, Number(progress?.toolCalls) || 0), steps,
+    completed: steps.filter(step => ['complete', 'cached'].includes(step.status)).length,
+    failed: steps.filter(step => ['error', 'interrupted'].includes(step.status)).length };
+}
+
 // Scope is captured when sending a turn, never read again from the selection
 // when an asynchronous answer arrives. Artifact identity is bound to an attempt.
 export function conversationContext(document, run, nodeId, attachment = {}) {
@@ -37,7 +56,8 @@ export const canDismissConversationTurn = turn => ['proposed', 'error', 'interru
 export const isConversationRunCommand = value => /^(?:(?:请|帮我)\s*)?(?:运行|开始运行|立即运行|直接运行|运行一次|执行|开始执行|直接执行|运行当前流程|运行流程|执行当前流程)[。！!\s]*$/.test(value.trim());
 
 export class WorkflowConversationUI {
-  constructor(editor, { api, getBackend = () => null }) {
+  constructor(editor, { api, getBackend = () => null, getPageDiagnostics = () => ({}) }) {
+    this.getPageDiagnostics = getPageDiagnostics;
     this.editor = editor; this.api = api; this.getBackend = getBackend; this.states = new Map(); this.runtime = null; this.workflowId = null; this.attachment = null; this.destroyed = false; this.applied = new Map(); this.actionPending = new Set();
     this.mount(); this.syncWorkflow();
   }
@@ -122,6 +142,18 @@ export class WorkflowConversationUI {
     finally { if (request === state.request) { state.loading = false; if (this.workflowId === id) this.render(); } }
   }
   schedulePoll() { clearTimeout(this.pollTimer); if (this.destroyed || !this.state().conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) return; this.pollTimer = setTimeout(() => void this.load(true), 3000); }
+  scheduleProgressClock() {
+    clearTimeout(this.progressTimer);
+    if (this.destroyed || this.panel?.hidden || !this.state().conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status) && turn.assistant?.progress)) return;
+    // Update text in place so opening the saved steps does not collapse on a
+    // clock tick. This timer never reads the API or starts another model call.
+    this.progressTimer = setTimeout(() => {
+      for (const clock of this.messages.querySelectorAll('[data-diagnostic-clock]')) {
+        clock.textContent = duration(elapsed(clock.dataset.startedAt, Date.now(), clock.dataset.elapsedMs));
+      }
+      this.scheduleProgressClock();
+    }, 1000);
+  }
   onEvent(event) {
     if (event?.type === 'workflow.document' || event?.name === 'workflow.document') { const id = (event.payload || event.data)?.workflow?.id; if (id === this.workflowId && !this.state().loaded && !this.state().loading) void this.load(true); return; }
     if (event?.type === 'workflow.run' || event?.name === 'workflow.run') {
@@ -198,6 +230,27 @@ export class WorkflowConversationUI {
     this.runButton.disabled = this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested) || !this.currentDocument()?.nodes?.length || Boolean(this.runtime?.starting);
     this.refreshButton.disabled = state.loading;
     if (followLatest) this.messages.scrollTop = this.messages.scrollHeight;
+    this.scheduleProgressClock();
+  }
+  diagnosticProgressView(turn) {
+    const progress = conversationDiagnosticProgress(turn); if (!progress) return null;
+    const box = element('div', 'wf-conversation-diagnostic-progress'), line = element('p', 'wf-conversation-diagnostic-stage');
+    line.append(element('span', '', `${progress.active ? '当前阶段' : ['error', 'interrupted'].includes(turn.status) ? '停止位置' : '最后阶段'}：${progress.label}`));
+    const clock = element('span', 'wf-conversation-diagnostic-time', duration(progress.elapsedMs));
+    if (progress.active && turn.assistant.progress?.startedAt) { clock.dataset.diagnosticClock = 'stage'; clock.dataset.startedAt = turn.assistant.progress.startedAt; clock.dataset.elapsedMs = String(progress.elapsedMs); }
+    line.append(clock); box.append(line);
+    const metrics = element('p', 'wf-conversation-message-scope'), total = element('span', '', duration(progress.totalElapsedMs));
+    if (progress.active && turn.createdAt) { total.dataset.diagnosticClock = 'total'; total.dataset.startedAt = turn.createdAt; total.dataset.elapsedMs = String(progress.totalElapsedMs); }
+    metrics.append(element('span', '', '本轮已用 '), total, element('span', '', ` · 模型 ${progress.modelCalls} 次 · 工具 ${progress.toolCalls} 项`)); box.append(metrics);
+    if (progress.steps.length) {
+      const details = element('details', 'wf-conversation-diagnostic-steps');
+      details.append(element('summary', '', `诊断进度 · 已完成 ${progress.completed} 项${progress.failed ? ` · 未完成 ${progress.failed} 项` : ''}`));
+      const list = element('ol');
+      const statuses = { running: '进行中', complete: '已完成', cached: '已复用', error: '失败', interrupted: '已停止' };
+      for (const step of progress.steps) { const item = element('li', ['error', 'interrupted'].includes(step.status) ? 'wf-conversation-error' : ''); item.append(element('span', '', `${step.label} · ${statuses[step.status] || '已记录'}${step.elapsedMs ? ` · ${duration(step.elapsedMs)}` : ''}`)); if (step.error) item.append(element('p', '', step.error)); list.append(item); }
+      details.append(list); box.append(details);
+    }
+    return box;
   }
   turnView(turn, latest = false) {
     const section = element('section', 'wf-conversation-turn' + (latest ? ' is-latest' : '')); section.dataset.turnId = turn.id;
@@ -205,8 +258,23 @@ export class WorkflowConversationUI {
     const context = turn.user?.context || {}; const scope = element('p', 'wf-conversation-message-scope', this.describeContext(context).join(' / ')); user.append(scope); section.append(user);
     const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', TURN_STATUS[turn.status] || '已记录')); assistant.append(meta);
     const text = turn.assistant?.text || turn.error?.message || (typeof turn.error === 'string' ? turn.error : '') || (['thinking', 'queued'].includes(turn.status) ? '正在结合当前流程和明确选择的对象生成回复…' : '已保存本次对话。'); assistant.append(element('p', 'wf-conversation-prose', text));
+    const progress = this.diagnosticProgressView(turn); if (progress) assistant.append(progress);
     if (Array.isArray(turn.assistant?.summary) && turn.assistant.summary.length) { const list = element('ul', 'wf-conversation-plan-summary'); for (const item of turn.assistant.summary) list.append(element('li', '', item)); assistant.append(list); }
     if (turn.assistant?.operations?.length) assistant.append(this.proposalView(turn));
+    if (turn.assistant?.evidence?.length) {
+      const details = element('details', 'wf-conversation-evidence'); details.append(element('summary', '', `已检查 ${turn.assistant.evidence.length} 项证据`));
+      for (const receipt of turn.assistant.evidence) {
+        details.append(element('p', 'wf-conversation-message-scope', `${receipt.tool} · ${receipt.status === 'error' ? '未完成' : '已完成'}`));
+        for (const file of receipt.files || []) if (/^\/api\/app-diagnostics\/captures\/[\w-]+\/[\w.-]+$/.test(file.url || '')) {
+          const link = element('a', 'wf-conversation-link', file.name || '查看诊断资料'); link.href = file.url; link.target = '_blank'; link.rel = 'noopener'; details.append(link);
+        }
+      }
+      assistant.append(details);
+    }
+    if (['thinking', 'queued'].includes(turn.status)) assistant.append(button('停止本次分析', async () => {
+      try { this.accept(await this.api(`/api/workflow-conversations/${encodeURIComponent(this.workflowId)}/turns/${encodeURIComponent(turn.id)}/action`, { method: 'POST', body: { action: 'interrupt-turn' } })); }
+      catch (error) { this.state().error = error.message; this.renderNotice(); }
+    }, 'wf-conversation-link'));
     if (Array.isArray(turn.actions) && turn.actions.length && !turn.outcome && !['complete', 'applied', 'dismissed'].includes(turn.status)) { const actions = element('div', 'wf-conversation-actions'); for (const action of turn.actions.filter(item => item.kind !== 'mark-applied')) { const item = button(action.label || action.kind, () => void this.performAction(turn, action), 'wf-button' + (action.kind === 'review-approve' ? ' primary' : '')); item.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:${action.id}`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(item); if (action.context?.nodeId || action.context?.runId) actions.append(element('p', 'wf-conversation-message-scope', this.describeContext(action.context).join(' / '))); } if (actions.children.length) assistant.append(actions); }
     if (turn.outcome) { const uncertain = ['rejected', 'unknown', 'started'].includes(turn.outcome.status), outcome = element('p', uncertain ? 'wf-conversation-error' : 'wf-conversation-outcome', uncertain ? turn.outcome.error || '操作结果尚未确认，请核对当前运行状态。系统不会自动重复操作。' : turn.outcome.label || turn.outcome.message || (turn.outcome.action === 'mark-applied' || turn.outcome.applied ? '节点修改已应用，可使用画布撤销。' : '操作已记录。')); assistant.append(outcome); }
     if (['error', 'interrupted'].includes(turn.status)) assistant.append(button('载入消息重试', () => { const state = this.state(); state.draft = turn.user?.text || ''; state.intent = 'auto'; this.focusContext(turn.user?.context || {}); this.render(); this.input.focus(); }, 'wf-button'));
@@ -296,7 +364,7 @@ export class WorkflowConversationUI {
       finally { state.sending = false; if (this.workflowId === id) this.render(); }
       return;
     }
-    const request = retry || { text, intent: state.intent, context: clone(this.getContext()), clientMessageId: crypto.randomUUID() }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
+    const request = retry || { text, intent: state.intent, context: clone(this.getContext()), page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID() }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
     try {
       const document = request.document; if (document.id !== id || this.currentDocument().id !== id) throw new Error('工作流已切换，请在对应工作流中发送。');
       const snapshot = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { ...request, document } }); this.accept(snapshot, id);
@@ -339,5 +407,5 @@ export class WorkflowConversationUI {
     catch (error) { this.state(id).error = `结束事项未确认：${error.message}。对话记录仍保留。`; }
     finally { this.actionPending.delete(key); if (this.workflowId === id) this.render(); }
   }
-  destroy() { this.destroyed = true; clearTimeout(this.pollTimer); clearTimeout(this.pendingRefreshTimer); this.finishResize?.(); this.panel?.remove(); this.openButton?.remove(); this.editor.root.classList.remove('wf-chat-enabled', 'wf-chat-open'); }
+  destroy() { this.destroyed = true; clearTimeout(this.pollTimer); clearTimeout(this.pendingRefreshTimer); clearTimeout(this.progressTimer); this.finishResize?.(); this.panel?.remove(); this.openButton?.remove(); this.editor.root.classList.remove('wf-chat-enabled', 'wf-chat-open'); }
 }

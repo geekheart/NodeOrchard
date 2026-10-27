@@ -35,5 +35,7 @@ export function readConfig(env = process.env) {
     hermesPython: env.WORKBENCH_HERMES_PYTHON || join(hermesRoot, 'venv/bin/python'),
     hermesHome: env.WORKBENCH_HERMES_HOME || join(homedir(), '.hermes'),
     hermesVersion,
+    diagnosticChromePath: env.WORKBENCH_DIAGNOSTIC_CHROME || undefined,
+    diagnosticFfmpegPath: env.WORKBENCH_DIAGNOSTIC_FFMPEG || undefined,
   };
 }

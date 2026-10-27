@@ -66,7 +66,7 @@ function builtin(toolName, input) {
   }
 }
 
-function minimalEnvironment(context) {
+export function minimalEnvironment(context) {
   const env = {};
   for (const key of ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR']) {
     if (typeof process.env[key] === 'string') env[key] = process.env[key];

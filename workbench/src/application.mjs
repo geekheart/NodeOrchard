@@ -18,6 +18,9 @@ import { WorkflowFeedback } from './workflows/workflow-feedback.mjs';
 import { WorkflowFiles } from './workflows/workflow-files.mjs';
 import { WorkflowNodePresets } from './workflows/workflow-node-presets.mjs';
 import { WorkflowConversations } from './workflows/workflow-conversations.mjs';
+import { AppDiagnostics } from './app-diagnostics.mjs';
+import { ApplicationAssistant } from './application-assistant.mjs';
+import { createAppDiagnosticBrowser } from './app-diagnostic-browser.mjs';
 
 function infoView(info = {}) {
   return Object.fromEntries(['model', 'provider', 'version', 'cwd', 'running', 'yolo', 'approval_mode', 'tools', 'skills', 'credential_warning']
@@ -73,6 +76,10 @@ export class Application extends EventEmitter {
     this.schedules = new WorkflowSchedules(this);
     this.workflowLibrary = new WorkflowLibrary(this);
     this.nodePresets = new WorkflowNodePresets(this);
+    this.assistantModel = new LearningModel(this, { purpose: 'assistant' });
+    this.diagnostics = new AppDiagnostics(this);
+    this.diagnosticBrowser = createAppDiagnosticBrowser({ dataDir: config.dataDir, chromePath: config.diagnosticChromePath, ffmpegPath: config.diagnosticFfmpegPath });
+    this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
   }
 
@@ -100,8 +107,8 @@ export class Application extends EventEmitter {
   }
 
   bootstrap() {
-    return { backend: { ...this.backend }, sessions: this.store.list().map(session => ({
-      ...session, workflowManaged: this.workflows.ownsSession(session.id) || this.learningModel.ownsSession(session.id),
+    return { backend: { ...this.backend }, sessions: this.store.list().filter(session => !this.assistantModel.ownsSession(session.id)).map(session => ({
+      ...session, workflowManaged: this.workflows.ownsSession(session.id) || this.learningModel.ownsSession(session.id) || this.assistantModel.ownsSession(session.id),
     })), requests: [...this.requests.values()] };
   }
 
@@ -270,7 +277,8 @@ export class Application extends EventEmitter {
     return snapshot;
   }
 
-  async createSession({ title = '', cwd = '', modelRoute } = {}) {
+  async createSession({ title = '', cwd = '', modelRoute, managedPurpose } = {}) {
+    if (managedPurpose !== undefined && managedPurpose !== 'assistant') throw new Error('托管会话用途无效。');
     this.checkReady();
     await assertHermesPolicy(this.adapter);
     const route = modelRoute || await this.captureModelRoute();
@@ -284,13 +292,14 @@ export class Application extends EventEmitter {
     this.checkReady();
     const session = this.store.create({ title: String(title || '新任务').slice(0, 120), cwd: directory,
       storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model: snapshot.info.model, provider: snapshot.info.provider });
-    this.publish('session.updated', session.id, session);
+    if (managedPurpose === 'assistant') this.store.db.prepare('INSERT OR IGNORE INTO application_model_sessions(id) VALUES(?)').run(session.id);
+    else this.publish('session.updated', session.id, session);
     return session;
   }
 
   updateSession(id, changes) {
     const session = this.store.update(id, changes);
-    this.publish('session.updated', id, { ...session, workflowManaged: this.workflows?.ownsSession(id) || this.learningModel?.ownsSession(id) || false });
+    this.publish('session.updated', id, { ...session, workflowManaged: this.workflows?.ownsSession(id) || this.learningModel?.ownsSession(id) || this.assistantModel?.ownsSession(id) || false });
     return session;
   }
   session(id) {
@@ -322,7 +331,7 @@ export class Application extends EventEmitter {
             provider: current.provider, model: current.model });
         } else {
           try {
-            const managed = this.workflows.ownsSession(id) || this.learningModel.ownsSession(id);
+            const managed = this.workflows.ownsSession(id) || this.learningModel.ownsSession(id) || this.assistantModel.ownsSession(id);
             snapshot = await this.adapter.request('session.resume', { session_id: current.storedSessionId, source: 'tui',
               ...(managed ? { lazy: true } : {}) });
             if (managed) {
@@ -394,13 +403,16 @@ export class Application extends EventEmitter {
     return { messages: history.messages || [], info: this.sessionInfo.get(session.runtimeSessionId) || {} };
   }
 
-  async submit(id, text, { workflowRunId, learningRequestId } = {}) {
+  async submit(id, text, { workflowRunId, learningRequestId, assistantRequestId } = {}) {
     this.checkReady();
     if (this.workflows.ownsSession(id) && !this.workflows.allowsSubmit(id, workflowRunId)) {
       throw Object.assign(new Error('这是工作流的固定运行会话。请回到工作流页面发起新的执行；此处保留历史、审批和停止操作。'), { httpStatus: 409 });
     }
     if (this.learningModel.ownsSession(id) && !this.learningModel.allowsSubmit(id, learningRequestId)) {
       throw Object.assign(new Error('这是学习控制会话，只能从学习面板发起评价或调整；此处可查看历史。'), { httpStatus: 409 });
+    }
+    if (this.assistantModel.ownsSession(id) && !this.assistantModel.allowsSubmit(id, assistantRequestId)) {
+      throw Object.assign(new Error('这是应用对话的受限控制会话，请从右侧对话继续。'), { httpStatus: 409 });
     }
     if (typeof text !== 'string' || !text.trim() || text.length > 200000) throw new Error('请输入有效消息（最多 200000 字符）。');
     if (this.busyMutations.has(id)) throw Object.assign(new Error('此会话正在提交，请稍候。'), { httpStatus: 409 });
@@ -417,6 +429,7 @@ export class Application extends EventEmitter {
       if (this.learningModel.ownsSession(id) && !this.learningModel.allowsSubmit(id, learningRequestId)) {
         throw Object.assign(new Error('学习模型调用已停止或不再接受提交。'), { httpStatus: 409 });
       }
+      if (this.assistantModel.ownsSession(id) && !this.assistantModel.allowsSubmit(id, assistantRequestId)) throw Object.assign(new Error('应用诊断已停止，未提交。'), { httpStatus: 409 });
       if (['running', 'waiting'].includes(session.status)) throw Object.assign(new Error('此会话正在执行；请等待或停止后再发送。'), { httpStatus: 409 });
       this.store.beginRun(id);
       this.publish('session.updated', id, this.store.get(id));
@@ -522,6 +535,9 @@ export class Application extends EventEmitter {
   async close() {
     if (this.closed) return;
     await this.conversations.close();
+    await this.applicationAssistant.close();
+    await this.assistantModel.close();
+    await this.diagnosticBrowser.close?.();
     await this.schedules.close();
     await this.learning.close();
     await this.learningModel.close();

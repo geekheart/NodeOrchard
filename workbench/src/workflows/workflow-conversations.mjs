@@ -2,17 +2,25 @@ import { randomUUID, createHash } from 'node:crypto';
 import { validateDocument, getPorts } from '../../shared/workflow/workflow-model.mjs';
 import { planWorkflow, learningBranch } from '../../shared/workflow/workflow-plan.mjs';
 import { planWorkflowConversation } from './workflow-conversation-planner.mjs';
+import { sanitizeDiagnosticEvidence } from '../app-diagnostics.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../../shared/workflow/workflow-conversation-commands.mjs';
 import { redact } from '../hermes-adapter.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
-const ACTIONS = new Set(['review-approve', 'review-revise', 'review-stop', 'rerun', 'record-feedback', 'learn-feedback', 'mark-applied', 'dismiss-turn', 'select-run', 'select-learning-target']);
+const ACTIONS = new Set(['review-approve', 'review-revise', 'review-stop', 'rerun', 'record-feedback', 'learn-feedback', 'mark-applied', 'dismiss-turn', 'select-run', 'select-learning-target', 'interrupt-turn']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const clone = value => JSON.parse(JSON.stringify(value));
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const now = () => new Date().toISOString();
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function finishDiagnostic(assistant, status, message) {
+  const completedAt = now(), elapsed = value => Number.isFinite(Date.parse(value)) ? Math.max(0, Date.parse(completedAt) - Date.parse(value)) : 0;
+  if (assistant.progress) assistant.progress = { ...assistant.progress, status, completedAt, elapsedMs: elapsed(assistant.progress.startedAt) };
+  if (assistant.checkpoint) assistant.checkpoint = { ...assistant.checkpoint, updatedAt: completedAt,
+    steps: (assistant.checkpoint.steps || []).map(step => step.status === 'running' ? { ...step, status, completedAt,
+      elapsedMs: elapsed(step.startedAt), ...(message && status !== 'complete' ? { error: message } : {}) } : step) };
+}
 function identifier(value, label = 'ID') {
   if (typeof value !== 'string' || !ID.test(value) || RESERVED.has(value)) fail(`${label}无效。`);
   return value;
@@ -85,7 +93,7 @@ const artifactView = artifact => Object.fromEntries(['id', 'name', 'label', 'mim
 // The conversation is an interaction record. Run documents and artifacts remain
 // the execution facts; model suggestions never grant operational authority.
 export class WorkflowConversations {
-  constructor(app, { planner = planWorkflowConversation } = {}) {
+  constructor(app, { planner = (app, options) => app.applicationAssistant ? app.applicationAssistant.plan(options) : planWorkflowConversation(app, options) } = {}) {
     this.app = app; this.db = app.store.db; this.planner = planner; this.active = new Map(); this.mutations = new Set(); this.closed = false;
     this.onEvent = event => {
       if (event.type !== 'workflow.lifecycle' || this.closed) return;
@@ -105,6 +113,7 @@ export class WorkflowConversations {
       const turn = JSON.parse(row.value);
       if (turn.status === 'thinking' || turn.outcome?.status === 'started') {
         turn.status = 'interrupted'; turn.updatedAt = now();
+        finishDiagnostic(turn.assistant, 'interrupted', '服务重启，未自动重复操作。');
         turn.assistant = { ...turn.assistant, text: turn.outcome?.status === 'started'
           ? '上次操作的最终结果尚未确认，请查看运行状态；系统不会自动重复操作。' : '对话生成因服务重启中断，可以重新发送要求。' };
         if (turn.outcome?.status === 'started') turn.outcome.status = 'unknown';
@@ -354,7 +363,7 @@ export class WorkflowConversations {
   }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
-    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent'], '对话请求');
+    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page'], '对话请求');
     identifier(input.clientMessageId, '消息幂等 ID'); text(input.text, '消息');
     if (input.intent !== undefined && !['auto', 'workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
     const document = safeDocument(input.document, workflowId), requestDigest = digest(input);
@@ -372,7 +381,7 @@ export class WorkflowConversations {
       user: { text: input.text, context: bound.context, intent },
       assistant: { text: '正在整理你的要求…' }, actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
-      .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic }));
+      .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic, page: input.page ? sanitizeDiagnosticEvidence(input.page) : null }));
     this.update(turn);
     const direct = directIntent(input.text, intent);
     if (direct) {
@@ -412,23 +421,43 @@ export class WorkflowConversations {
   }
   async generate(turn, document, bound, controller) {
     try {
-      const history = this.get(turn.workflowId).conversation.turns.filter(item => item.id !== turn.id && item.status !== 'thinking').slice(-10)
+      const previousTurns = this.get(turn.workflowId).conversation.turns.filter(item => item.id !== turn.id && item.status !== 'thinking');
+      // The broker validates scope and freshness before reusing read-only facts.
+      // A previous checkpoint never authorizes replaying proposals or operations.
+      const checkpoint = previousTurns.findLast(item => ['error', 'interrupted'].includes(item.status) && item.assistant?.checkpoint)?.assistant.checkpoint;
+      const history = previousTurns.slice(-10)
         .flatMap(item => [{ role: 'user', text: item.user.text.slice(0, 3000) }, { role: 'assistant', text: item.assistant.text.slice(0, 3000) }]);
       // Never send inputs, outputs, artifact contents, training samples or validation
       // records to this planning session. Only the selected execution metadata.
       const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
-      const result = await this.planner(this.app, { text: turn.user.text, document, context, history, signal: controller.signal,
+      const page = this.readTurn(turn.workflowId, turn.id).privateValue.page;
+      const result = await this.planner(this.app, { text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
+        onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
+          turn.assistant.text = message; if (progress) turn.assistant.progress = clone(progress);
+          turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
+        } },
+        onCheckpoint: value => { if (!this.closed) {
+          turn.assistant.checkpoint = clone(value); turn.assistant.evidence = clone(value.evidence || []);
+          turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
+        } },
         onSession: sessionId => { if (!this.closed) { turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.update(turn); } } });
       if (this.closed || controller.signal.aborted) return;
       this.app.workflowLibrary.assertRunnable(turn.workflowId);
-      turn.assistant = { text: text(result.text || result.summary || '已生成建议。', 'AI 回复', { max: 24000 }),
+      turn.assistant = { ...turn.assistant, text: text(result.text || result.summary || '已生成建议。', 'AI 回复', { max: 24000 }),
+        ...(result.evidence?.length ? { evidence: result.evidence } : {}),
         ...(result.operations?.length ? { operations: clone(result.operations), baseFingerprint: result.baseFingerprint || documentFingerprint(document), summary: result.summary || '' } : {}) };
       turn.status = result.operations?.length ? 'proposed' : 'complete'; turn.updatedAt = now();
+      finishDiagnostic(turn.assistant, 'complete');
       if (result.operations?.length) turn.actions = [{ id: 'action-' + randomUUID(), kind: 'mark-applied', label: '应用到画布', context: turn.user.context }];
       this.update(turn); this.emit(turn.workflowId);
     } catch (error) {
-      if (!this.closed) { turn.status = controller.signal.aborted ? 'interrupted' : 'error'; turn.assistant = { text: redact(error.message).slice(0, 4000) }; turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId); }
+      if (!this.closed) {
+        turn.status = controller.signal.aborted ? 'interrupted' : 'error';
+        turn.assistant = { ...turn.assistant, text: redact(error.message).slice(0, 4000) };
+        finishDiagnostic(turn.assistant, turn.status, turn.assistant.text);
+        turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
+      }
     } finally { this.active.delete(turn.id); }
   }
   selectedLearningTargets(bound) {
@@ -460,6 +489,7 @@ export class WorkflowConversations {
     const key = workflowId + ':' + turnId;
     if (this.mutations.has(key)) fail('此回复正在处理中，请稍候。', 409);
     const { turn, privateValue } = this.readTurn(workflowId, turnId);
+    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return { ...this.get(workflowId), turn }; }
     if (input.action === 'dismiss-turn') {
       if (turn.status === 'dismissed') return { ...this.get(workflowId), turn };
       if (!['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn.status)) fail('只能结束尚未解决的建议或失败事项。', 409);
@@ -550,7 +580,7 @@ export class WorkflowConversations {
       const row = this.db.prepare('SELECT workflow_id FROM workflow_conversation_turns WHERE id=?').get(id);
       if (!row) continue;
       const { turn } = this.readTurn(row.workflow_id, id); turn.status = 'interrupted'; turn.assistant.text = '对话生成已停止；系统不会自动重放。';
-      turn.updatedAt = now(); this.update(turn);
+      finishDiagnostic(turn.assistant, 'interrupted', turn.assistant.text); turn.updatedAt = now(); this.update(turn);
     }
     this.active.clear();
   }

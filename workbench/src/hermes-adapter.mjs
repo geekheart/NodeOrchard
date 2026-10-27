@@ -49,6 +49,7 @@ export class HermesAdapter extends EventEmitter {
       HERMES_YOLO_MODE: '0',
       HERMES_DISABLE_LAZY_INSTALLS: '1',
       WORKBENCH_GATEWAY_WORKSPACE_ROOT: c.workspaceRoot,
+      WORKBENCH_DIAGNOSTICS_ROOT: join(c.dataDir, 'diagnostics'),
     };
     delete env.HERMES_TUI_SIDECAR_URL;
     // Hermes config owns the model; inherited launch overrides must not shadow

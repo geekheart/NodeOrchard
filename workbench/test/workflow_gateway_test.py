@@ -1,11 +1,13 @@
 """Pure stdlib tests: no Hermes imports, credentials, gateway, or model calls."""
 
 from contextlib import contextmanager
+import base64
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -71,6 +73,15 @@ class FakeAgent:
         self._user_profile_enabled = True
         self._cached_system_prompt = "initial live memory block"
         self._cached_system_prompt_static = "initial static prefix"
+        self.api_mode = "responses"
+        self.turn_calls = []
+
+    def run_conversation(self, user_message, conversation_history=None, persist_user_message=None, **kwargs):
+        self.turn_calls.append((user_message, persist_user_message, kwargs))
+        return {"messages": [{"role": "user", "content": user_message}], "completed": True}
+
+    def _run_codex_app_server_turn(self, **kwargs):
+        raise AssertionError("a native subprocess runtime must never run")
 
     def _spawn_background_review(self, messages_snapshot, review_memory=False, review_skills=False, focus=None, explicit=False):
         self.review_calls.append(("queued", review_memory, review_skills))
@@ -228,6 +239,7 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.assertFalse(self.agent.skip_background_review)
         self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy"})
         self.assertEqual(set(self.server.methods), {"workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish", "workbench.learning.prepare",
+                                                   "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history",
                                                    "workbench.learning.memory.capture", "workbench.learning.memory.release", "workbench.learning.memory.restore"})
         self.assertIn("workbench.skill.prepare", self.server._LONG_HANDLERS)
         self.assertTrue(self.server.scopes)
@@ -593,6 +605,241 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.agent.commit_memory_session([{"content": "ordinary input"}])
         self.assertEqual(self.agent.review_calls, [("queued", True, False)])
         self.assertEqual(manager.calls, [("sync", "ordinary input", "ordinary output"), ("session_end", [{"content": "ordinary input"}])])
+
+    def test_assistant_preparation_disables_native_tools_memory_and_skill_mutation(self):
+        store, manager = self.agent._memory_store, self.agent._memory_manager
+        with patch.object(store, "format_for_system_prompt", side_effect=AssertionError("assistant must not read learning memory")):
+            response = self.server.methods["workbench.assistant.prepare"](70, {"session_id": "runtime-session"})
+        self.assertEqual(response["result"], {"policy": {
+            "toolsAllowed": False, "applicationTools": "broker-only", "sourceMutationBlocked": True,
+            "skillMutationBlocked": True, "memoryAllowed": False, "memoryWriteAllowed": False,
+            "externalMemoryAllowed": False}})
+        self.assertIn("workbench.assistant.prepare", self.server._LONG_HANDLERS)
+        self.assertEqual(self.agent.tools, [])
+        self.assertEqual(self.agent.valid_tool_names, set())
+        self.assertIsNone(self.agent._memory_store)
+        self.assertIsNone(self.agent._memory_manager)
+        self.assertFalse(self.agent._memory_enabled)
+        self.assertFalse(self.agent._user_profile_enabled)
+        self.assertIsNone(self.agent._cached_system_prompt)
+        self.assertEqual(manager.calls, [("shutdown",)])
+        for name in ("terminal", "read_file", "write_file", "skill_manage", "memory", "tool_search", "tool_describe", "tool_call"):
+            with self.subTest(name=name):
+                self.assertEqual(json.loads(self.execute(name))["code"], "workbench_assistant_tools_blocked")
+                self.assertEqual(json.loads(self.tools.handle_function_call(name, {}, task_id="stored-session"))["code"],
+                                 "workbench_assistant_tools_blocked")
+                self.assertIn("assistant", self.executor._pre_tool_block(self.agent, SimpleNamespace(name=name, args={}))[0])
+        self.agent._spawn_background_review([], review_memory=True, review_skills=True)
+        self.agent._sync_external_memory_for_turn(original_user_message="diagnosis", final_response="result", interrupted=False)
+        self.agent.commit_memory_session([])
+        self.agent.shutdown_memory_provider([])
+        self.assertEqual(self.agent.review_calls, [])
+        self.assertEqual(manager.calls, [("shutdown",)])
+        self.assertEqual(store.writes, [])
+        self.assertEqual(self.tool_calls, [])
+        self.assertEqual(json.loads(self.execute("terminal", session="ordinary"))["called"], "terminal")
+
+    def test_assistant_policy_is_separate_from_learning_and_workflow_and_requires_fresh_compatible_session(self):
+        self.agent.api_mode = "codex_app_server"
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session"})["error"]["code"], 4098)
+        self.assertEqual(self.agent._memory_manager.calls, [])
+        self.agent.api_mode = "responses"
+        with patch.object(self.agent, "run_conversation", new=lambda: None):
+            self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session"})["error"]["code"], 4098)
+        self.server.sessions["runtime-session"]["history"] = [{"role": "user", "content": "earlier"}]
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session"})["error"]["code"], 4098)
+        self.server.sessions["runtime-session"]["history"] = []
+        self.server.sessions["runtime-session"]["running"] = True
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session"})["error"]["code"], 4098)
+        self.server.sessions["runtime-session"]["running"] = False
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "missing"})["error"]["code"], 4001)
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session", "memory_scope_id": "x"})["error"]["code"], 4098)
+        expected = self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        self.assertEqual(self.bridge.assistant_prepare({"session_id": "runtime-session"}), expected)
+        self.assertEqual(self.bridge.learning_prepare_rpc(71, {"session_id": "runtime-session"})["error"]["code"], 4094)
+        self.assertEqual(self.bridge.memory_capture_rpc(71, {"session_id": "runtime-session", "memory_scope_id": str(uuid.uuid4())})["error"]["code"], 4095)
+        self.assertEqual(self.bridge.prepare_rpc(71, self.params)["error"]["code"], 4091)
+        self.new_session("learning")
+        self.bridge.learning_prepare({"session_id": "learning"})
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "learning"})["error"]["code"], 4098)
+        self.new_session("execution")
+        self.bridge.prepare(self.params | {"session_id": "execution", "run_id": str(uuid.uuid4())})
+        self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "execution"})["error"]["code"], 4098)
+
+    def test_assistant_turn_boundary_reasserts_tools_memory_and_blocks_subprocess_runtime(self):
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        self.agent.tools = [{"function": {"name": "terminal"}}]
+        self.agent.valid_tool_names.add("terminal")
+        self.agent._memory_store = FakeMemoryStore()
+        self.agent._memory_enabled = True
+        result = self.agent.run_conversation("diagnose the current UI", persist_user_message="diagnose the current UI")
+        self.assertTrue(result["completed"])
+        self.assertEqual(self.agent.tools, [])
+        self.assertEqual(self.agent.valid_tool_names, set())
+        self.assertIsNone(self.agent._memory_store)
+        self.assertFalse(self.agent._memory_enabled)
+        with self.assertRaisesRegex(gateway.WorkflowPolicyError, "native subprocess"):
+            self.agent._run_codex_app_server_turn()
+        self.agent.api_mode = "codex_app_server"
+        with self.assertRaisesRegex(gateway.WorkflowPolicyError, "native subprocess"):
+            self.agent.run_conversation("diagnose")
+        self.assertEqual(len(self.agent.turn_calls), 1)
+
+    def assistant_image(self, name="capture.png", data=b"\x89PNG\r\n\x1a\nsynthetic screenshot"):
+        diagnostics = self.workspace.parent / "diagnostics"
+        diagnostics.mkdir(exist_ok=True)
+        image = diagnostics / name
+        image.write_bytes(data)
+        return diagnostics, image
+
+    def test_assistant_images_pass_pixels_to_native_turn_once_without_native_file_tools(self):
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        root, image = self.assistant_image()
+        expected = image.read_bytes()
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+            response = self.server.methods["workbench.assistant.images"](72, {"session_id": "runtime-session", "images": [str(image)]})
+        self.assertEqual(response["result"], {"attached": 1, "mode": "native-content"})
+        image.write_bytes(b"changed after admission")  # queued bytes, never a later arbitrary path read
+        result = self.agent.run_conversation("explain this failure", persist_user_message="explain this failure")
+        content = result["messages"][0]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "explain this failure"})
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertEqual(base64.b64decode(content[1]["image_url"]["url"].split(",", 1)[1]), expected)
+        self.assertEqual(self.agent.turn_calls[0][1], content)
+        self.assertEqual(self.agent.tools, [])
+        self.agent.run_conversation("next turn")
+        self.assertEqual(self.agent.turn_calls[1][0], "next turn")
+        self.assertEqual(self.tool_calls, [])
+
+    def test_assistant_images_reject_nonassistant_busy_unconfigured_outside_symlink_and_nonimages(self):
+        root, image = self.assistant_image()
+        params = {"session_id": "runtime-session", "images": [str(image)]}
+        self.assertEqual(self.bridge.assistant_images_rpc(73, params)["error"]["code"], 4099)
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.bridge.assistant_images_rpc(73, params)["error"]["code"], 4099)
+        self.server.sessions["runtime-session"]["running"] = True
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+            self.assertEqual(self.bridge.assistant_images_rpc(73, params)["error"]["code"], 4099)
+        self.server.sessions["runtime-session"]["running"] = False
+        outside = self.workspace / "outside.png"
+        outside.write_bytes(image.read_bytes())
+        link = root / "link.png"
+        link.symlink_to(image)
+        directory_link = root / "linked-directory"
+        directory_link.symlink_to(self.workspace, target_is_directory=True)
+        bad = root / "bad.png"
+        bad.write_bytes(b"not an image")
+        for paths in ([str(outside)], ["capture.png"], [str(link)], [str(directory_link / "outside.png")], [str(bad)], [str(image)] * 5):
+            with self.subTest(paths=paths), patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+                self.assertEqual(self.bridge.assistant_images_rpc(73, params | {"images": paths})["error"]["code"], 4099)
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}), patch.object(gateway, "MAX_DIAGNOSTIC_IMAGE_BYTES", 2):
+            self.assertEqual(self.bridge.assistant_images_rpc(73, params)["error"]["code"], 4099)
+        self.assertEqual(self.agent.run_conversation("no images admitted")["messages"][0]["content"], "no images admitted")
+
+    def test_assistant_image_batches_are_atomic_clearable_and_refuse_native_attachment_bypass(self):
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        root, image = self.assistant_image()
+        root_alias = self.workspace / "diagnostics-root-alias"
+        root_alias.symlink_to(root, target_is_directory=True)
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root_alias)}):
+            self.bridge.assistant_images({"session_id": "runtime-session", "images": [str(root_alias / image.name)]})
+            self.assertEqual(self.bridge.assistant_images_rpc(73, {"session_id": "runtime-session", "images": [str(root_alias / "missing.png")]})["error"]["code"], 4099)
+        with self.assertRaisesRegex(gateway.WorkflowPolicyError, "workbench.assistant.images"):
+            self.agent.run_conversation([{"type": "image_url", "image_url": {"url": "file:///arbitrary.png"}}])
+        self.assertEqual(self.agent.run_conversation("admitted batch survived")["messages"][0]["content"][1]["type"], "image_url")
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+            self.bridge.assistant_images({"session_id": "runtime-session", "images": [str(image)]})
+            self.bridge.assistant_images({"session_id": "runtime-session", "images": []})
+        self.assertEqual(self.agent.run_conversation("cleared")["messages"][0]["content"], "cleared")
+
+    def test_assistant_policy_and_queued_pixels_survive_native_rebuild_and_identity_rotation(self):
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        root, image = self.assistant_image()
+        with patch.dict(os.environ, {"WORKBENCH_DIAGNOSTICS_ROOT": str(root)}):
+            self.bridge.assistant_images({"session_id": "runtime-session", "images": [str(image)]})
+        rebuilt = FakeAgent()
+        rebuilt._user_turn_count = 2
+        self.server._wire_session_agent("runtime-session", "stored-session", rebuilt)
+        self.assertIsNone(rebuilt._memory_store)
+        self.assertFalse(rebuilt._memory_enabled)
+        content = rebuilt.run_conversation("inspect queued screenshot")["messages"][0]["content"]
+        self.assertEqual(content[1]["type"], "image_url")
+        rebuilt.session_id = "rotated-assistant"
+        self.executor._pre_tool_block(rebuilt, SimpleNamespace(name="terminal", args={}))
+        self.assertEqual(json.loads(self.execute("terminal", session="rotated-assistant"))["code"], "workbench_assistant_tools_blocked")
+        self.assertEqual(self.bridge.learning_prepare_rpc(74, {"session_id": "runtime-session"})["error"]["code"], 4094)
+        self.assertEqual(self.bridge.assistant_prepare({"session_id": "runtime-session"})["policy"]["memoryAllowed"], False)
+        ordinary = FakeAgent()
+        self.server._wire_session_agent("ordinary", "ordinary", ordinary)
+        self.assertIsNotNone(ordinary._memory_store)
+        self.assertIn("terminal", ordinary.valid_tool_names)
+
+    def history_store_fixture(self, messages):
+        calls = []
+        path = self.base / "native-state.db"
+        self.server._launch_state_db_path = lambda: path
+
+        class ReadOnlyStore:
+            def __init__(self, db_path=None, read_only=False):
+                calls.append(("open", db_path, read_only))
+
+            def get_messages(self, session_id, *, limit=None, latest=False, include_compacted=False):
+                calls.append(("get_messages", session_id, limit, latest, include_compacted))
+                return messages
+
+            def close(self):
+                calls.append(("close",))
+
+        module = ModuleType("hermes_state")
+        module.SessionDB = ReadOnlyStore
+        return calls, path, module
+
+    def test_assistant_history_uses_native_readonly_store_without_session_resume_or_agent(self):
+        messages = [
+            {"role": "system", "content": "PRIVATE_SYSTEM"},
+            {"role": "user", "content": "读取GitHub数据"},
+            {"role": "assistant", "reasoning_content": "PRIVATE_REASONING", "content": [
+                {"type": "reasoning", "text": "PRIVATE_PART"}, {"type": "text", "text": "正在请求"}],
+                "tool_calls": [{"id": "call1", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"curl github.com","token":"PRIVATE_TOKEN","reasoning":"PRIVATE_ARG"}'}}]},
+            {"role": "tool", "tool_call_id": "call1", "tool_name": "terminal", "content": '{"error":"connection timed out","reasoning_content":"PRIVATE_JSON","api_key":"PRIVATE_KEY"}'},
+            {"role": "assistant", "content": "<think>PRIVATE_TAGGED</think>连接失败", "analysis": "PRIVATE_ANALYSIS"},
+            {"role": "user", "display_kind": "hidden", "content": "PRIVATE_HIDDEN"},
+            {"role": "user", "content": "[System: PRIVATE_MARKER]"},
+        ]
+        calls, path, module = self.history_store_fixture(messages)
+        with patch.dict(sys.modules, {"hermes_state": module}), patch.object(self.server, "_sess", side_effect=AssertionError("must never resume/build")):
+            response = self.server.methods["workbench.assistant.history"](80, {"stored_session_id": "stored-session"})
+        result = response["result"]
+        self.assertEqual(result["storedSessionId"], "stored-session")
+        self.assertEqual(result["policy"], {"readOnly": True, "agentCreated": False, "sessionResumed": False,
+                                             "memoryRead": False, "reasoningIncluded": False})
+        self.assertEqual(len(result["messages"]), 4)
+        self.assertEqual(result["messages"][2]["name"], "terminal")
+        self.assertIn("timed out", result["messages"][2]["text"])
+        self.assertIn("curl github.com", json.dumps(result))
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+        self.assertEqual(calls, [("open", path, True), ("get_messages", "stored-session", 201, True, True), ("close",)])
+        self.assertEqual(self.agent.turn_calls, [])
+        self.assertEqual(self.agent._memory_manager.calls, [])
+        self.assertFalse(self.agent.skip_background_review)
+
+    def test_assistant_history_is_bounded_rejects_file_paths_and_closes_on_read_failure(self):
+        messages = [{"role": "tool", "tool_name": "terminal", "content": "x" * 24000 + str(index)} for index in range(201)]
+        calls, _, module = self.history_store_fixture(messages)
+        with patch.dict(sys.modules, {"hermes_state": module}):
+            result = self.bridge.assistant_history({"stored_session_id": "stored-session"})
+            self.assertTrue(result["truncated"])
+            self.assertLessEqual(len(result["messages"]), 200)
+            self.assertLessEqual(len(json.dumps(result).encode("utf-8")), 256 * 1024)
+            for params in ({"stored_session_id": "/arbitrary/state.db"}, {"stored_session_id": "../outside"},
+                           {"stored_session_id": "stored-session", "path": "/arbitrary"}, {"stored_session_id": ""}):
+                self.assertEqual(self.bridge.assistant_history_rpc(81, params)["error"]["code"], 4100)
+            def unavailable(session_id, *, limit=None, latest=False, include_compacted=False):
+                raise sqlite3.OperationalError("store unavailable")
+            with patch.object(module.SessionDB, "get_messages", new=staticmethod(unavailable)):
+                self.assertEqual(self.bridge.assistant_history_rpc(81, {"stored_session_id": "stored-session"})["error"]["code"], 4100)
+        self.assertEqual(calls[-1], ("close",))
 
     def test_learning_memory_policy_survives_rebuild_and_agent_reuse_without_touching_ordinary_agents(self):
         self.bridge.learning_prepare({"session_id": "runtime-session"})

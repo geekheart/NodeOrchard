@@ -27,6 +27,7 @@ flowchart LR
 | `src/application.mjs`、`server.mjs` | 装配服务、会话、HTTP/SSE 和请求校验 | DOM、硬件决策 |
 | `src/config.mjs`、`workspace-layout.mjs` | 路径配置、工作环境初始化、一次性偏好兼容 | 搬移历史产物或改写审核 |
 | `src/hermes-models.mjs`、`python/hermes_models.py` | Hermes 受限模型目录、原生全局选择与保存、严格读回确认 | 本地模型覆盖、认证文件或独立回退配置 |
+| `shared/workflow/workflow-capability-contract.mjs`、`src/application-capabilities.mjs` | 共享真实能力契约、当前可用性、节点与运行时说明 | 以提示词代替处理器、虚构依赖就绪或扩大执行权限 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
 | `shared/workflow/` | 纯模型、端口、规划、校验、数据集、时间及协议 | Node/DOM、数据库、网络或文件副作用 |
 | `public/` | 页面、画布、输入表单和交互状态 | 可信授权、伪造服务端运行状态 |
@@ -82,3 +83,15 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 - 一次性绑定个人案例的旧工作流生成器已删除；实际业务图从编辑器搭建。
 - 仍被当前能力调用的旧 Python 实现保留；旧 schema1 放行证据不因重构自动更新。
 - 发布前运行 `npm --prefix workbench test` 和 `npm --prefix workbench run check:git`。纯源码包的测试不能隐式依赖私人训练答案或本机板卡资料。
+
+## 应用诊断
+
+`application-assistant.mjs` 在现有对话之下调度有界工具，`app-diagnostics.mjs` 只投影业务证据，`app-diagnostic-browser.mjs` 负责隔离浏览器取证。应用助手模型与学习评估使用独立托管会话、策略 RPC 与归属表；Hermes 原生工具保持关闭，应用能力由 Node 白名单执行。旧历史直接只读查询，不恢复任务。浏览器代理限制同源只读访问，图像以真实关键帧传给 Hermes。详细工具和边界见 [应用诊断](application-diagnostics.md)。
+
+能力目录将产品支持、当前依赖与操作权限分开投影；`app.capabilities`、`node.describe` 和 `runtime.inspect` 让助手通过真实接口获取能力，而不是依赖提示词记住全部说明。内部 Skill 由注册表发现、按需加载，只解释和组合已有能力。共享合约保持无副作用，Node 后端负责实际探测和工具调度；前端、规划器与助手引用同一契约。
+
+助手先发送紧凑证据，再按需读取详情；独立只读检查可经整批验证后顺序执行，同轮重复请求复用已完成结果。阶段、耗时和脱敏证据检查点增量保存在当前对话事项中，失败与重启保留诊断进度。跨轮复用校验业务上下文、模型路由、能力版本、工具契约与采集时间；它不恢复执行会话，也不重放提案或业务操作。单次模型硬截止与整轮预算分别限制等待，方案调用异常结束本轮。详细策略见 [上下文、进度与中断](application-diagnostics.md#上下文进度与中断)。
+
+新增或变更用户功能时，同步修改能力目录、受影响的工具 schema／dispatch、必要说明与同接口回归。业务代码候选进入现有工作流提案、应用、执行及产物链；源码写保护不被候选路径绕过，代码进程也不构成 OS 沙箱。新增写操作显式约束对象、版本、幂等和读回验证。具体维护步骤见 [能力维护指南](application-assistant-capabilities.md)。
+
+目前没有对外 MCP server。后续 MCP 适配器复用上述 schema、dispatcher 和校验，仅承担协议转换，不复制另一套权限实现。
