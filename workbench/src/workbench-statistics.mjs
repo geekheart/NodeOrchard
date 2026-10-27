@@ -24,6 +24,22 @@ const group = () => ({ conversations: conversationMetrics(), execution: executio
   context: null, artifacts: { count: 0, registeredBytes: 0, unknownSizes: 0 }, storage: { recordBytes: 0 }, models: [] });
 const day = date => ({ date, conversations: conversationMetrics(), execution: executionMetrics(), usage: usageMetrics() });
 
+function conversationTiming(row) {
+  // A progress elapsed value may describe only the last phase. Prefer the
+  // immutable diagnostic end, which survives later application/dismissal.
+  const start = [row.at, row.turnStartedAt, row.checkpointStartedAt].find(value => time(value) !== null);
+  const ends = [[row.turnCompletedAt, 'progress-completed-at']];
+  if (['complete', 'completed', 'error', 'failed', 'interrupted', 'cancelled'].includes(row.checkpointStatus)) {
+    ends.push([row.checkpointUpdatedAt, 'checkpoint-completed-at']);
+  }
+  if (!['applied', 'dismissed'].includes(row.status)) ends.push([row.updatedAt, 'turn-updated-at-fallback']);
+  for (const [end, durationSource] of ends) {
+    const durationMs = duration(start, end);
+    if (durationMs !== null) return { durationMs, durationSource, phaseDurationMs: duration(row.phaseStartedAt, end) };
+  }
+  return { durationMs: null, durationSource: 'unavailable', phaseDurationMs: null };
+}
+
 function dateFormatter(timeZone) {
   try { return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }); }
   catch { throw Object.assign(new Error('统计时区无效。'), { httpStatus: 400 }); }
@@ -58,7 +74,7 @@ function addConversation(metrics, row) {
   if (FAILED.has(row.status)) metrics.failed++;
   if (row.isPending) metrics.pending++;
   metrics.modelCalls += integer(row.modelCalls); metrics.toolCalls += integer(row.toolCalls);
-  metrics.elapsedMs += number(row.elapsedMs) ?? duration(row.at, row.updatedAt) ?? 0;
+  metrics.elapsedMs += number(row.durationMs) ?? 0;
   metrics.lastAt = latest(metrics.lastAt, row.updatedAt || row.at);
 }
 function addExecution(metrics, row) {
@@ -172,7 +188,10 @@ export function collectWorkbenchStatistics(app, { days = 7, now = new Date(), ti
     json_extract(value,'$.retryOfTurnId') retryOfTurnId,json_extract(value,'$.user.text') userText,json_extract(value,'$.user.context') userContext,
     json_extract(value,'$.outcome') outcome,json_extract(value,'$.actions') actions,
     json_extract(value,'$.assistant.progress.modelCalls') modelCalls,json_extract(value,'$.assistant.progress.toolCalls') toolCalls,
-    json_extract(value,'$.assistant.progress.elapsedMs') elapsedMs,length(CAST(value AS BLOB)) record_bytes`;
+    json_extract(value,'$.assistant.progress.turnStartedAt') turnStartedAt,json_extract(value,'$.assistant.progress.startedAt') phaseStartedAt,
+    json_extract(value,'$.assistant.progress.completedAt') turnCompletedAt,json_extract(value,'$.assistant.checkpoint.createdAt') checkpointStartedAt,
+    json_extract(value,'$.assistant.checkpoint.updatedAt') checkpointUpdatedAt,json_extract(value,'$.assistant.checkpoint.status') checkpointStatus,
+    length(CAST(value AS BLOB)) record_bytes`;
   const readTurns = (rows, target) => {
     const groups = new Map();
     for (const row of rows) {
@@ -196,8 +215,10 @@ export function collectWorkbenchStatistics(app, { days = 7, now = new Date(), ti
       for (const sessionId of array(row.modelSessionIds)) markOwner(sessionId, owner.id || supervisorOwner);
       owner.storage.recordBytes += bytes(row.record_bytes);
       if (!inPeriod(row.at)) continue;
+      Object.assign(row, conversationTiming(row));
       const view = { id: text(row.id, 128), status: text(row.status, 40), at: row.at, updatedAt: row.updatedAt,
-        durationMs: number(row.elapsedMs) ?? duration(row.at, row.updatedAt), modelCalls: integer(row.modelCalls), toolCalls: integer(row.toolCalls) };
+        durationMs: row.durationMs, phaseDurationMs: row.phaseDurationMs, durationSource: row.durationSource,
+        modelCalls: integer(row.modelCalls), toolCalls: integer(row.toolCalls) };
       addConversation(owner.conversations, row); owner.recentConversations.push(view);
       const key = dayKey(row.at, formatter), localDay = owner.daily?.find(item => item.date === key), globalDay = byDate.get(key);
       if (localDay) addConversation(localDay.conversations, row); if (globalDay) addConversation(globalDay.conversations, row);

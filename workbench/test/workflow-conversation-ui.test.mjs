@@ -212,6 +212,52 @@ test('diagnostic progress names the stalled stage and freezes its elapsed time a
   assert.equal(conversationDiagnosticProgress({ status: 'error', assistant: { text: '旧版错误' } }), null);
 });
 
+test('applying or dismissing a finished proposal cannot extend its immutable diagnostic turn time', () => {
+  const turn = { status: 'proposed', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:02:05.000Z', assistant: {
+    progress: { label: '检查候选', startedAt: '2026-01-01T00:02:00.000Z', turnStartedAt: '2026-01-01T00:00:00.000Z',
+      completedAt: '2026-01-01T00:02:05.000Z', status: 'complete', elapsedMs: 5000, modelCalls: 2 },
+  } };
+  const at = Date.parse('2026-01-01T01:00:00.000Z');
+  for (const status of ['proposed', 'applied', 'dismissed']) {
+    turn.status = status; turn.updatedAt = '2026-01-01T00:04:44.000Z';
+    const view = conversationDiagnosticProgress(turn, at);
+    assert.equal(view.totalElapsedMs, 125000, status); assert.equal(view.elapsedMs, 5000, status); assert.equal(view.active, false);
+  }
+});
+
+test('diagnostic turn timing uses its original start and completed checkpoint when primary timestamps are unavailable', () => {
+  const turn = { status: 'thinking', assistant: { progress: { label: '生成候选', startedAt: '2026-01-01T00:00:05.000Z',
+    turnStartedAt: '2026-01-01T00:00:00.000Z', elapsedMs: 5000 } } };
+  const live = conversationDiagnosticProgress(turn, Date.parse('2026-01-01T00:00:10.000Z'));
+  assert.equal(live.totalElapsedMs, 10000); assert.equal(live.active, true);
+  turn.status = 'applied'; turn.updatedAt = '2026-01-01T00:04:44.000Z';
+  turn.assistant.progress.completedAt = 'invalid';
+  turn.assistant.checkpoint = { status: 'complete', updatedAt: '2026-01-01T00:02:05.000Z' };
+  const finished = conversationDiagnosticProgress(turn, Date.parse('2026-01-01T01:00:00.000Z'));
+  assert.equal(finished.totalElapsedMs, 125000); assert.equal(finished.active, false);
+  delete turn.assistant.checkpoint;
+  assert.equal(conversationDiagnosticProgress(turn).totalElapsedMs, null, 'later application time cannot reconstruct an unknown model duration');
+});
+
+test('workflow and supervisor bubbles share the frozen turn clock and show unavailable historical durations honestly', t => {
+  pendingDOM(t);
+  const turn = { status: 'applied', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:04:44.000Z', assistant: {
+    progress: { label: '检查候选', startedAt: '2026-01-01T00:02:00.000Z', turnStartedAt: '2026-01-01T00:00:00.000Z',
+      completedAt: '2026-01-01T00:02:05.000Z', status: 'complete', elapsedMs: 5000 },
+  } };
+  for (const prototype of [WorkflowConversationUI.prototype, ApplicationConversationUI.prototype]) {
+    const nodes = pendingDOMDescendants(prototype.diagnosticProgressView(turn));
+    assert.ok(nodes.some(node => node.textContent === '2分5秒'));
+    assert.equal(nodes.some(node => node.textContent === '4分44秒'), false);
+    assert.equal(nodes.some(node => node.dataset?.diagnosticClock), false, 'completed bubbles have no live clock');
+    const legacy = structuredClone(turn); delete legacy.assistant.progress.completedAt;
+    assert.ok(pendingDOMDescendants(prototype.diagnosticProgressView(legacy)).some(node => node.textContent === '—'));
+  }
+  const active = structuredClone(turn); active.status = 'thinking'; delete active.createdAt; delete active.assistant.progress.completedAt;
+  const total = pendingDOMDescendants(WorkflowConversationUI.prototype.diagnosticProgressView(active)).find(node => node.dataset?.diagnosticClock === 'total');
+  assert.equal(total.dataset.startedAt, active.assistant.progress.turnStartedAt);
+});
+
 test('progress display projects stage metadata without exposing checkpoint tool payloads', () => {
   const view = conversationDiagnosticProgress({ status: 'error', assistant: { progress: { label: '检查结果', elapsedMs: 5 },
     checkpoint: { results: [{ result: { privatePayload: 'must not be displayed' } }], steps: [{ label: '读取记录', status: 'error', error: 'Bearer abcdefghijklmnop' }] } } });

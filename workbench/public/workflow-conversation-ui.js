@@ -26,7 +26,7 @@ const INTENTS = [['auto', '自动理解'], ['discuss', '对话与咨询'], ['wor
 const TURN_STATUS = { thinking: '正在思考', queued: '正在准备', proposed: '待应用修改', awaiting_action: '待选择操作', complete: '已记录', error: '处理失败', applied: '已应用', interrupted: '已中断', dismissed: '已结束事项' };
 const image = item => /^image\//.test(item.mimeType || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(item.name || item.path || '');
 const safeArtifactURL = value => typeof value === 'string' && /^\/api\/workflow-v2\/artifacts\/[A-Za-z0-9_-]+(?:\?download=1)?$/.test(value) ? value : null;
-const duration = milliseconds => { const seconds = Math.floor(Math.max(0, milliseconds || 0) / 1000); return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; };
+const duration = milliseconds => { if (milliseconds === null) return '—'; const seconds = Math.floor(Math.max(0, milliseconds || 0) / 1000); return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`; };
 const elapsed = (startedAt, end, fallback = 0) => Number.isFinite(Date.parse(startedAt)) && Number.isFinite(end) ? Math.max(0, end - Date.parse(startedAt)) : Math.max(0, Number(fallback) || 0);
 
 // Only stage metadata belongs in the message bubble. Checkpoint results are
@@ -34,12 +34,19 @@ const elapsed = (startedAt, end, fallback = 0) => Number.isFinite(Date.parse(sta
 export function conversationDiagnosticProgress(turn, at = Date.now()) {
   const progress = turn?.assistant?.progress, checkpoint = turn?.assistant?.checkpoint;
   if (!progress && !checkpoint?.steps?.length) return null;
-  const active = ['thinking', 'queued'].includes(turn.status), end = active ? at : Date.parse(progress?.completedAt || turn.updatedAt);
+  const active = ['thinking', 'queued'].includes(turn.status);
+  const turnStartedAt = [turn.createdAt, progress?.turnStartedAt, checkpoint?.createdAt].find(value => Number.isFinite(Date.parse(value)));
+  const completed = [progress?.completedAt,
+    ...(['complete', 'completed', 'error', 'failed', 'interrupted', 'cancelled'].includes(checkpoint?.status) ? [checkpoint.updatedAt] : []),
+    ...(!['applied', 'dismissed'].includes(turn.status) ? [turn.updatedAt] : [])]
+    .find(value => Number.isFinite(Date.parse(value)) && (!turnStartedAt || Date.parse(value) >= Date.parse(turnStartedAt)));
+  const end = active ? at : Date.parse(completed);
   const steps = (checkpoint?.steps || []).slice(-40).map(step => ({ label: clean(step.label || step.tool || step.stage || '检查').slice(0, 240),
     status: step.status, elapsedMs: Number(step.elapsedMs) || 0, ...(step.error ? { error: clean(step.error).slice(0, 400) } : {}) }));
   return { label: clean(progress?.label || steps.at(-1)?.label || '整理诊断结果').slice(0, 240), active,
     elapsedMs: active ? elapsed(progress?.startedAt, at, progress?.elapsedMs) : Number.isFinite(progress?.elapsedMs) ? progress.elapsedMs : elapsed(progress?.startedAt, end),
-    totalElapsedMs: elapsed(turn.createdAt, active ? at : Date.parse(turn.updatedAt), progress?.elapsedMs),
+    turnStartedAt: turnStartedAt || null,
+    totalElapsedMs: turnStartedAt && Number.isFinite(end) ? elapsed(turnStartedAt, end) : null,
     modelCalls: Math.max(0, Number(progress?.modelCalls) || 0), toolCalls: Math.max(0, Number(progress?.toolCalls) || 0), steps,
     completed: steps.filter(step => ['complete', 'cached'].includes(step.status)).length,
     failed: steps.filter(step => ['error', 'interrupted'].includes(step.status)).length };
@@ -287,7 +294,7 @@ export class WorkflowConversationUI {
     if (progress.active && turn.assistant.progress?.startedAt) { clock.dataset.diagnosticClock = 'stage'; clock.dataset.startedAt = turn.assistant.progress.startedAt; clock.dataset.elapsedMs = String(progress.elapsedMs); }
     line.append(clock); box.append(line);
     const metrics = element('p', 'wf-conversation-message-scope'), total = element('span', '', duration(progress.totalElapsedMs));
-    if (progress.active && turn.createdAt) { total.dataset.diagnosticClock = 'total'; total.dataset.startedAt = turn.createdAt; total.dataset.elapsedMs = String(progress.totalElapsedMs); }
+    if (progress.active && progress.turnStartedAt) { total.dataset.diagnosticClock = 'total'; total.dataset.startedAt = progress.turnStartedAt; total.dataset.elapsedMs = String(progress.totalElapsedMs); }
     metrics.append(element('span', '', '本轮已用 '), total, element('span', '', ` · 模型 ${progress.modelCalls} 次 · 工具 ${progress.toolCalls} 项`)); box.append(metrics);
     if (progress.steps.length) {
       const details = element('details', 'wf-conversation-diagnostic-steps');

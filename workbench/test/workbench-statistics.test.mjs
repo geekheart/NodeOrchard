@@ -75,6 +75,50 @@ test('usage is the model-run delta, keeps authoritative totals, deduplicates own
   assert.equal(result.daily.at(-1).usage.total,190); assert.equal(row.context,null);
 });
 
+test('conversation duration uses immutable whole-turn timing rather than the final 151-second phase', t => {
+  const f=fixture(t); f.document('workflow-a');
+  const startedAt='2026-10-27T01:05:56.719Z', completedAt='2026-10-27T01:11:56.735Z';
+  f.turn('failed-turn','workflow-a',{status:'error',createdAt:startedAt,updatedAt:completedAt,assistant:{progress:{
+    turnStartedAt:startedAt,startedAt:'2026-10-27T01:09:25.536Z',completedAt,elapsedMs:151199,modelCalls:4,toolCalls:8,
+  }}});
+  const before=f.snapshot(), result=f.read(), row=result.workflows[0], recent=row.recentConversations[0];
+  assert.equal(recent.durationMs,360016); assert.equal(row.conversations.elapsedMs,360016);
+  assert.equal(result.totals.conversations.elapsedMs,360016);
+  assert.equal(result.daily.at(-1).conversations.elapsedMs,360016);
+  assert.equal(result.recentActivity.find(item=>item.id==='failed-turn').durationMs,360016);
+  assert.equal(recent.phaseDurationMs,151199); assert.equal(recent.durationSource,'progress-completed-at');
+  assert.deepEqual(f.snapshot(),before);
+});
+
+test('later dismissal and application do not extend immutable diagnostic duration for either chat owner', t => {
+  const f=fixture(t); f.document('workflow-a');
+  for(const [id,workflowId,status] of [['dismissed-turn','workflow-a','dismissed'],['applied-turn',null,'applied']]) {
+    f.turn(id,workflowId,{status,createdAt:at,updatedAt:'2026-10-27T03:00:00.000Z',assistant:{progress:{
+      turnStartedAt:at,startedAt:'2026-10-27T01:00:20.000Z',completedAt:'2026-10-27T01:01:00.000Z',elapsedMs:40000,
+    }}});
+  }
+  const result=f.read();
+  assert.equal(result.workflows[0].recentConversations[0].durationMs,60000);
+  assert.equal(result.supervisor.recentConversations[0].durationMs,60000);
+  assert.equal(result.totals.conversations.elapsedMs,120000);
+});
+
+test('terminal checkpoints recover legacy whole-turn timing while changed lifecycle timestamps stay untrusted', t => {
+  const f=fixture(t); f.document('workflow-a');
+  f.turn('checkpoint-turn','workflow-a',{status:'dismissed',createdAt:at,updatedAt:'2026-10-27T03:00:00.000Z',assistant:{
+    progress:{elapsedMs:5000},checkpoint:{status:'error',createdAt:at,updatedAt:'2026-10-27T01:01:30.000Z'},
+  }});
+  f.turn('unknown-turn','workflow-a',{status:'applied',createdAt:at,updatedAt:'2026-10-27T03:00:00.000Z',assistant:{
+    progress:{stage:'model-response',elapsedMs:5000},
+  }});
+  const result=f.read(), rows=result.workflows[0].recentConversations;
+  assert.equal(rows.find(row=>row.id==='checkpoint-turn').durationMs,90000);
+  assert.equal(rows.find(row=>row.id==='checkpoint-turn').durationSource,'checkpoint-completed-at');
+  assert.equal(rows.find(row=>row.id==='unknown-turn').durationMs,null);
+  assert.equal(rows.find(row=>row.id==='unknown-turn').durationSource,'unavailable');
+  assert.equal(result.totals.conversations.elapsedMs,90000);
+});
+
 test('period boundaries and daily token buckets use model run start rather than a newer cumulative snapshot', t => {
   const f=fixture(t); f.document('workflow-a'); f.run('root','workflow-a',{sessionId:'session-a'});
   f.model('outside','session-a',{input:800,total:800},'measured','2026-10-20T15:59:59.999Z');
