@@ -26,8 +26,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
-  definition('workbench.inspect', '只读读取设置、模型、定时任务、节点预设或统计；统计包含对话、执行、Token采集覆盖和最近上下文，独立助手限定当前工作流。', {
-    section: { enum: ['settings', 'models', 'schedules', 'node-presets', 'statistics'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
+  definition('workbench.inspect', '只读读取设置、模型、定时任务、节点预设、示例目录或统计；统计包含对话、执行、Token采集覆盖和最近上下文，独立助手限定当前工作流。', {
+    section: { enum: ['settings', 'models', 'schedules', 'node-presets', 'statistics', 'examples'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
   definition('page.inspect', '读取发消息时当前页面的界面状态与脱敏操作、错误记录。', {}),
   definition('environment.probe', '检查固定工具版本，或检查 GitHub HTTPS 连接；代码解释器和库请使用 runtime.inspect。', { target: { enum: ['dependencies', 'github'] } }),
   definition('browser.capture', '在专用只读浏览器中真实截图或短录制，附复现步骤与错误；不会采集当前用户标签页或桌面。', {
@@ -45,6 +45,7 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'workflow-examples', status: 'ui-only', inspect: 'workbench.inspect', tools: [], note: '空画布的示例目录提供执行与学习模板；载入前核对实际 Skill 版本，附默认输入与学习数据，保留当前工作流身份，不自动执行。' },
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
   { id: 'conversation-management', status: 'available', roles: ['supervisor'], tools: ['conversations.list', 'conversation.inspect', 'conversation.delegate'],
     note: '对话管理仅展示正常工作流的独立会话，回收站会话保留且恢复后重现；总控按问题分主题，按需读取摘要或明确委派只读诊断，不自动运行、应用或合并历史。旧全局聊天及普通任务保留。' },
@@ -162,6 +163,7 @@ export class ApplicationCapabilities {
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };
     if (section === 'node-presets') return { section, presets: this.app.nodePresets.list() };
+    if (section === 'examples') return { section, examples: this.app.workflowExamples.list(), loading: '从空画布的载入示例选择；不会开始执行或学习。' };
     if (section === 'statistics') {
       if (![7, 30].includes(days)) fail('统计周期只支持7或30天。');
       const dashboard = this.app.statistics(days).dashboard;

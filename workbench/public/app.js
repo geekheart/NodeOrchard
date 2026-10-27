@@ -14,6 +14,7 @@ import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
 import { WorkflowPackageUI } from './workflow-package-ui.js';
+import { WorkflowExamplesUI } from './workflow-examples-ui.js';
 import { openAttachmentInput } from './workflow-attachment-input.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
@@ -272,6 +273,7 @@ function ensureWorkflowEditor() {
   workflowEditor.packages = new WorkflowPackageUI(workflowEditor, { api, binaryRequest, libraryClient: workflowLibraryClient,
     onOpened: id => navigate(`#/workflows/${encodeURIComponent(id)}`),
   });
+  workflowEditor.examples = new WorkflowExamplesUI(workflowEditor, { api, getGeneration: () => workflowLibraryClient.generation });
   workflowEditor.versioning = new WorkflowVersioningUI(workflowEditor, { api,
     onCreated(record, options = {}) {
       if (options.copyInputs) {

@@ -201,6 +201,15 @@ export function createWorkbenchServer(config, application = new Application(conf
           await application.conversations.action(workflowId, turnId, await readJson(req, 2 * 1024 * 1024 + 32768)));
       }
       if (req.method === 'GET' && path === '/api/workflow-library') return json(res, 200, { workflows: application.workflowLibrary.list({ lifecycle: requestURL.searchParams.get('lifecycle') ?? 'active' }) });
+      if (req.method === 'GET' && path === '/api/workflow-examples') {
+        if (requestURL.search) return json(res, 400, { error: '示例目录不接受路径或查询参数。' });
+        return json(res, 200, { examples: application.workflowExamples.list() });
+      }
+      const exampleMatch = path.match(/^\/api\/workflow-examples\/([a-z0-9-]+)\/prepare$/);
+      if (req.method === 'POST' && exampleMatch) {
+        if (requestURL.search) return json(res, 400, { error: '示例准备不接受路径或查询参数。' });
+        return json(res, 200, await application.workflowExamples.prepare(exampleMatch[1], await readJson(req, 4096)));
+      }
       if (req.method === 'POST' && path === '/api/workflow-library') return json(res, 200, { workflow: application.workflowLibrary.save(await readJson(req, 2 * 1024 * 1024 + 65536)) });
       if (req.method === 'POST' && path === '/api/workflow-packages/import') {
         if ([...requestURL.searchParams.keys()].some(key => key !== 'filename') || requestURL.searchParams.getAll('filename').length !== 1) return json(res, 400, { error: '工作流导入参数无效。' });
@@ -435,6 +444,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-conversation-ui.js': ['workflow-conversation-ui.js', 'text/javascript'],
         '/conversation-attachments.js': ['conversation-attachments.js', 'text/javascript'],
         '/workflow-attachment-input.js': ['workflow-attachment-input.js', 'text/javascript'],
+        '/workflow-examples-ui.js': ['workflow-examples-ui.js', 'text/javascript'],
         '/workflow-conversation-ui.css': ['workflow-conversation-ui.css', 'text/css'],
         '/workflow-node-library-ui.js': ['workflow-node-library-ui.js', 'text/javascript'],
         '/workflow-editor.css': ['workflow-editor.css', 'text/css'],

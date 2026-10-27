@@ -1,8 +1,12 @@
 {
-  "schemaVersion": 1,
-  "id": "workflow-6a152b33-8c8e-48c4-bcdc-e9d9b2b57235",
+  "schemaVersion": 2,
+  "id": "workflow-example-mixed-capabilities",
   "title": "混合能力 · 会议记录到待办",
   "mode": "execute",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
   "nodes": [
     {
       "id": "mixed-input",
@@ -16,7 +20,8 @@
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "  仅根据这段内置演示记录润色并提取待办；不调用工具、不访问网络、不写文件、不发送消息。演示负责人将在下周一检查三份输入，记录员将在下周二核对导出结果。  "
       }
     },
     {
@@ -86,9 +91,9 @@
       }
     },
     {
-      "id": "mixed-python",
+      "id": "mixed-restore",
       "type": "tool",
-      "title": "Python · 还原文本",
+      "title": "JavaScript · 还原文本",
       "x": 1640,
       "y": 100,
       "config": {
@@ -96,8 +101,8 @@
         "outputType": "text",
         "executionMode": "code",
         "toolName": "",
-        "language": "python",
-        "code": "import json\ndata = json.loads(input)\nprint(\"JSON 已还原为文本\")\nreturn data[\"text\"]",
+        "language": "javascript",
+        "code": "const data = JSON.parse(input);\nconsole.log('JSON 已还原为文本');\nreturn data.text;",
         "timeoutSeconds": 120,
         "failurePolicy": "stop"
       }
@@ -125,7 +130,30 @@
       "y": 100,
       "config": {
         "inputType": "any",
-        "fileName": ""
+        "fileName": "mixed-capabilities-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
       }
     }
   ],
@@ -162,12 +190,12 @@
       "id": "edge-4",
       "sourceNode": "mixed-json",
       "sourcePort": "out",
-      "targetNode": "mixed-python",
+      "targetNode": "mixed-restore",
       "targetPort": "in"
     },
     {
       "id": "edge-5",
-      "sourceNode": "mixed-python",
+      "sourceNode": "mixed-restore",
       "sourcePort": "out",
       "targetNode": "mixed-actions",
       "targetPort": "in"

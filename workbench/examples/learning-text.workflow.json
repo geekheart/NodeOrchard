@@ -1,8 +1,12 @@
 {
-  "schemaVersion": 1,
-  "id": "workflow-learning-text-example",
+  "schemaVersion": 2,
+  "id": "workflow-example-learning-text",
   "title": "学习示例 · 英文短语规范化",
   "mode": "learn",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
   "nodes": [
     {
       "id": "learn-input",
@@ -16,7 +20,8 @@
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "待处理文本：HELLO WORLD"
       }
     },
     {
@@ -42,7 +47,54 @@
       "y": 100,
       "config": {
         "inputType": "any",
-        "fileName": ""
+        "fileName": "learning-text-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
+      }
+    },
+    {
+      "id": "learn-evaluation",
+      "type": "evaluation",
+      "title": "对比已知答案",
+      "x": 680,
+      "y": 380,
+      "config": {
+        "comparison": "exact",
+        "valuePath": ""
+      }
+    },
+    {
+      "id": "learn-improvement",
+      "type": "improvement",
+      "title": "只改进此 Skill",
+      "x": 1000,
+      "y": 380,
+      "config": {
+        "scope": "skills",
+        "targetSkillNodeIds": [
+          "learn-skill"
+        ]
       }
     }
   ],
@@ -59,6 +111,20 @@
       "sourceNode": "learn-skill",
       "sourcePort": "out",
       "targetNode": "learn-output",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-b5b46696-f2c7-432f-96b3-03052d9d93d5",
+      "sourceNode": "learn-output",
+      "sourcePort": "learning",
+      "targetNode": "learn-evaluation",
+      "targetPort": "in"
+    },
+    {
+      "id": "edge-09c6e7cb-ca69-40a4-a178-47dfa4521f43",
+      "sourceNode": "learn-evaluation",
+      "sourcePort": "out",
+      "targetNode": "learn-improvement",
       "targetPort": "in"
     }
   ],

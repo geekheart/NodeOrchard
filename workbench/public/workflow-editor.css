@@ -335,6 +335,13 @@ body.workflow-active .main-content { overflow: hidden; }
 .wf-shortcut-key { display: inline-block; padding: 0 4px; border: 1px solid var(--wf-border-strong); border-radius: 3px; color: var(--wf-secondary); font-family: inherit; font-size: 11px; line-height: 1.5; }
 
 .wf-dialog { --wf-dialog-panel: var(--wf-panel, var(--bg, #ffffff)); width: min(650px, calc(100vw - 32px)); max-height: calc(100dvh - 60px); overflow: auto; padding: 23px; border: 1px solid var(--wf-border, var(--line, #dce4ef)); border-radius: 11px; background: var(--wf-dialog-panel); color: var(--wf-text, var(--text, #243248)); box-shadow: 0 25px 85px #00000045; }
+.wf-example-catalog { display: grid; gap: 18px; }
+.wf-example-group h3 { margin-bottom: 9px; color: var(--wf-secondary); font-size: 12px; }
+.wf-example-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px; }
+.wf-example-grid .wf-button { text-align: left; white-space: normal; }
+.wf-example-status { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.wf-example-status:empty { display: none; }
+.wf-example-status.error { color: var(--wf-danger); }
 .wf-dialog::backdrop { background: #02061770; backdrop-filter: blur(3px); }
 .wf-dialog h2 { margin: 0 0 9px; font-size: 17px; font-weight: 600; }
 .wf-dialog h3 { margin: 20px 0 9px; font-size: 13px; font-weight: 600; }

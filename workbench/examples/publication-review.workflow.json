@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "workflow-432474ae-3c0a-4c4e-b9ee-31697a862ba5",
+  "id": "workflow-example-publication-review",
   "title": "文稿发布审核 · 演示",
   "mode": "execute",
   "settings": {
-    "maxConcurrency": 4,
+    "maxConcurrency": 2,
     "outputDirectory": ""
   },
   "nodes": [
@@ -20,7 +20,16 @@
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": {
+          "title": "  本地文稿演示  ",
+          "summary": "  这是一份可以人工核对后交付的内置示例。  ",
+          "tags": [
+            "示例",
+            "工作流",
+            "示例"
+          ]
+        }
       }
     },
     {

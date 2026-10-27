@@ -1,8 +1,12 @@
 {
-  "schemaVersion": 1,
-  "id": "workflow-f4c60d98-d34b-43b7-80e4-4d1738990f40",
+  "schemaVersion": 2,
+  "id": "workflow-example-multi-skill",
   "title": "会议记录 · 润色与待办",
   "mode": "execute",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
   "nodes": [
     {
       "id": "node-c580b4f7-c2b0-4129-bacf-cdd9b0ee2ed6",
@@ -16,7 +20,8 @@
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "仅根据以下演示会议记录润色并提取待办，不使用工具，不查询外部记录，不创建工单，不发送消息，不联网，不写文件。记录：周五演示会上，示例负责人确认将在下周一核对输入素材，示例记录员将在下周二整理测试结果。"
       }
     },
     {
@@ -57,7 +62,30 @@
       "y": 100,
       "config": {
         "inputType": "any",
-        "fileName": ""
+        "fileName": "multi-skill-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
       }
     }
   ],

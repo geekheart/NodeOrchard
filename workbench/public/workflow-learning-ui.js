@@ -215,6 +215,35 @@ export class WorkflowLearningUI {
     }
   }
   setDataset(dataset) { const next = normalizeWorkflowDataset(dataset, { requireTraining: false }); this.dataset = next; this.formDirty = true; this.renderDataset(); return next; }
+  setConfig(config, { expand = true } = {}) {
+    if (typeof expand !== 'boolean') throw new Error('学习面板展开选项无效。');
+    if (this.editor.documentLoaded === false || this.editor.doc?.mode !== 'learn' || this.workflowId !== this.editor.doc.id) throw new Error('请先载入并同步当前学习工作流。');
+    if (this.editor.nodeLibrary?.nested || this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active') throw new Error('当前工作流不能载入学习配置。');
+    if (this.starting || this.applying || this.uncertain || this.activeJob()) throw new Error('学习仍在处理或结果未确认，不能替换配置。');
+    const allowed = ['trainingCases', 'validationCases', 'input', 'expected', 'comparison', 'trainableNodeIds', 'rubric', 'targetScore', 'maxRounds'];
+    if (!config || typeof config !== 'object' || Array.isArray(config) || ![Object.prototype, null].includes(Object.getPrototypeOf(config))
+      || Reflect.ownKeys(config).some(key => typeof key !== 'string' || !allowed.includes(key))
+      || Object.values(Object.getOwnPropertyDescriptors(config)).some(field => !Object.hasOwn(field, 'value'))) throw new Error('学习配置包含无效或未知字段。');
+    const { comparison, ids } = learningSetupForDocument(this.editor.doc);
+    if (own(config, 'comparison') && config.comparison !== comparison) throw new Error('学习比较方式与当前产物对比节点不一致。');
+    if (own(config, 'trainableNodeIds') && (!Array.isArray(config.trainableNodeIds)
+      || JSON.stringify(config.trainableNodeIds) !== JSON.stringify(ids))) throw new Error('学习目标与当前 Skill 改进节点不一致。');
+    const explicit = own(config, 'trainingCases');
+    if (explicit && (own(config, 'input') || own(config, 'expected'))) throw new Error('trainingCases 不能与旧 input / expected 同时提供。');
+    if (!explicit && !own(config, 'expected')) throw new Error('学习配置需要训练样例及已知答案。');
+    const dataset = normalizeWorkflowDataset({ trainingCases: explicit ? config.trainingCases : [{ input: config.input === undefined ? null : config.input, expected: config.expected }], validationCases: config.validationCases ?? [] });
+    const rubric = config.rubric ?? '', targetScore = config.targetScore ?? 90, maxRounds = config.maxRounds ?? 3;
+    if (typeof rubric !== 'string' || rubric.length > 8000 || rubric.includes('\0')) throw new Error('评价标准必须是最多 8000 字的文本。');
+    if (!Number.isInteger(targetScore) || targetScore < 1 || targetScore > 100) throw new Error('目标评分需要为 1–100 的整数。');
+    if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 10) throw new Error('最多总轮数需要为 1–10 的整数（含基线）。');
+    // Validate the full adapter envelope before changing any current form data.
+    this.targetScore.value = String(targetScore); this.maxRounds.value = String(maxRounds); this.rubric.value = rubric;
+    this.setDataset(dataset); this.resetCaseEditor(); this.pendingImport = null; this.importRevision++;
+    this.renderImportPreview(); this.formDirty = true;
+    if (expand) { this.setExpanded(true); this.setup.open = true; }
+    this.drafts.set(this.workflowId, this.saveForm()); this.updateRunButton();
+    return { ...structuredClone(dataset), comparison, trainableNodeIds: [...ids], rubric, targetScore, maxRounds };
+  }
   renderCaseEditStatus() { if (this.caseEditStatus) this.caseEditStatus.textContent = this.caseDraftDirty ? '编辑尚未保存到样例集' : this.editingCaseId ? `正在编辑 ${this.editingCaseId}` : ''; if (this.caseEditStatus) this.caseEditStatus.hidden = !this.caseEditStatus.textContent; if (this.saveCaseButton) this.saveCaseButton.textContent = this.editingCaseId ? '保存样例修改' : '加入样例集'; }
   resetCaseEditor() { if (this.starting) return; this.editingCaseId = null; this.input.value = ''; this.expected.value = ''; this.caseName.value = ''; this.caseSplit.value = 'train'; this.expectedFormat.value = 'text'; const type = this.editor.doc?.nodes?.find(item => item.type === 'input')?.config?.outputType; this.inputFormat.value = type && !['text', 'any', 'fileRef'].includes(type) ? 'json' : 'text'; this.caseDraftDirty = false; this.renderCaseEditStatus(); }
   saveCaseDraft() {

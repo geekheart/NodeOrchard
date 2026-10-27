@@ -75,6 +75,20 @@ test('a real workflow broker prompt contains only its workflow evidence, never f
   assert.deepEqual(business(f.app), before);
 });
 
+test('an independent assistant can inspect the public example catalog without broader workbench access', async t => {
+  const f = await fixture(t), before = business(f.app);
+  f.responses = [{ tool: 'workbench.inspect', arguments: { section: 'examples' } }, { text: '学习示例可从空画布载入。' }];
+  const result = await f.plan();
+  assert.equal(result.evidence[0].tool, 'workbench.inspect');
+  assert.notEqual(result.evidence[0].status, 'error');
+  assert.match(f.prompts.at(-1), /learning-text/);
+  assert.equal(f.reads.length, 0); assert.deepEqual(business(f.app), before);
+  f.responses = [{ tool: 'workbench.inspect', arguments: { section: 'settings' } }, { text: '设置仍受权限限制。' }];
+  const denied = await f.plan();
+  assert.equal(denied.evidence[0].tool, 'tool.admission');
+  assert.equal(f.reads.length, 0); assert.deepEqual(business(f.app), before);
+});
+
 test('model workflow/run/session escalation and injected supervisor roles are rejected before any diagnostic read or write', async t => {
   const f = await fixture(t), before = business(f.app);
   const invalid = [

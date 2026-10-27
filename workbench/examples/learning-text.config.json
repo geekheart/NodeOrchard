@@ -1,17 +1,25 @@
 {
-  "input": "待处理文本：HELLO WORLD",
-  "expected": "hello world",
   "comparison": "exact",
   "rubric": "从“待处理文本：”后提取英文字母短语，转换为全小写，仅返回该短语；不翻译，不加标点，不解释。该规则应适用于不同短语，不硬编码任何示例。",
   "targetScore": 100,
-  "maxRounds": 3,
+  "maxRounds": 2,
   "trainableNodeIds": [
     "learn-skill"
   ],
   "validationCases": [
     {
+      "id": "validation-1",
+      "name": "验证样例 1",
       "input": "待处理文本：GOOD MORNING",
       "expected": "good morning"
+    }
+  ],
+  "trainingCases": [
+    {
+      "id": "train-greeting",
+      "name": "训练 · 问候",
+      "input": "待处理文本：HELLO WORLD",
+      "expected": "hello world"
     }
   ]
 }

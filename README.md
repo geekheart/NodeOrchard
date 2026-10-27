@@ -159,16 +159,12 @@ npm --prefix workbench start
 
 ### 5. 先跑一个本地流程
 
-1. 从看板新建工作流，在编辑器导入界面选择“兼容 JSON 草稿”，载入 [publication-review.workflow.json](workbench/examples/publication-review.workflow.json)。此定义示例只使用 JavaScript。
-2. 切换到运行视图，将下面的 JSON 填入输入框，检查后运行。
-3. 工作流会清理标题、摘要和重复标签，然后停在“确认文稿与标签”。核对结果后通过审核，继续保存 `发布摘要.json`。
-4. 在运行记录中查看各节点的输入、输出和日志；再按需加入 Skill 节点与 AI 对话。
+1. 从看板新建空白工作流，在空画布点击“载入示例”。
+2. 在“执行示例”选择“本地数据 · 工具与代码”，使用已填好的默认输入，切换运行视图后运行。
+3. 在运行记录中查看各节点的输入、输出和日志。该示例只使用内置工具与 JavaScript，无需连接 Hermes 或配置 Python。
+4. 另建空白工作流可体验“文稿发布 · 人工审核”：停在“确认文稿与标签”是正常等待，核对并通过后才保存结果。
 
-```json
-{"title":"  NodeOrchard 发布指南  ","summary":" 用节点编排个人 AI 工作流。 ","tags":["workflow","skills","workflow"]}
-```
-
-想尝试 Python 节点，可通过“兼容 JSON 草稿”载入 [local-data.workflow.json](workbench/examples/local-data.workflow.json)，输入 `{"items":["Draft","Review","Publish"],"active":false,"retries":0}`；先按下文设置可用的 Python 解释器。
+示例分“执行”和“学习”两组，载入保留当前工作流 ID，不会自动执行。学习示例带完整支路、训练集、验证集与改进目标；模型和 Skill 的依赖条件见[载入示例](workbench/docs/user-guide.md#载入示例)。
 
 纯本地工具和 JavaScript 节点无需 Hermes。Python 节点需要可用的 Python 解释器，可通过 `WORKBENCH_HERMES_PYTHON` 指定；调用外部命令的代码还需要对应本机工具。
 
@@ -323,9 +319,9 @@ git diff --cached --stat
 
 默认路径指向 Hermes 的 `venv/bin/python`。自定义安装或只使用 Python 节点时，设置 `WORKBENCH_HERMES_PYTHON` 为实际解释器路径后重启服务。
 
-**为什么导入示例后仍要选择 Skill？**
+**为什么示例提示 Skill 或模型尚不可用？**
 
-Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人已学习 Skill；请在属性中选择实际技能。输入资料预检失败时，先按提示准备文件和配置。
+“载入示例”会按本机实际安装的 Skill 固定内容指纹；未连接 Hermes、认证未完成或缺少 Skill 时，仍可载入草稿查看，但须先补齐界面列出的条件。直接导入原始 JSON 保留文件中的指纹，来源变更后需重新选择实际技能。示例不会安装 Skill，也不会自动运行。
 
 **运行卡在人工审核，是不是失败了？**
 
@@ -353,7 +349,7 @@ Skill 名称和内容指纹绑定本机已安装版本。示例不携带个人�
 | [Hermes 协议](workbench/docs/hermes-protocol.md) | 原生 stdio 网关与适配边界 |
 | [架构](workbench/docs/architecture.md) / [协作规则](AGENTS.md) | 模块职责、代码边界与验证规范 |
 
-从无需 Hermes 的[文稿审核与交付](workbench/examples/publication-review.workflow.json)开始；继续参考[本地数据处理](workbench/examples/local-data.workflow.json)、[混合能力](workbench/examples/mixed-capabilities.workflow.json)、[文档审核](workbench/examples/document-review.workflow.json)与[多样例学习](workbench/examples/multi-example-learning.workflow.json)。旧版示例可在编辑器升级为并行工作流；学习时需连接“业务产物 → 产物对比 → Skill 改进”并勾选目标 Skill。完整列表见 [examples/](workbench/examples/)。
+空画布的“载入示例”提供 8 个 schema2 模板：6 个执行示例、2 个学习示例，其中 3 个本地示例无需模型。学习示例已有五节点结构，完整配置通过 `setConfig` 预填；数据集导入只处理样例数据。操作及依赖条件见[载入示例](workbench/docs/user-guide.md#载入示例)，原始模板见 [examples/](workbench/examples/)。
 
 ## 致谢与许可状态
 

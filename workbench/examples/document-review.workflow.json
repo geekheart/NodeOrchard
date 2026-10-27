@@ -1,35 +1,42 @@
 {
-  "schemaVersion": 1,
-  "id": "workflow-6e0dcdae-9f9a-49e2-a435-af3eefd62741",
-  "title": "文档整理 · 手动编辑示例",
+  "schemaVersion": 2,
+  "id": "workflow-example-document-review",
+  "title": "文档整理 · 本地字段与条件分支",
   "mode": "execute",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
   "nodes": [
     {
       "id": "sample-input",
       "type": "input",
-      "title": "输入资料",
+      "title": "内置演示文字",
       "x": 40,
       "y": 180,
       "config": {
-        "outputType": "fileRef",
+        "outputType": "text",
         "fieldName": "document",
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "标题：本地资料演示\n负责人：示例负责人\n事项：核对资料；确认交付\n备注：所有内容都是安全的内置演示数据。"
       }
     },
     {
-      "id": "sample-skill",
-      "type": "skill",
-      "title": "提取关键信息",
+      "id": "sample-extract",
+      "type": "tool",
+      "title": "本地提取字段",
       "x": 350,
       "y": 180,
       "config": {
-        "inputType": "fileRef",
+        "inputType": "text",
         "outputType": "object",
-        "skillRef": "document-extract",
-        "version": "v1.2",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "const fields = Object.fromEntries(input.split(/\\r?\\n/).filter(line => line.includes('：')).map(line => { const at = line.indexOf('：'); return [line.slice(0, at).trim(), line.slice(at + 1).trim()]; }));\nreturn { title: fields['标题'] || '', owner: fields['负责人'] || '', items: (fields['事项'] || '').split('；').filter(Boolean), complete: Boolean(fields['标题'] && fields['负责人']) };",
         "timeoutSeconds": 120,
         "failurePolicy": "stop"
       }
@@ -49,69 +56,115 @@
     {
       "id": "sample-output",
       "type": "output",
-      "title": "输出整理结果",
+      "title": "保存完整资料",
       "x": 970,
       "y": 80,
       "config": {
         "inputType": "any",
-        "fileName": "summary.json"
+        "fileName": "summary.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
       }
     },
     {
       "id": "sample-human",
       "type": "human",
-      "title": "补充缺失信息",
+      "title": "核对缺失资料",
       "x": 660,
       "y": 430,
       "config": {
         "inputType": "object",
         "outputType": "object",
-        "prompt": "请核对并补充缺失字段。"
+        "prompt": "演示文字缺少标题或负责人时会停在这里。请核对演示数据后确认；不连接任何外部服务。"
       }
     },
     {
       "id": "sample-reviewed",
       "type": "output",
-      "title": "输出补充结果",
+      "title": "保存核对结果",
       "x": 970,
       "y": 430,
       "config": {
         "inputType": "any",
-        "fileName": "reviewed.json"
+        "fileName": "reviewed.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
       }
     }
   ],
   "edges": [
     {
-      "id": "edge-12478d5f-bfae-404a-a774-0b5290991c42",
+      "id": "edge-e9e01720-5aa8-45e4-8a53-6a223cfdcb7d",
       "sourceNode": "sample-input",
       "sourcePort": "out",
-      "targetNode": "sample-skill",
+      "targetNode": "sample-extract",
       "targetPort": "in"
     },
     {
-      "id": "edge-b357e67e-0b79-4b7a-9f93-6fc90db310de",
-      "sourceNode": "sample-skill",
+      "id": "edge-43d64627-09a1-4633-8947-033ec2c5dbd4",
+      "sourceNode": "sample-extract",
       "sourcePort": "out",
       "targetNode": "sample-check",
       "targetPort": "in"
     },
     {
-      "id": "edge-3e77c5b2-e17b-4301-8813-9077fb92a8de",
+      "id": "edge-6e4d9a2c-6b87-47b7-932f-7fcd1673b29d",
       "sourceNode": "sample-check",
       "sourcePort": "yes",
       "targetNode": "sample-output",
       "targetPort": "in"
     },
     {
-      "id": "edge-ea188942-dc4c-4b61-bf4e-b82d5a394121",
+      "id": "edge-69c62180-3c6a-47a9-86f5-2fd9afad3dcd",
       "sourceNode": "sample-check",
       "sourcePort": "no",
       "targetNode": "sample-human",
       "targetPort": "in"
     },
     {
-      "id": "edge-76bb4a7f-e614-4c11-ae3f-1b27384c5b0c",
+      "id": "edge-1ba68a64-4042-4d97-92f0-4c6d4f6dd4ea",
       "sourceNode": "sample-human",
       "sourcePort": "out",
       "targetNode": "sample-reviewed",

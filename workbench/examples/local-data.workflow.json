@@ -1,8 +1,12 @@
 {
-  "schemaVersion": 1,
-  "id": "workflow-e56a75d8-371a-497d-aa20-f0aca2790d24",
+  "schemaVersion": 2,
+  "id": "workflow-example-local-data",
   "title": "本地数据 · 工具与代码",
   "mode": "execute",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
   "nodes": [
     {
       "id": "local-input",
@@ -16,7 +20,8 @@
         "required": true,
         "trigger": "manual",
         "schedule": "09:00",
-        "timezone": "Asia/Shanghai"
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "  {\"title\":\"本地数据演示\",\"items\":[{\"name\":\"读取输入\"},{\"name\":\"检查结果\"}],\"enabled\":false,\"count\":0,\"empty\":[]}  "
       }
     },
     {
@@ -71,9 +76,9 @@
       }
     },
     {
-      "id": "local-python",
+      "id": "local-verify",
       "type": "tool",
-      "title": "Python · 完成校验",
+      "title": "JavaScript · 保留原始值",
       "x": 1320,
       "y": 100,
       "config": {
@@ -81,8 +86,8 @@
         "outputType": "object",
         "executionMode": "code",
         "toolName": "",
-        "language": "python",
-        "code": "print(\"保留 false、0 和空数组\")\nreturn {**input, \"checked\": True}",
+        "language": "javascript",
+        "code": "console.log('保留 false、0 和空数组');\nreturn { ...input, checked: true };",
         "timeoutSeconds": 120,
         "failurePolicy": "stop"
       }
@@ -95,7 +100,30 @@
       "y": 100,
       "config": {
         "inputType": "any",
-        "fileName": ""
+        "fileName": "local-data-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
       }
     }
   ],
@@ -125,12 +153,12 @@
       "id": "edge-3",
       "sourceNode": "local-js",
       "sourcePort": "out",
-      "targetNode": "local-python",
+      "targetNode": "local-verify",
       "targetPort": "in"
     },
     {
       "id": "edge-4",
-      "sourceNode": "local-python",
+      "sourceNode": "local-verify",
       "sourcePort": "out",
       "targetNode": "local-output",
       "targetPort": "in"

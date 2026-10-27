@@ -75,6 +75,8 @@ test('HTTP route templates never retain a query, unknown path, or dynamic secret
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/folder/open'), '/api/workflow-library/:workflowId/folder/open');
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/export?expectedRevision=3'), '/api/workflow-library/:workflowId/export');
   assert.equal(applicationHttpRoute('/api/workflow-packages/import?filename=SECRET.workflow'), '/api/workflow-packages/import');
+  assert.equal(applicationHttpRoute('/api/workflow-examples'), '/api/workflow-examples');
+  assert.equal(applicationHttpRoute('/api/workflow-examples/SECRET/prepare?token=SECRET'), '/api/workflow-examples/:exampleId/prepare');
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments?filename=PRIVATE.png'), '/api/workflow-library/:workflowId/attachments');
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments/reference'), '/api/workflow-library/:workflowId/attachments/reference');
   assert.equal(applicationHttpRoute('/api/workflow-library/SECRET/attachments/SECRET/content'), '/api/workflow-library/:workflowId/attachments/:attachmentId/content');

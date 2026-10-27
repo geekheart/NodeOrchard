@@ -140,7 +140,7 @@ export class WorkflowEditor {
     const toolbar = find('.wf-canvas-toolbar');
     toolbar.append(control('切换节点库', 'toggle-library', 'library', { compact: true }), control('适应画布', 'fit', 'fit', { compact: true }), control('网格吸附', 'snap', 'grid', { compact: true }), el('span', 'wf-toolbar-divider'), control('减少动效', 'motion', 'motion', { compact: true }), control('节点属性', 'toggle-properties', 'panel', { compact: true }), control('快捷键与说明', 'help', 'help', { compact: true }));
     find('.wf-library-head .wf-panel-heading').append(control('收起节点库', 'toggle-library', 'close', { compact: true }));
-    find('.wf-empty-actions').append(control('添加输入节点', 'add-input', 'plus'), control('载入示例草稿', 'example', 'workflow'));
+    find('.wf-empty-actions').append(control('添加输入节点', 'add-input', 'plus'), control('载入示例', 'example', 'workflow'));
     find('.wf-zoom-controls').append(control('缩小画布', 'zoom-out', 'minus', { compact: true }), el('output', 'wf-zoom-value', '100%'), control('放大画布', 'zoom-in', 'plus', { compact: true }), control('恢复 100% 缩放', 'reset-zoom', 'fit', { compact: true }));
     root.addEventListener('click', event => this.onClick(event));
     find('.wf-search').addEventListener('input', () => this.renderLibrary());
@@ -1324,14 +1324,9 @@ export class WorkflowEditor {
     dialog.append(el('h3', '', '当前快捷键'), shortcuts);
   }
   loadExample() {
-    if (this.libraryReadOnly) return;
-    if (this.doc.nodes.length) { this.toast('示例仅在空白画布载入；请先新建或导出当前草稿。', true); return; }
-    let next = createDocument({ title: '文档整理 · 示例草稿' });
-    const input = createNode('input', { x: 40, y: 100 }, { title: '输入资料' }), skill = createNode('skill', { x: 360, y: 100 }, { title: '提取信息', config: { skillRef: 'document-extract', version: 'v1.2' } }), output = createNode('output', { x: 680, y: 100 }, { title: '返回结果' });
-    next.nodes.push(input, skill, output);
-    next = connectNodes(next, { sourceNode: input.id, sourcePort: 'out', targetNode: skill.id, targetPort: 'in' });
-    next = connectNodes(next, { sourceNode: skill.id, sourcePort: 'out', targetNode: output.id, targetPort: 'in' });
-    this.commit(next, '载入示例草稿'); this.settings.propertiesClosed = true; this.applySettings(); requestAnimationFrame(() => this.fit()); this.toast('已载入示例草稿，Skill 引用仅作示意。');
+    if (this.libraryReadOnly) return false;
+    if (this.examples) return this.examples.open();
+    this.toast('示例目录尚未就绪，请稍后重试。', true); return false;
   }
 }
 

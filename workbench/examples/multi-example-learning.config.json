@@ -2,7 +2,7 @@
   "comparison": "exact",
   "rubric": "从“待处理文本：”后提取英文字母短语，转换为全小写，仅返回该短语；不翻译，不加标点，不解释。该规则应适用于不同短语，不硬编码任何示例。",
   "targetScore": 100,
-  "maxRounds": 3,
+  "maxRounds": 2,
   "trainableNodeIds": [
     "learn-skill"
   ],
