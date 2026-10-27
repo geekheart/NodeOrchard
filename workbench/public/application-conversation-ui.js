@@ -14,7 +14,7 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
   }
   describeContext() { return ['当前应用']; }
   getContext() { return {}; }
-  renderComposerHelp() { if (this.help) { this.help.textContent = '直接描述问题；AI 会按需读取应用状态、运行记录及页面证据。'; this.input.placeholder = '例如：帮我检查最近一次运行为什么失败…'; } }
+  renderComposerHelp() { if (this.help) { this.help.textContent = '直接描述问题；AI 会按需读取应用状态、运行记录及页面证据。说“这个问题解决了”或“不用处理了”结束对应聊天事项。'; this.input.placeholder = '例如：帮我检查最近一次运行为什么失败…'; } }
   onEvent(event) { if (event.type === 'application.conversation') { try { this.accept(event.payload); } catch {} } }
   async startRun() { this.state().error = '请说明要运行的工作流，或从看板打开它后直接说“运行”。'; this.renderNotice(); return false; }
   render() {

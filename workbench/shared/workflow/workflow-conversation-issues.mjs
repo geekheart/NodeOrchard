@@ -57,3 +57,64 @@ export function conversationTurnGroups(turns = []) {
   return { latest: turns.at(-1) || null, history: turns.slice(0, -1), unresolved: turns.filter(turn => unresolvedStatuses.has(turn.status)
     && !turn.outcome?.applied && !['resolved', 'superseded'].includes(turn.pendingState?.status)) };
 }
+
+// Only a complete, explicit user statement is a local command. Questions,
+// quoted examples, conditions and negations stay in the normal discussion path.
+export function parseConversationIssueResolution(text) {
+  if (typeof text !== 'string' || text.length > 120 || /[?？“”"'`「」『』]/.test(text)) return null;
+  let value = text.trim().replace(/[。！!]+$/, '').replace(/\s+/g, '');
+  const number = word => {
+    if (/^\d{1,2}$/.test(word)) return Number(word);
+    const digits = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    if (word === '十') return 10;
+    if (Object.hasOwn(digits, word)) return digits[word];
+    const match = /^([一二三四五六七八九]?)十([一二三四五六七八九]?)$/.exec(word);
+    return match ? (match[1] ? digits[match[1]] : 1) * 10 + (digits[match[2]] || 0) : 0;
+  };
+  const prefix = /^(?:第)?(\d{1,2}|[一二两三四五六七八九十]{1,3})(?:个|项)(?:问题|事项)?/.exec(value);
+  let ordinal;
+  if (prefix) { ordinal = number(prefix[1]); if (ordinal < 1 || ordinal > 99) return null; value = value.slice(prefix[0].length); }
+  else if (/^\d{1,2}$/.test(value)) { ordinal = number(value); value = ''; }
+  if (ordinal && !value) return { ordinal };
+  value = value.replace(/^(?:这个问题|这件事|这个事项|这件事情|问题|事项)/, '');
+  if (/^(?:(?:已经|已)?解决了?|解决好了|处理好了|处理完了|已处理)$/.test(value)) return { disposition: 'handled', ...(ordinal ? { ordinal } : {}) };
+  if (/^(?:不用(?:再)?处理了?|不再处理了?)$/.test(value)) return { disposition: 'dismissed', ...(ordinal ? { ordinal } : {}) };
+  return null;
+}
+
+export const isConversationIssueCloseable = turn => ['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn?.status)
+  && !turn.outcome?.applied && turn.outcome?.status !== 'complete'
+  && !['resolved', 'superseded'].includes(turn.pendingState?.status) && !(turn.actions || []).some(reviewAction);
+
+export function selectConversationIssue(turns = [], { targetTurnId, context = {}, ordinal, candidateIds } = {}) {
+  const blocked = turn => {
+    if (turn.status === 'dismissed' || ['resolved', 'superseded'].includes(turn.pendingState?.status) || ['complete', 'applied'].includes(turn.status)) return 'already-closed';
+    if ((turn.actions || []).some(reviewAction)) return 'protected-review';
+    if (['thinking', 'queued'].includes(turn.status)) return 'active';
+    return 'target-not-closeable';
+  };
+  const choose = items => ({ status: 'choose', candidates: items.slice(0, 10) });
+  const target = id => {
+    const turn = turns.find(item => item.id === id);
+    if (!turn) return { status: 'blocked', reason: 'target-missing' };
+    return isConversationIssueCloseable(turn) ? { status: 'target', turn } : { status: 'blocked', reason: blocked(turn), turn };
+  };
+  const candidates = turns.filter(isConversationIssueCloseable);
+  if (targetTurnId) return ordinal ? { status: 'blocked', reason: 'ambiguous-target' } : target(targetTurnId);
+  if (ordinal !== undefined) {
+    // Numbering is meaningful only against a list the server already showed.
+    if (!Array.isArray(candidateIds) || !Number.isInteger(ordinal) || ordinal < 1 || ordinal > candidateIds.length) {
+      return candidates.length ? choose(candidates) : { status: 'none' };
+    }
+    return target(candidateIds[ordinal - 1]);
+  }
+  if (!candidates.length) {
+    const unresolved = conversationTurnGroups(turns).unresolved;
+    const turn = unresolved.find(item => (item.actions || []).some(reviewAction)) || unresolved.find(item => ['thinking', 'queued'].includes(item.status));
+    return turn ? { status: 'blocked', reason: blocked(turn), turn } : { status: 'none' };
+  }
+  const keys = ['workflowId', 'runId', 'nodeId', 'attempt', 'attemptId', 'artifactIds', 'artifactHashes'].filter(key => context[key] !== undefined && context[key] !== null);
+  const matched = keys.length ? candidates.filter(turn => keys.every(key => equal(context[key], turn.user?.context?.[key] ?? (key === 'workflowId' ? turn.workflowId : undefined)))) : candidates;
+  if (matched.length === 1) return { status: 'target', turn: matched[0] };
+  return choose(matched.length ? matched : candidates);
+}

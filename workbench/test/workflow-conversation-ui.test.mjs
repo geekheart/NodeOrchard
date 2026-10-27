@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WorkflowConversationUI, conversationContext, conversationTurnGroups, canDismissConversationTurn, conversationDiagnosticProgress } from '../public/workflow-conversation-ui.js';
+import { ApplicationConversationUI } from '../public/application-conversation-ui.js';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 
@@ -15,6 +16,54 @@ function harness() {
   ui.state().loaded = true; return { ui, document, run };
 }
 const snapshot = (id, revision, turns = []) => ({ conversation: { workflowId: id, revision, turns }, pending: [] });
+
+test('a natural resolution message targets the focused issue and waits for the server to retire it', async () => {
+  const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '采集失败', context: { runId: run.id } }, assistant: { text: '原始错误' } };
+  ui.state().conversation.turns = [old]; ui.focusIssue(old); ui.state().draft = '这个问题解决了'; let request;
+  ui.api = async (_path, options) => {
+    request = options.body;
+    assert.equal(ui.state().conversation.turns[0].status, 'error', 'the UI cannot dismiss before the server confirms');
+    return snapshot(document.id, 2, [{ ...old, status: 'dismissed' }, { id: 'ack', status: 'complete', assistant: { text: '已结束此聊天事项' } }]);
+  };
+  await ui.send();
+  assert.equal(request.replyToTurnId, old.id); assert.equal(request.text, '这个问题解决了');
+  assert.deepEqual(conversationTurnGroups(ui.state().conversation.turns).unresolved, []);
+  assert.equal(ui.state().conversation.turns[0].assistant.text, '原始错误');
+  assert.equal(ui.state().issueReplyTarget, null);
+});
+
+test('changing the focused reply context clears natural-resolution targeting', async () => {
+  const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '原问题', context: { runId: run.id } } }; let request;
+  ui.state().conversation.turns = [old]; ui.focusIssue(old); ui.focusContext({ runId: run.id, nodeId: 'trim' });
+  ui.state().draft = '不用处理了'; ui.api = async (_path, options) => { request = options.body; return snapshot(document.id, 2, [old]); };
+  await ui.send(); assert.equal(request.replyToTurnId, undefined); assert.equal(ui.state().issueReplyTarget, null);
+});
+
+test('ordinary discussion, questions and ordinal choices do not carry a guessed issue target', async () => {
+  const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '原问题', context: { runId: run.id } } }, requests = [];
+  ui.state().conversation.turns = [old]; ui.focusIssue(old);
+  ui.api = async (_path, options) => { requests.push(options.body); return snapshot(document.id, requests.length + 1, [old]); };
+  for (const text of ['是不是解决了？', '如果解决了怎么办', '不要结束', '第1个']) { ui.state().draft = text; await ui.send(); }
+  assert.ok(requests.every(request => request.replyToTurnId === undefined));
+  assert.equal(ui.state().issueReplyTarget.turnId, old.id, 'unrelated wording does not silently switch the selected issue');
+});
+
+test('uncertain resolution delivery preserves its exact issue target and idempotency key', async () => {
+  const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '原问题', context: { runId: run.id } } }, requests = [];
+  ui.state().conversation.turns = [old]; ui.focusIssue(old); ui.state().draft = '不用处理了';
+  ui.api = async (_path, options) => { requests.push(structuredClone(options.body)); if (requests.length === 1) throw Error('fixture disconnected'); return snapshot(document.id, 2, [{ ...old, status: 'dismissed' }]); };
+  await ui.send(); ui.focusContext({ nodeId: 'trim' }); await ui.send(ui.state().retry);
+  assert.equal(requests[0].replyToTurnId, old.id); assert.equal(requests[1].replyToTurnId, old.id);
+  assert.equal(requests[0].clientMessageId, requests[1].clientMessageId);
+});
+
+test('a late resolution acknowledgement cannot clear a different issue selected during submission', async () => {
+  const { ui, document, run } = harness(), gate = deferred(), first = { id: 'first-issue', status: 'error', user: { text: '第一个问题', context: { runId: run.id } } }, second = { ...first, id: 'second-issue' };
+  ui.state().conversation.turns = [first, second]; ui.focusIssue(first); ui.state().draft = '不用处理了'; ui.api = async () => gate.promise;
+  const sending = ui.send(); ui.focusIssue(second);
+  gate.resolve(snapshot(document.id, 2, [{ ...first, status: 'dismissed' }, second])); await sending;
+  assert.equal(ui.state().issueReplyTarget.turnId, second.id); assert.equal(ui.state().draft, '不用处理了');
+});
 
 test('a stale callback cannot submit an already processed historical review action', async () => {
   const { ui } = harness(); let posts = 0;
@@ -42,6 +91,18 @@ function pendingDOM(t) {
   return { saved, descendants: node => [node, ...node.children.flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])] };
 }
 const pendingDOMDescendants = node => [node, ...(node.children || []).flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])];
+
+test('global application chat displays the focused issue and explains text-only completion commands', t => {
+  pendingDOM(t); const { ui } = harness(); Object.setPrototypeOf(ui, ApplicationConversationUI.prototype);
+  ui.workflowId = 'global-application'; ui.editor.doc = { id: 'global-application', title: '当前应用', nodes: [], edges: [] };
+  const old = { id: 'global-issue', status: 'error', user: { text: '应用页面失败', context: {} } };
+  ui.state().conversation.turns = [old]; ui.focusIssue(old);
+  ui.contextHost = new PendingElement('div'); ui.followSelection = {};
+  WorkflowConversationUI.prototype.renderContext.call(ui);
+  assert.ok(ui.contextHost.children.some(node => /当前问题：应用页面失败/.test(node.textContent || '')));
+  ui.help = {}; ApplicationConversationUI.prototype.renderComposerHelp.call(ui);
+  assert.match(ui.help.textContent, /这个问题解决了/); assert.match(ui.help.textContent, /不用处理了/);
+});
 
 test('pending group starts folded, reports reviews and preserves its workflow preference across rerenders and reloads', t => {
   pendingDOM(t); const { ui, document } = harness(); ui.pendingHost = new PendingElement('section');

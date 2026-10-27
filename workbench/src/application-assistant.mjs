@@ -6,7 +6,7 @@ import { planWorkflowConversation } from './workflows/workflow-conversation-plan
 import { sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from './app-diagnostics.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { ApplicationCapabilities } from './application-capabilities.mjs';
-import { projectConversationIssues, canRetryConversationTurn } from '../shared/workflow/workflow-conversation-issues.mjs';
+import { projectConversationIssues, canRetryConversationTurn, parseConversationIssueResolution, selectConversationIssue } from '../shared/workflow/workflow-conversation-issues.mjs';
 import { AssistantDiagnosticTurn, ASSISTANT_DIAGNOSTIC_LIMITS, compactDiagnosticContext, diagnosticScope, diagnosticRequestKey, validateDiagnosticArguments } from './assistant-diagnostic-turn.mjs';
 
 export const APPLICATION_CONVERSATION_ID = 'global-application';
@@ -54,14 +54,66 @@ export class ApplicationAssistant {
     return { ...snapshot, turn: snapshot.conversation.turns.find(item => item.id === turn.id) || turn };
   }
   emit() { this.app.publish('application.conversation', null, this.get()); }
+  resolveIssueMessage(input, context, digest) {
+    const command = parseConversationIssueResolution(input.text); if (!command) return null;
+    const snapshot = this.get(), previous = snapshot.conversation.turns.at(-1), choice = previous?.assistant?.issueResolution;
+    const matchingChoice = choice?.status === 'choose' && hash(retryContext(previous.user.context || {})) === hash(retryContext(context));
+    if (!command.disposition && !(command.ordinal && matchingChoice)) return null;
+    if (input.retryOfTurnId !== undefined) fail('结束聊天事项不能同时作为重试请求。', 409);
+    const disposition = command.disposition || choice.disposition, explicitOrdinal = command.ordinal !== undefined && matchingChoice;
+    let selection;
+    if (!input.replyToTurnId && !explicitOrdinal && context.runId && context.nodeId) {
+      try {
+        const run = this.app.workflows.get(context.runId), node = run.document?.nodes?.find(item => item.id === context.nodeId), record = run.nodes?.[context.nodeId];
+        if ((!context.workflowId || context.workflowId === run.workflowId) && node?.type === 'human' && record?.status === 'waiting_review') selection = { status: 'blocked', reason: 'review' };
+      } catch { /* Stored chat selection can still be clarified. */ }
+    }
+    selection ||= selectConversationIssue(snapshot.conversation.turns, { targetTurnId: command.ordinal ? undefined : input.replyToTurnId,
+      context, ordinal: command.ordinal, ...(matchingChoice ? { candidateIds: choice.candidateIds } : {}) });
+    const at = new Date().toISOString(), acknowledgement = { id: 'turn-' + randomUUID(),
+      ...(input.replyToTurnId ? { replyToTurnId: input.replyToTurnId } : {}),
+      user: { text: input.text, context: structuredClone(context), intent: 'auto' }, assistant: { text: '' }, actions: [], status: 'complete', createdAt: at, updatedAt: at };
+    let target;
+    if (selection.status === 'target') {
+      const row = this.db.prepare('SELECT value FROM application_conversation_turns WHERE id=?').get(selection.turn.id);
+      if (!row) fail('此对话中没有对应的聊天事项。', 404);
+      target = JSON.parse(row.value);
+      target.resolution = { kind: disposition, previousStatus: target.status, byTurnId: acknowledgement.id, at };
+      target.status = 'dismissed'; target.updatedAt = at;
+      acknowledgement.assistant = { text: `${disposition === 'handled' ? '已将这个聊天事项标记为已处理' : '已结束对此聊天事项的关注'}，并从待处理中收起；原始记录保留。工作流、运行和人工审核状态未改变。`,
+        issueResolution: { status: 'closed', disposition, targetTurnId: target.id } };
+    } else if (selection.status === 'choose') {
+      const candidates = selection.candidates || [];
+      acknowledgement.assistant = { text: `请明确要收起哪一项，当前没有结束任何事项：\n${candidates.map((turn, index) => `${index + 1}. ${turn.user?.text?.replace(/\s+/g, ' ').slice(0, 100) || '聊天事项'}`).join('\n')}\n直接回复“第1个”等编号即可。`,
+        issueResolution: { status: 'choose', disposition, candidateIds: candidates.map(turn => turn.id) } };
+    } else {
+      acknowledgement.assistant = { text: selection.status === 'none' ? '当前没有可收起的待处理聊天事项；未改变任何运行或审核。'
+        : selection.reason === 'already-closed' ? '这个聊天事项已经收起，历史记录仍保留。'
+          : '这条事项当前不能通过结束聊天指令收起；请确认其处理状态。此指令不会批准审核、停止运行或确认操作结果。',
+        issueResolution: { status: selection.status, disposition, ...(selection.reason ? { reason: selection.reason } : {}) } };
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('INSERT INTO application_conversation_turns(id,client_id,digest,value) VALUES(?,?,?,?)')
+        .run(acknowledgement.id, input.clientMessageId, digest, JSON.stringify(acknowledgement));
+      if (target) this.db.prepare('UPDATE application_conversation_turns SET value=? WHERE id=?').run(JSON.stringify(target), target.id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    this.emit(); return this.response(acknowledgement);
+  }
   async message(input) {
-    object(input, ['clientMessageId', 'text', 'page', 'context', 'intent', 'document', 'retryOfTurnId']);
+    object(input, ['clientMessageId', 'text', 'page', 'context', 'intent', 'document', 'retryOfTurnId', 'replyToTurnId']);
     if (this.closed) fail('应用助手已关闭。', 409);
     if (typeof input.clientMessageId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.clientMessageId)) fail('消息 ID 无效。');
     if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 12000 || input.text.includes('\0')) fail('请输入最多 12000 字符的消息。');
     const context = object(input.context || {}, ['workflowId', 'runId', 'nodeId', 'runSelection']);
     const digest = hash(input), previous = this.db.prepare('SELECT digest,value FROM application_conversation_turns WHERE client_id=?').get(input.clientMessageId);
     if (previous) { if (previous.digest !== digest) fail('相同消息 ID 不能对应不同内容。', 409); return this.response(JSON.parse(previous.value)); }
+    if (input.replyToTurnId !== undefined) {
+      if (typeof input.replyToTurnId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.replyToTurnId)) fail('回复事项 ID 无效。');
+      if (!this.db.prepare('SELECT 1 FROM application_conversation_turns WHERE id=?').get(input.replyToTurnId)) fail('此对话中没有对应的聊天事项。', 404);
+    }
+    const resolution = this.resolveIssueMessage(input, context, digest); if (resolution) return resolution;
     if (this.active.size) fail('上一条诊断仍在进行，请等待或停止后继续。', 409);
     if (input.retryOfTurnId !== undefined) {
       if (typeof input.retryOfTurnId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.retryOfTurnId)) fail('重试原事项 ID 无效。');
@@ -73,6 +125,7 @@ export class ApplicationAssistant {
     }
     const at = new Date().toISOString(), turn = { id: 'turn-' + randomUUID(), user: { text: input.text, context: structuredClone(context), intent: 'auto' },
       ...(input.retryOfTurnId !== undefined ? { retryOfTurnId: input.retryOfTurnId } : {}),
+      ...(input.replyToTurnId !== undefined ? { replyToTurnId: input.replyToTurnId } : {}),
       assistant: { text: '正在读取应用状态…' }, actions: [], status: 'thinking', createdAt: at, updatedAt: at };
     this.db.prepare('INSERT INTO application_conversation_turns(id,client_id,digest,value) VALUES(?,?,?,?)').run(turn.id, input.clientMessageId, digest, JSON.stringify(turn));
     const controller = new AbortController(); this.active.set(turn.id, controller); this.emit();
