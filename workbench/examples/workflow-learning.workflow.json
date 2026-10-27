@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 2,
+  "id": "workflow-example-workflow-learning",
+  "title": "整个工作流学习 · 替换处理步骤",
+  "mode": "learn",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
+  "nodes": [
+    {
+      "id": "workflow-input",
+      "type": "input",
+      "title": "输入内容",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "  HELLO WORLD  "
+      }
+    },
+    {
+      "id": "workflow-passthrough",
+      "type": "tool",
+      "title": "待替换的透传步骤",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "return input;",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "workflow-output",
+      "type": "output",
+      "title": "输出结果",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": "workflow-learning-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
+      }
+    },
+    {
+      "id": "workflow-evaluation",
+      "type": "evaluation",
+      "title": "对比已知答案",
+      "x": 680,
+      "y": 380,
+      "config": {
+        "comparison": "exact",
+        "valuePath": ""
+      }
+    },
+    {
+      "id": "workflow-improvement",
+      "type": "improvement",
+      "title": "改进整个业务工作流",
+      "x": 1000,
+      "y": 380,
+      "config": {
+        "scope": "workflow"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "workflow-edge-1",
+      "sourceNode": "workflow-input",
+      "sourcePort": "out",
+      "targetNode": "workflow-passthrough",
+      "targetPort": "in"
+    },
+    {
+      "id": "workflow-edge-2",
+      "sourceNode": "workflow-passthrough",
+      "sourcePort": "out",
+      "targetNode": "workflow-output",
+      "targetPort": "in"
+    },
+    {
+      "id": "workflow-edge-3",
+      "sourceNode": "workflow-output",
+      "sourcePort": "learning",
+      "targetNode": "workflow-evaluation",
+      "targetPort": "in"
+    },
+    {
+      "id": "workflow-edge-4",
+      "sourceNode": "workflow-evaluation",
+      "sourcePort": "out",
+      "targetNode": "workflow-improvement",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 21.38888888888889,
+    "y": 29.56684027777777,
+    "zoom": 0.7152777777777778
+  }
+}

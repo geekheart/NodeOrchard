@@ -1,0 +1,26 @@
+{
+  "scope": "tools",
+  "comparison": "exact",
+  "rubric": "将输入文本去除首尾空白并转为全小写，仅返回规范化后的文本，不解释、不加标点。保留中间空白及其他字符；规则必须适用于任意不同文本，不硬编码样例或答案。只使用标准 JavaScript，不联网、不安装依赖、不读写文件。仅改进 tools-code 节点的业务代码，保持输入、输出及其余节点和连线不变。",
+  "targetScore": 100,
+  "maxRounds": 2,
+  "trainableNodeIds": [
+    "tools-code"
+  ],
+  "trainingCases": [
+    {
+      "id": "tools-train",
+      "name": "训练 · 问候",
+      "input": "  HELLO WORLD  ",
+      "expected": "hello world"
+    }
+  ],
+  "validationCases": [
+    {
+      "id": "tools-validation",
+      "name": "验证 · 问候",
+      "input": "  GOOD MORNING  ",
+      "expected": "good morning"
+    }
+  ]
+}

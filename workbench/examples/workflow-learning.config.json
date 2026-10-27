@@ -1,0 +1,26 @@
+{
+  "scope": "workflow",
+  "comparison": "exact",
+  "rubric": "将输入文本去除首尾空白并转为全小写，仅返回规范化后的文本，不解释、不加标点。保留中间空白及其他字符；规则必须适用于任意不同文本，不硬编码样例或答案。只使用标准 JavaScript，不联网、不安装依赖、不读写文件。必须删除旧透传业务节点 workflow-passthrough，新增一个不同 ID 的 transform 文本规范化节点，并将业务主链重新连接为 workflow-input → 新 transform → workflow-output；不能只原位修改旧节点代码。保持 workflow-input、workflow-output、workflow-evaluation、workflow-improvement 节点及学习支路不变，不新增其他业务节点。",
+  "targetScore": 100,
+  "maxRounds": 2,
+  "trainableNodeIds": [
+    "workflow-passthrough"
+  ],
+  "trainingCases": [
+    {
+      "id": "workflow-train",
+      "name": "训练 · 问候",
+      "input": "  HELLO WORLD  ",
+      "expected": "hello world"
+    }
+  ],
+  "validationCases": [
+    {
+      "id": "workflow-validation",
+      "name": "验证 · 问候",
+      "input": "  GOOD MORNING  ",
+      "expected": "good morning"
+    }
+  ]
+}

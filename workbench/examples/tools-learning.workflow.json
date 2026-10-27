@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 2,
+  "id": "workflow-example-tools-learning",
+  "title": "指定工具学习 · 文本规范化",
+  "mode": "learn",
+  "settings": {
+    "maxConcurrency": 2,
+    "outputDirectory": ""
+  },
+  "nodes": [
+    {
+      "id": "tools-input",
+      "type": "input",
+      "title": "输入内容",
+      "x": 40,
+      "y": 100,
+      "config": {
+        "outputType": "text",
+        "fieldName": "input",
+        "required": true,
+        "trigger": "manual",
+        "schedule": "09:00",
+        "timezone": "Asia/Shanghai",
+        "defaultValue": "  HELLO WORLD  "
+      }
+    },
+    {
+      "id": "tools-code",
+      "type": "tool",
+      "title": "待改进的 JavaScript 工具",
+      "x": 360,
+      "y": 100,
+      "config": {
+        "inputType": "text",
+        "outputType": "text",
+        "executionMode": "code",
+        "toolName": "",
+        "language": "javascript",
+        "code": "return input;",
+        "timeoutSeconds": 120,
+        "failurePolicy": "stop"
+      }
+    },
+    {
+      "id": "tools-output",
+      "type": "output",
+      "title": "输出结果",
+      "x": 680,
+      "y": 100,
+      "config": {
+        "inputType": "any",
+        "fileName": "tools-learning-result.json",
+        "stage": "final"
+      },
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "label": "输入",
+            "type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "label": "成果",
+            "type": "any"
+          },
+          {
+            "id": "learning",
+            "label": "学习产物",
+            "type": "any"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tools-evaluation",
+      "type": "evaluation",
+      "title": "对比已知答案",
+      "x": 680,
+      "y": 380,
+      "config": {
+        "comparison": "exact",
+        "valuePath": ""
+      }
+    },
+    {
+      "id": "tools-improvement",
+      "type": "improvement",
+      "title": "改进指定工具",
+      "x": 1000,
+      "y": 380,
+      "config": {
+        "scope": "tools",
+        "targetNodeIds": [
+          "tools-code"
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "tools-edge-1",
+      "sourceNode": "tools-input",
+      "sourcePort": "out",
+      "targetNode": "tools-code",
+      "targetPort": "in"
+    },
+    {
+      "id": "tools-edge-2",
+      "sourceNode": "tools-code",
+      "sourcePort": "out",
+      "targetNode": "tools-output",
+      "targetPort": "in"
+    },
+    {
+      "id": "tools-edge-3",
+      "sourceNode": "tools-output",
+      "sourcePort": "learning",
+      "targetNode": "tools-evaluation",
+      "targetPort": "in"
+    },
+    {
+      "id": "tools-edge-4",
+      "sourceNode": "tools-evaluation",
+      "sourcePort": "out",
+      "targetNode": "tools-improvement",
+      "targetPort": "in"
+    }
+  ],
+  "viewport": {
+    "x": 21.38888888888889,
+    "y": 29.56684027777777,
+    "zoom": 0.7152777777777778
+  }
+}

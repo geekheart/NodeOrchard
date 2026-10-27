@@ -28,14 +28,37 @@ async function fixture(t) {
 
 test('example HTTP prepares drafts with defaults and explicit prerequisites without creating a workflow, folder, run or learning batch', async t => {
   const f = await fixture(t), workflowId = 'workflow-' + randomUUID();
-  const listed = await (await fetch(f.origin + '/api/workflow-examples')).json(); assert.equal(listed.examples.length, 8);
+  const listed = await (await fetch(f.origin + '/api/workflow-examples')).json(); assert.equal(listed.examples.length, 10);
   const local = await f.post('local-data', { workflowId }); assert.equal(local.status, 200);
   const result = await local.json(); assert.equal(result.ready, true); assert.equal(result.document.id, workflowId); assert.equal(result.example.requiresModel, false);
   const blocked = await (await f.post('learning-text', { workflowId })).json(); assert.equal(blocked.ready, false); assert.equal(blocked.learningConfig.maxRounds, 2);
   assert.equal(blocked.learningConfig.trainingCases.length, 1); assert.equal(blocked.learningConfig.validationCases.length, 1);
   assert.match(blocked.requirements.join(' '), /Hermes/);
+  for (const [id, scope, target] of [['tools-learning', 'tools', 'tools-code'], ['workflow-learning', 'workflow', 'workflow-passthrough']]) {
+    const code = await (await f.post(id, { workflowId })).json();
+    assert.equal(code.ready, false); assert.match(code.requirements.join(' '), /Hermes/);
+    assert.equal(code.example.requiresModel, true); assert.equal(code.document.nodes.some(node => node.type === 'skill'), false);
+    assert.equal(code.learningConfig.scope, scope); assert.deepEqual(code.learningConfig.trainableNodeIds, [target]);
+    assert.equal(code.learningConfig.trainingCases.length, 1); assert.equal(code.learningConfig.validationCases.length, 1);
+  }
   for (const table of ['workflow_documents', 'workflow_runs', 'workflow_learning', 'workflow_conversation_turns']) assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM ' + table).get().count, 0);
   await assert.rejects(stat(f.app.workflowFolders.directory(workflowId)), { code: 'ENOENT' });
+});
+
+test('code learning HTTP readiness respects protected human permissions without rewriting them', async t => {
+  const f = await fixture(t), workflowId = 'workflow-' + randomUUID(); f.adapter.state = 'ready'; f.app.backend.state = 'ready';
+  f.app.skill = async () => assert.fail('Code learning must not load a Skill');
+  for (const flag of ['workflowRead', 'workflowEdit', 'customNodes']) {
+    const current = f.app.assistantPermissionSettings.get();
+    f.app.assistantPermissionSettings.save({ expectedRevision: current.revision, supervisor: current.supervisor,
+      workflow: { ...current.workflow, workflowRead: true, workflowEdit: true, customNodes: true, [flag]: false } });
+    const protectedSettings = f.app.assistantPermissionSettings.get();
+    for (const id of ['tools-learning', 'workflow-learning']) {
+      const response = await f.post(id, { workflowId }); assert.equal(response.status, 200);
+      const prepared = await response.json(); assert.equal(prepared.ready, false); assert.match(prepared.requirements.join(' '), /读取.*编辑.*自定义节点/);
+      assert.deepEqual(f.app.assistantPermissionSettings.get(), protectedSettings);
+    }
+  }
 });
 
 test('example HTTP enforces CSRF, origin, exact identities and lifecycle, and pins actual Skill bytes when connected', async t => {

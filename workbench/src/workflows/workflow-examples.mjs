@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { validateDocument } from '../../shared/workflow/workflow-model.mjs';
-import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
+import { planWorkflow, learningImprovementTargets } from '../../shared/workflow/workflow-plan.mjs';
 import { normalizeWorkflowDataset } from '../../shared/workflow/workflow-dataset.mjs';
 import { validateWorkflowInput } from './workflow-runs.mjs';
 import { redact } from '../hermes-adapter.mjs';
@@ -15,6 +15,8 @@ const CATALOG = Object.freeze([
   { id: 'mixed-capabilities', title: '混合能力 · 记录到待办', kind: 'execute', description: '串联本地工具、JavaScript 与两个真实 Skill。', requiresModel: true },
   { id: 'learning-text', title: '学习入门 · 英文短语', kind: 'learn', description: '完整五节点学习支路，预填一条训练和一条验证样例，最多两轮。', requiresModel: true },
   { id: 'multi-example-learning', title: '多样例学习 · 英文短语', kind: 'learn', description: '完整五节点学习支路，预填三条训练和两条验证样例，最多两轮。', requiresModel: true },
+  { id: 'tools-learning', title: '指定工具学习 · 文本规范化', kind: 'learn', description: '由 Hermes 改进指定 JavaScript 工具，预填一条训练和一条验证样例，最多两轮。', requiresModel: true },
+  { id: 'workflow-learning', title: '整个工作流学习 · 替换处理步骤', kind: 'learn', description: '由 Hermes 替换内部业务节点并重连工作流，预填一条训练和一条验证样例，最多两轮。', requiresModel: true },
 ].map(row => Object.freeze(row)));
 const byId = new Map(CATALOG.map(row => [row.id, row]));
 const revision = /^sha256:[a-f0-9]{64}$/;
@@ -40,7 +42,7 @@ export class WorkflowExamples {
     const document = validateDocument(await read(id, '.workflow.json')); document.id = workflowId;
     const requirements = [], skills = document.nodes.filter(node => node.type === 'skill');
     const connected = this.app.adapter ? this.app.adapter.state === 'ready' && (!this.app.backend || this.app.backend.state === 'ready') : this.app.backend?.state === 'ready';
-    if (example.requiresModel && !connected) requirements.push('请先连接 Hermes，才能使用此示例的模型与 Skill。');
+    if (example.requiresModel && !connected) requirements.push('请先连接 Hermes，才能使用此示例的模型能力。');
     else if (example.requiresModel && this.app.backend?.authenticated === false) requirements.push('当前 Hermes 提供商尚未完成认证。');
     if (skills.length && connected) {
       const resolved = await Promise.allSettled([...new Set(skills.map(node => node.config.skillRef))].map(async name => {
@@ -63,8 +65,12 @@ export class WorkflowExamples {
     if (example.kind === 'learn') {
       const config = await read(id, '.config.json'), dataset = normalizeWorkflowDataset({ trainingCases: config.trainingCases, validationCases: config.validationCases });
       if (!plan.learningBranch) fail('学习示例缺少完整的对比与改进支路。', 500);
-      learningConfig = { ...dataset, comparison: plan.learningBranch.evaluationNode.config.comparison, rubric: config.rubric,
-        targetScore: config.targetScore, maxRounds: config.maxRounds, trainableNodeIds: [...plan.learningBranch.improvementNode.config.targetSkillNodeIds] };
+      const targets = learningImprovementTargets(plan), permissions = this.app.assistantPermissionSettings?.get?.()?.workflow;
+      if (targets.scope !== 'skills' && permissions && (!permissions.workflowRead || !permissions.workflowEdit || !permissions.customNodes)) {
+        requirements.push('请在设置中开放工作流读取、编辑和自定义节点权限。');
+      }
+      learningConfig = { ...dataset, scope: targets.scope, comparison: plan.learningBranch.evaluationNode.config.comparison, rubric: config.rubric,
+        targetScore: config.targetScore, maxRounds: config.maxRounds, trainableNodeIds: [...targets.ids] };
     }
     const ready = requirements.length === 0;
     this.app.logEvents?.write('info', 'workflow.example.prepared', { component: 'workflow', workflowId, count: document.nodes.length, status: ready ? 'ready' : 'blocked' });
