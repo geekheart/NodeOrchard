@@ -83,7 +83,11 @@ async function api(path, { method = 'GET', body } = {}) {
   try { response = await fetch(path, { method, headers, credentials: 'same-origin', cache: 'no-store', ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
   catch (error) { appDiagnosticClient.recordRequest(path, 0, error.message); throw error; }
   let result; try { result = await response.json(); } catch { throw new Error(`服务响应无法读取（HTTP ${response.status}）。`); }
-  if (!response.ok) { const error = new Error(safeText(result.error || `请求失败（HTTP ${response.status}）。`)); error.httpStatus = response.status; appDiagnosticClient.recordRequest(path, response.status, error.message); throw error; } return result;
+  if (!response.ok) { const error = new Error(safeText(result.error || `请求失败（HTTP ${response.status}）。`)); error.httpStatus = response.status;
+    const requestId = response.headers.get('X-Request-Id');
+    appDiagnosticClient.recordRequest(path, response.status, error.message, requestId);
+    if (typeof requestId === 'string' && /^(?:req-)?[a-f0-9-]{36}$/i.test(requestId)) error.requestId = requestId;
+    throw error; } return result;
 }
 const hermesModels = new HermesModelUI({
   api, context: () => ({ backend: state.backend, connecting: state.connecting, csrfToken: state.csrfToken }), connect: connectBackend,

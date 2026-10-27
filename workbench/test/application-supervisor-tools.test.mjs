@@ -5,6 +5,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApplicationSupervisorTools } from '../src/application-supervisor-tools.mjs';
+import { ApplicationLog } from '../src/application-log.mjs';
+import { compactDiagnosticContext } from '../src/assistant-diagnostic-turn.mjs';
 import { WorkflowLibrary } from '../src/workflows/workflow-library.mjs';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
 
@@ -189,4 +191,65 @@ test('global logs expose bounded redacted metadata without learning data, reason
   for (const secret of ['known-answer', 'private-thought', 'private-payload', 'secret-value', 'super-secret', 'internal thought', 'do-not-expose']) assert.equal(rendered.includes(secret), false, secret);
   await assert.rejects(f.tools.call('app.logs', { path: '/private/logs' }, supervisor));
   await assert.rejects(f.tools.call('app.logs', { limit: 1000 }, supervisor));
+});
+
+test('persistent application logs advertise validated filters and keep durable cursors separate from current-process diagnostics', async t => {
+  const f = fixture(t, { durable: true }), at = new Date('2026-10-27T04:00:00.000Z');
+  f.app.logger = new ApplicationLog(f.db, { level: 'debug', now: () => at });
+  const first = f.app.logger.warn('workflow.waiting', { component: 'workflow', workflowId: 'workflow-a', runId: 'run-a', requestId: 'request-a', stage: 'model-response' });
+  f.app.logger.error('workflow.failed', { component: 'workflow', workflowId: 'workflow-b', runId: 'run-b' });
+  f.app.logger.info('workflow.completed', { component: 'workflow', workflowId: 'workflow-a', runId: 'run-a' });
+  const descriptor = f.tools.tools().find(tool => tool.name === 'app.logs');
+  assert.deepEqual(descriptor.inputSchema.properties.minLevel.enum, ['debug', 'info', 'warn', 'error', 'fatal']);
+  assert.equal(descriptor.effect, 'read-only'); assert.deepEqual(descriptor.roles, ['supervisor']);
+  const query = { minLevel: 'warn', component: 'workflow', workflowId: 'workflow-a', runId: 'run-a', requestId: 'request-a', from: '2026-10-27T12:00:00+08:00', to: '2026-10-27T04:00:00Z' };
+  let result = await f.tools.call('app.logs', query, supervisor);
+  assert.equal(result.source, 'application-log'); assert.equal(result.persistentHistory, true);
+  assert.deepEqual(result.structured.entries.map(row => row.id), [first.id]); assert.equal(result.structured.nextAfterId, first.id);
+  const tools = f.reopen(); f.app.logger = new ApplicationLog(f.db, { level: 'debug', now: () => at });
+  const next = f.app.logger.fatal('backend.unavailable', { component: 'backend', sessionId: 'session-a', conversationId: 'global-application', turnId: 'turn-a', operationId: 'operation-a' });
+  f.app.events = [{ id: 999, type: 'workflow.run', payload: { id: 'not-a-persistent-log' } }];
+  f.app.adapter.log = ['password=credential-sentinel', '<think>reasoning-sentinel</think> current diagnostic'];
+  result = await tools.call('app.logs', { afterId: first.id, minLevel: 'error' }, supervisor);
+  assert.deepEqual(result.structured.entries.map(row => row.event), ['workflow.failed', 'backend.unavailable']);
+  assert.equal(result.structured.nextAfterId, next.id); assert.notEqual(result.structured.entries[0].bootId, next.bootId);
+  assert.equal(result.currentProcess.persistentHistory, false); assert.equal(result.currentProcess.events, undefined);
+  assert.equal(JSON.stringify(result).includes('credential-sentinel'), false); assert.equal(JSON.stringify(result).includes('reasoning-sentinel'), false);
+  const correlated = await tools.call('app.logs', { sessionId: 'session-a', conversationId: 'global-application', turnId: 'turn-a', operationId: 'operation-a' }, supervisor);
+  assert.deepEqual(correlated.structured.entries.map(row => row.id), [next.id]);
+});
+
+test('log filter validation rejects invalid identities, periods, injected options and accessors before any read', async t => {
+  const f = fixture(t); let reads = 0, getter = false;
+  f.app.logger = { read: () => { reads++; assert.fail('invalid filter reached a log read'); } };
+  for (const args of [{ minLevel: 'verbose' }, { minLevel: {} }, { component: '../private' }, { component: 'x'.repeat(65) },
+    { workflowId: '../foreign' }, { requestId: {} }, { from: 'yesterday' }, { to: '2026-10-27' },
+    { from: '2026-10-28T00:00:00Z', to: '2026-10-27T00:00:00Z' }, { limit: 101 }, { afterId: -1 },
+    { path: '/private/logs' }, { rawMessage: 'private input' }, { role: 'supervisor' }, { get minLevel() { getter = true; return 'info'; } }]) {
+    await assert.rejects(f.tools.call('app.logs', args, supervisor), { httpStatus: 400 });
+  }
+  assert.equal(reads, 0); assert.equal(getter, false);
+  delete f.app.logger;
+  const unavailable = await f.tools.call('app.logs', { minLevel: 'error' }, supervisor);
+  assert.equal(unavailable.available, false); assert.equal(unavailable.filtersApplied, false); assert.deepEqual(unavailable.structured.entries, []);
+});
+
+test('bounded log pages never skip undisclosed records when evidence is compacted for the assistant', async t => {
+  const f = fixture(t), at = new Date('2026-10-27T04:00:00.000Z');
+  f.app.logger = new ApplicationLog(f.db, { level: 'debug', now: () => at });
+  const long = 'x'.repeat(120), context = { component: 'workflow', workflowId: long, runId: long, nodeId: long, sessionId: long,
+    conversationId: long, turnId: long, requestId: long, operationId: long, learningId: long, scheduleId: long, attemptId: long,
+    stage: long, phase: long, status: long, code: long, errorType: long, errorName: long, errorCode: long, model: long, provider: long, tool: long, mode: long, source: long, reason: long };
+  const ids = Array.from({ length: 100 }, () => f.app.logger.info('workflow.checkpoint', context).id), delivered = [];
+  let afterId = 0;
+  for (let page = 0; page < 20; page++) {
+    const result = await f.tools.call('app.logs', { limit: 100, afterId }, supervisor), compacted = compactDiagnosticContext(result);
+    const entries = compacted.structured.entries;
+    assert(entries.length > 0); assert(entries.length <= 40); assert.deepEqual(entries.map(row => row.id), result.structured.entries.map(row => row.id));
+    assert.equal(compacted.structured.nextAfterId, entries.at(-1).id);
+    assert(Buffer.byteLength(JSON.stringify(result), 'utf8') < 48 * 1024);
+    delivered.push(...entries.map(row => row.id)); afterId = result.structured.nextAfterId;
+    if (!result.structured.hasMore) break;
+  }
+  assert.deepEqual(delivered, ids);
 });

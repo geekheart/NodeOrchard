@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createDocument, validateDocument } from '../shared/workflow/workflow-model.mjs';
 import { sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from './app-diagnostics.mjs';
+import { APPLICATION_LOG_LEVELS, validateApplicationLogFilters } from './application-log.mjs';
 
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const identifier = { type: 'string', maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' };
@@ -19,9 +20,14 @@ export const APPLICATION_SUPERVISOR_TOOLS = Object.freeze([
     ['title', 'expectedRevision', 'operationId']),
   mutation('workflow.delete', '总控专用：按明确版本将工作流直接移入可恢复回收站，同时暂停定时任务，忙碌流程拒绝。无永久删除权限，不取消或重跑业务。',
     { workflowId: identifier, expectedRevision: revision, operationId: identifier }, ['workflowId', 'expectedRevision', 'operationId']),
-  { name: 'app.logs', description: '总控专用：读取当前进程保留的应用事件摘要与 Hermes 诊断日志；脱敏、有界，不包含完整持久历史、训练样本或内部推理。',
+  { name: 'app.logs', description: '总控专用：按 DEBUG/INFO/WARN/ERROR/FATAL 最低等级、模块、时间或关联身份读取脱敏持久日志。优先查看 structured.entries；默认取最新窗口，完整正向分页从 afterId:0 开始，用 nextAfterId 跨重启续读，每次受证据预算限制至多40条。currentProcess 仅附当前进程 Hermes 诊断窗口，不能共用持久游标。无任意文件、源码写入或执行能力。',
     inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 },
-      afterId: { type: 'integer', minimum: 0 } }, additionalProperties: false }, effect: 'read-only', readOnly: true,
+      afterId: { type: 'integer', minimum: 0 }, minLevel: { type: 'string', enum: [...APPLICATION_LOG_LEVELS] },
+      component: { type: 'string', maxLength: 64, pattern: '^[a-z][a-z0-9.-]{0,63}$' },
+      workflowId: identifier, runId: identifier, nodeId: identifier, sessionId: identifier, conversationId: identifier,
+      turnId: identifier, requestId: identifier, operationId: identifier,
+      from: { type: 'string', format: 'date-time', maxLength: 40 }, to: { type: 'string', format: 'date-time', maxLength: 40 },
+    }, additionalProperties: false }, effect: 'read-only', readOnly: true,
     availability: 'available', roles: ['supervisor'],
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
 ]);
@@ -73,9 +79,7 @@ function cleanRequest(name, args) {
   if (!tool) fail('未开放此总控工具。', 403);
   plain(args, Object.keys(tool.inputSchema.properties));
   if (name === 'app.logs') {
-    if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100)) fail('日志条数必须为 1 到 100。');
-    if (args.afterId !== undefined && (!Number.isSafeInteger(args.afterId) || args.afterId < 0)) fail('日志游标必须是非负整数。');
-    return { ...args };
+    return validateApplicationLogFilters(args);
   }
   id(args.operationId);
   if (!Number.isSafeInteger(args.expectedRevision) || (name === 'workflow.create-test' ? args.expectedRevision !== 0 : args.expectedRevision < 1)) fail('工作流预期版本无效。');
@@ -180,7 +184,42 @@ export class ApplicationSupervisorTools {
       recovery: '在回收站恢复到工作流；定时任务保持暂停，需用户重新启用。' };
   }
 
-  logs({ limit = 40, afterId = 0 } = {}) {
+  logs(input = {}) {
+    const filters = validateApplicationLogFilters(input), { limit } = filters;
+    if (!this.app.logger?.read) {
+      if (Object.keys(filters).some(key => !['limit', 'afterId'].includes(key))) return {
+        available: false, source: 'application-log', persistentHistory: false, filtersApplied: false,
+        structured: { entries: [], nextAfterId: filters.afterId ?? 0, hasMore: false, persistence: { available: false } },
+        note: '分级持久日志尚不可用，未将筛选条件假应用到旧内存窗口。',
+      };
+      return this.legacyLogs(filters);
+    }
+    const requestedLimit = limit, deliveryLimit = Math.min(limit, 40);
+    const read = this.app.logger.read({ ...filters, limit: deliveryLimit });
+    const entries = []; let budget = 32 * 1024;
+    for (const entry of read.entries || []) {
+      const clean = sanitizeDiagnosticEvidence({ entry: { id: entry.id, at: entry.at, level: entry.level, component: entry.component,
+        event: entry.event, bootId: entry.bootId, context: entry.context } }).entry;
+      const bytes = Buffer.byteLength(JSON.stringify(clean), 'utf8');
+      if (bytes > budget) break;
+      entries.push(clean); budget -= bytes;
+    }
+    const omitted = entries.length < (read.entries?.length || 0);
+    const structured = { entries, nextAfterId: entries.at(-1)?.id ?? filters.afterId ?? 0,
+      oldestId: read.oldestId, latestId: read.latestId, hasMore: !!read.hasMore || omitted,
+      truncated: !!read.truncated || omitted, cursorExpired: !!read.cursorExpired, direction: read.direction,
+      requestedLimit, deliveryLimit, retention: read.retention, enabledLevel: read.enabledLevel, persistence: read.persistence };
+    // Each persisted entry has already been bounded and scrubbed. The complete
+    // entry window stays below the diagnostic budget so later prompt bounding
+    // cannot advance the cursor beyond records the assistant actually receives.
+    const adapterLog = sanitizeDiagnosticEvidence({ adapterLog: (this.app.adapter?.log || []).slice(-Math.min(limit, 8)) }).adapterLog || [];
+    return { available: read.persistence?.available === true, source: 'application-log', persistentHistory: true, structured,
+      currentProcess: { source: 'hermes-diagnostics-memory', persistentHistory: false,
+        adapterLog: adapterLog.map(line => typeof line === 'string' ? line.slice(-1000) : '[非文本诊断已省略]') },
+      note: 'afterId 与 nextAfterId 仅用于 structured.entries。direction=latest 时 hasMore 可表示更早历史；需要完整遍历时从 afterId:0 正向读取。currentProcess 不使用该游标。' };
+  }
+
+  legacyLogs({ limit = 40, afterId = 0 } = {}) {
     const retained = this.app.events || [], matching = retained.filter(event => event.id > afterId);
     const events = matching.slice(-limit).map(event => {
       const payload = event.payload || {}, subject = payload.workflow || payload.run || payload.session || payload;

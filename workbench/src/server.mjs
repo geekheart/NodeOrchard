@@ -1,7 +1,8 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { applicationHttpRoute, applicationResponseTrace, applicationErrorLocation } from './application-log-events.mjs';
 import { Application } from './application.mjs';
 import { redact } from './hermes-adapter.mjs';
 
@@ -24,13 +25,30 @@ async function readJson(req, limit = 1000000) {
 export function createWorkbenchServer(config, application = new Application(config)) {
   const csrfToken = randomBytes(24).toString('hex');
   const clients = new Set();
+  const responseTraces = new WeakMap();
   const publicEvent = event => !event.sessionId || !application.assistantModel?.ownsSession(event.sessionId);
   const json = (res, code, data) => {
+    responseTraces.set(res, applicationResponseTrace(data));
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(data));
   };
   let origin;
   const server = createServer(async (req, res) => {
+    const requestId = randomUUID(), startedAt = performance.now(), route = applicationHttpRoute(req.url);
+    const method = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'].includes(req.method) ? req.method : 'OTHER';
+    res.setHeader('X-Request-Id', requestId);
+    try { application.logger?.write(method === 'GET' || method === 'HEAD' ? 'debug' : 'info', 'http.request.started', { component: 'http', requestId, route, method }); }
+    catch { /* Requests remain admitted when diagnostics are unavailable. */ }
+    let completed = false;
+    const logRequest = aborted => {
+      if (completed) return; completed = true;
+      const httpStatus = aborted ? 499 : res.statusCode;
+      const level = route === '/api/events' ? 'debug' : httpStatus >= 500 ? 'error' : httpStatus >= 400 ? 'warn' : method === 'GET' || method === 'HEAD' ? 'debug' : 'info';
+      try { application.logger?.write(level, 'http.request.completed', { component: 'http', requestId, route, method, httpStatus,
+        ...responseTraces.get(res), durationMs: Math.max(0, Math.round(performance.now() - startedAt)), code: aborted ? 'CLIENT_DISCONNECTED' : undefined }); } catch { /* Response completion is authoritative. */ }
+    };
+    res.once('finish', () => logRequest(false));
+    res.once('close', () => { if (!res.writableFinished) logRequest(true); });
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
@@ -384,8 +402,12 @@ export function createWorkbenchServer(config, application = new Application(conf
         return res.end(content);
       }
       return json(res, 404, { error: '接口不存在。' });
-    } catch (error) { return json(res, error.httpStatus || 400, { error: redact(error.message),
-      ...(Array.isArray(error.details) ? { errors: error.details } : {}) }); }
+    } catch (error) {
+      try { application.logger?.write(error.httpStatus && error.httpStatus < 500 ? 'warn' : 'error', 'http.request.failed', {
+        component: 'http', requestId, route, method, httpStatus: error.httpStatus || 400, errorName: error.name, errorCode: error.code,
+        ...applicationErrorLocation(error, config.appRoot) }); } catch { /* Keep the existing HTTP error contract. */ }
+      return json(res, error.httpStatus || 400, { error: redact(error.message), ...(Array.isArray(error.details) ? { errors: error.details } : {}) });
+    }
   });
   const onEvent = event => {
     if (!publicEvent(event)) return;

@@ -291,7 +291,7 @@ export class ApplicationAssistant {
         + `SOURCE_JSON是初始摘要；省略的代码/日志按需用workflow.inspect、workflow.run、session.history读取。明确区分所选旧run、latestRun与当前草稿，不把旧节点错误当最新错误；partial不是成功。\n`
         + `capabilities与内部Skill说明真实能力。代码模式支持Python/JavaScript业务候选，无需注册工具；先读node.describe，第三方库先runtime.inspect。需要修改用workflow.propose，只生成编辑器校验候选，等待用户在原聊天应用；不自动执行、重试或批准。用户要求保留现场时只读诊断，不能改或跑业务。\n`
         + `workflow.run只读取历史；workflow.preflight不试跑代码。严格区分available/proposal-only/ui-only/unavailable。没有开放的能力不可虚构，已有日志不可要求用户再复制。证据不足才检查环境或截图；截图是隔离只读浏览器，不是用户当前标签页；图片由真实图像输入提供。最多${this.maxCalls}项工具查询，整轮有总等待上限。\n`
-        + `总控的workflow.copy/create-test/delete仅在用户明确要求对应管理操作时调用；禁止为诊断擅自删除或修改工作流。mutation不能批量，须明确目标和版本并提供稳定operationId。delete只进入可恢复回收站。结果未知不得换operationId重放，复制与新增测试草稿均不自动运行。app.logs仅当前进程有界窗口。\n`
+        + `总控的workflow.copy/create-test/delete仅在用户明确要求对应管理操作时调用；禁止为诊断擅自删除或修改工作流。mutation不能批量，须明确目标和版本并提供稳定operationId。delete只进入可恢复回收站。结果未知不得换operationId重放，复制与新增测试草稿均不自动运行。app.logs可按等级、模块、时间和关联ID读取有界持久日志；优先warn及以上定位，再按requestId/runId/turnId展开info阶段，按实际交付游标分页。currentProcess中的Hermes诊断仅当前进程。\n`
         + `总控通过conversations.list读取独立会话摘要，conversation.inspect按需读取一条会话。需要独立助手协助且用户明确委派时用conversation.delegate；它只提交只读诊断消息，不运行或修改工作流。返回turnId后可后续查看，不能重复提交或循环等候。总控主题的历史各自独立，不默认合并工作流聊天。\n`
         + `TOOL_CATALOG=${JSON.stringify(catalog)}\nSOURCE_JSON=${JSON.stringify(source)}`;
       for (let index = 0; index <= this.maxCalls; index++) {

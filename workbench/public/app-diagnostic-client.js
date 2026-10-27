@@ -24,8 +24,9 @@ export function createAppDiagnosticClient({ window = globalThis.window, document
   listen(window, 'error', event => record('error', { message: safeText(event.message || '页面资源错误').slice(0, 1200), line: event.lineno, column: event.colno }));
   listen(window, 'unhandledrejection', event => record('promise-error', { message: safeText(typeof event.reason === 'string' ? event.reason : event.reason?.message || '异步请求失败').slice(0, 1200) }));
   return {
-    recordRequest(path, status, message = '') {
-      if (status >= 400 || status === 0) record('request-error', { path: String(path).split(/[?#]/)[0].slice(0, 256), status, message: safeText(message).slice(0, 800) });
+    recordRequest(path, status, message = '', requestId = '') {
+      const correlation = typeof requestId === 'string' && /^(?:req-)?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId) ? requestId : null;
+      if (status >= 400 || status === 0) record('request-error', { path: String(path).split(/[?#]/)[0].slice(0, 256), status, message: safeText(message).slice(0, 800), ...(correlation ? { requestId: correlation } : {}) });
     },
     snapshot() { return diagnosticSnapshot({ source: 'current-application-page', route: route(), capturedAt: new Date().toISOString(),
       viewport: { width: window.innerWidth, height: window.innerHeight }, state: getState(), events: events.slice(-40),

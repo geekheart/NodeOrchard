@@ -13,6 +13,8 @@ export function defaultWorkflowRunRoot(env = process.env, platform = process.pla
 }
 
 export function readConfig(env = process.env) {
+  const logLevel = String(env.WORKBENCH_LOG_LEVEL || 'info').toLowerCase();
+  if (!['debug', 'info', 'warn', 'error', 'fatal'].includes(logLevel)) throw Object.assign(new Error('WORKBENCH_LOG_LEVEL 必须为 debug、info、warn、error 或 fatal。'), { code: 'INVALID_LOG_LEVEL' });
   const hermesRoot = resolve(env.WORKBENCH_HERMES_ROOT || join(homedir(), '.hermes/hermes-agent'));
   const dataDir = resolve(env.WORKBENCH_DATA_DIR || join(appRoot, '.local'));
   const workspaceRoot = resolve(env.WORKBENCH_WORKSPACE_ROOT || join(projectRoot, 'workflow'));
@@ -35,6 +37,7 @@ export function readConfig(env = process.env) {
     hermesPython: env.WORKBENCH_HERMES_PYTHON || join(hermesRoot, 'venv/bin/python'),
     hermesHome: env.WORKBENCH_HERMES_HOME || join(homedir(), '.hermes'),
     hermesVersion,
+    logLevel,
     diagnosticChromePath: env.WORKBENCH_DIAGNOSTIC_CHROME || undefined,
     diagnosticFfmpegPath: env.WORKBENCH_DIAGNOSTIC_FFMPEG || undefined,
   };

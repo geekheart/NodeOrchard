@@ -73,6 +73,8 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 
 ## 全局对话管理
 
+`application-log.mjs` 负责受容量限制的SQLite日志、等级、白名单字段及分页；`application-log-events.mjs` 将已有生命周期事件投影为去重的运行／节点／助手阶段元数据。HTTP生成独立requestId，并通过响应头与页面诊断关联。观察失败与业务控制隔离；普通流式文本和Token快照不逐块写入。总控 `app.logs` 与能力目录复用同一验证及受限读取，持久证据和当前进程Hermes窗口分开，见[应用日志](application-logging.md)。
+
 统计采用 `workbench-statistics.mjs` 的本地只读投影，覆盖工作流执行、独立对话、总控对话、模型调用和已登记产物；`statistics-dashboard.js/.css` 提供与主页面主题一致的高密度仪表界面。Hermes原生usage事件经 `session-usage.mjs` 白名单记录会话快照和单次模型运行差值，不调用账户用量接口、不触发推理或重放。完整终态与部分采集分别标识，上下文保持自己的采集时间。历史、回收站与删除记录继续参与消耗统计，不改写业务记录。范围、去重、时区与缺失语义见[统计口径](workbench-statistics.md)。
 
 历史补齐由 `historical-usage.mjs` 调用 `workbench.usage.history`：Python桥接固定Hermes启动历史库，以原生只读连接批量投影已知stored session ID的数字，不恢复Agent或读取账户配额。结果仅写 `hermes_usage_history`，不覆盖实时快照与运行差值；聚合按唯一会话、单次已结束运行、无压缩父子链及消息时间窗口重新校验后采用历史值。历史上下文锚点仅表示最后请求输入，容量与采样时间未存时保持空值。

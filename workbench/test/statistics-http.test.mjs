@@ -26,7 +26,9 @@ async function fixture(t) {
   t.after(async () => { await bridge.close(); assert.deepEqual(adapter.calls, []); await rm(directory, { recursive: true, force: true }); });
   return { app, adapter, origin, documents };
 }
-const hashes = app => Object.fromEntries(app.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+// Diagnostics can append bounded observations while business and live metering
+// rows remain read-only. They are outside the statistics mutation boundary.
+const hashes = app => Object.fromEntries(app.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'application_logs' ORDER BY name").all()
   .map(({ name }) => [name, createHash('sha256').update(JSON.stringify(app.store.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all())).digest('hex')]));
 
 test('statistics HTTP exposes real empty workflow metrics without running models or mutating records', async t => {

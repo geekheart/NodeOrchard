@@ -6,6 +6,8 @@ import { Store } from './store.mjs';
 import { collectWorkbenchStatistics } from './workbench-statistics.mjs';
 import { SessionUsage, sanitizeSessionUsage } from './session-usage.mjs';
 import { HistoricalUsage } from './historical-usage.mjs';
+import { ApplicationLog } from './application-log.mjs';
+import { ApplicationLogEvents } from './application-log-events.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
 import { validatePreferences } from './preferences.mjs';
@@ -39,6 +41,10 @@ export class Application extends EventEmitter {
     this.adapter = adapter;
     this.models = new HermesModels(adapter);
     this.store = new Store(config.dataDir);
+    try { this.logger = new ApplicationLog(this.store.db, { level: config.logLevel || 'info' }); }
+    catch { this.logger = null; /* Log persistence cannot prevent business execution. */ }
+    this.logEvents = new ApplicationLogEvents(this.logger);
+    this.logEvents.write('info', 'application.starting', { component: 'application' });
     try { this.sessionUsage = new SessionUsage(this.store.db); this.store.sessionUsage = this.sessionUsage; }
     catch { this.sessionUsage = null; /* Missing telemetry must not prevent task execution. */ }
     this.requests = new Map();
@@ -90,10 +96,12 @@ export class Application extends EventEmitter {
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
     this.historicalUsage = new HistoricalUsage(this);
+    this.logEvents.write('info', 'application.started', { component: 'application', status: 'ready' });
   }
 
   publish(type, sessionId, payload) {
     const event = { id: ++this.sequence, type, sessionId, payload, at: new Date().toISOString() };
+    this.logEvents?.handle(event);
     this.events.push(event);
     const size = Buffer.byteLength(JSON.stringify(event));
     this.eventSizes.push(size);
@@ -165,9 +173,15 @@ export class Application extends EventEmitter {
 
   async backfillHistoricalUsage() {
     if (this.closed) throw new Error('工作台已关闭。');
-    const result = await this.historicalUsage.refresh();
-    if (!this.closed) this.publish('statistics.history', null, result);
-    return result;
+    this.logEvents.write('info', 'statistics.history.started', { component: 'statistics' });
+    try {
+      const result = await this.historicalUsage.refresh();
+      if (!this.closed) this.publish('statistics.history', null, result);
+      return result;
+    } catch (error) {
+      this.logEvents.write('error', 'statistics.history.failed', { component: 'statistics', errorName: error.name, errorCode: error.code, httpStatus: error.httpStatus });
+      throw error;
+    }
   }
 
   async skills() {
@@ -564,6 +578,7 @@ export class Application extends EventEmitter {
 
   async close() {
     if (this.closed) return;
+    this.logEvents.write('info', 'application.stopping', { component: 'application' });
     this.historicalUsage?.close?.();
     await this.conversations.close();
     await this.applicationAssistant.close();
@@ -578,6 +593,9 @@ export class Application extends EventEmitter {
       .map(s => this.adapter.request('session.interrupt', { session_id: s.runtimeSessionId }, 1500)));
     this.closed = true;
     await this.adapter.stop();
+    this.logEvents.write('info', 'application.stopped', { component: 'application', status: 'stopped' });
+    this.logEvents.close();
+    this.logger?.close();
     this.store.close();
   }
 }
