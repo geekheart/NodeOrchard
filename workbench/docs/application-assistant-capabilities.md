@@ -14,6 +14,7 @@
 | `src/assistant-diagnostic-turn.mjs` 与对话持久化模块 | 紧凑上下文、阶段、检查点与证据有效期 | 保留对象身份和省略标记；复用不扩权，失败与重启不重放 |
 | `src/application-conversation-hub.mjs` 与工作流／总控会话存储 | 会话目录、主题隔离、历史读取与只读委派 | 先读摘要再按需展开，消息和操作始终绑定目标会话，旧记录保留 |
 | `src/application-assistant-skills.mjs` 与 `assistant-skills/` | 内部 Skill 的固定目录及如何组合、选择和解释已有接口 | 由注册表发现并按需读取，不扫描用户业务 Skill，不把说明文字视为新增工具授权 |
+| `shared/keyboard-shortcuts.mjs` 与偏好设置 | 用户快捷键操作、生效范围、组合与冲突规则 | 设置表、聊天、编辑器共用；助手只读当前偏好，不提供改键或扩大执行权限的工具 |
 | 节点规划、执行、文件与审核模块 | 实际参数、类型、产物和状态语义 | 接口变更同时回写能力契约及相关说明 |
 
 内部助手先使用 `app.capabilities` 获取能力范围，配置节点前按需调用 `node.describe`，检查解释器／执行环境时使用 `runtime.inspect`。具体参数、返回字段和可调用的内部 Skill 以当前工具目录及 schema 为准；本页不复制可执行 schema。

@@ -3,13 +3,13 @@ import { WorkflowConversationUI } from './workflow-conversation-ui.js';
 // Supervisor topics reuse the workflow conversation view while keeping their
 // identities, drafts, pending issues and late responses separate.
 export class ApplicationConversationUI extends WorkflowConversationUI {
-  constructor(host, { api, getBackend, getPageDiagnostics, conversationId = 'global-application' } = {}) {
+  constructor(host, { api, getBackend, getPageDiagnostics, getShortcuts, conversationId = 'global-application' } = {}) {
     const header = document.createElement('div'); header.className = 'wf-header-actions';
     const body = document.createElement('div'); body.className = 'wf-body'; host.replaceChildren(header, body);
     const facade = { root: host, doc: { id: conversationId, title: conversationId === 'global-application' ? '历史全局对话' : '总控主题', nodes: [], edges: [] }, selection: new Set(), settings: { propertiesClosed: true } };
     const mappedApi = (path, options) => api(path.replace(/^\/api\/workflow-conversations\/([^/]+)/,
       (_, id) => '/api/app-assistant/conversations/' + id), options);
-    super(facade, { api: mappedApi, getBackend, getPageDiagnostics });
+    super(facade, { api: mappedApi, getBackend, getPageDiagnostics, getShortcuts });
     this.panel.setAttribute('aria-label', '总控助手对话'); this.panel.querySelector('h2').textContent = '总控助手';
     this.input.setAttribute('aria-label', '给总控助手的消息'); this.runButton.hidden = true;
     this.sendButton.setAttribute('aria-label', '发送总控消息'); this.messages.setAttribute('aria-label', '总控主题对话记录');

@@ -13,6 +13,8 @@ import { createAppDiagnosticClient } from './app-diagnostic-client.js';
 import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
+import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
+import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
 
 const $ = (id) => document.getElementById(id);
 let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, applicationConversationSelection, conversationHub, routeLoad = 0;
@@ -29,7 +31,7 @@ const state = {
   interrupting: new Set(), replying: new Set(), messageDrafts: new Map(),
   source: null, reconnectTimer: null, retry: 0, transport: 'starting', closed: false,
   newTaskError: '', skills: null, skillDetails: new Map(), skillsLoading: false, skillLoading: null,
-  stats: new Map(), statsPending: new Set(), settings: null, settingsLoading: false, saving: false, settingsDirty: false,
+  stats: new Map(), statsPending: new Set(), settings: null, settingsLoading: false, settingsRevision: 0, saving: false, settingsDirty: false,
   eventRevision: 0, sessionRevision: new Map(), turnRevision: new Map(), messageRevision: new Map(), requestsRevision: 0, backendRevision: 0, lastEventId: null,
 };
 const appDiagnosticClient = createAppDiagnosticClient({ getState: () => ({ page: state.route?.page,
@@ -94,6 +96,10 @@ const hermesModels = new HermesModelUI({
   changed: (_data, { applied = false } = {}) => { renderNewTaskState(); if (state.route?.page === 'settings') renderSettings(); if (applied) void Promise.allSettled([synchronize(), loadSettings()]); },
 });
 const assistantPermissions = new AssistantPermissionsUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
+const shortcutSettings = new ShortcutSettingsUI({ api, readOnly: diagnosticCapture,
+  onSaved: settings => { state.settingsRevision++; state.settings = settings; applyPreferences(preferences()); if (state.route?.page === 'settings') renderSettings(); },
+}).mount($('shortcut-settings-root'));
+const activeShortcuts = () => preferences().shortcuts;
 function upsertSession(session) { if (!session?.id) return; const index = state.sessions.findIndex((item) => item.id === session.id); if (index < 0) state.sessions.unshift(session); else state.sessions[index] = { ...state.sessions[index], ...session }; }
 function taskURL(id, tab = 'workspace', panel = '') { return `#/task/${encodeURIComponent(id)}?tab=${tab}${panel ? `&panel=${panel}` : ''}`; }
 function readRoute() {
@@ -151,7 +157,7 @@ function renderShell() {
   const showApplicationChat = route.page === 'conversations' && Boolean(route.id);
   $('global-conversation-root').hidden = !showApplicationChat;
   if (showApplicationChat && state.bootstrapped) {
-    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
+    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
     if (applicationConversationSelection !== route.id) { applicationConversationSelection = route.id; void applicationConversation.selectConversation(route.id).catch(error => notify(`总控会话打开失败：${error.message}`, true)); }
   }
   renderSidebar();
@@ -215,11 +221,13 @@ function ensureConversationHub() {
 function ensureWorkflowEditor() {
   if (workflowEditor) return;
   workflowEditor = new WorkflowEditor($('workflow-root'));
+  workflowEditor.getShortcuts = activeShortcuts;
   workflowEditor.runtime = new WorkflowRuntimeUI(workflowEditor, {
     api, connect: connectBackend, getBackend: () => state.backend,
     getRequests: () => [...state.requests.values()], taskURL,
   });
-  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() });
+  workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts });
+  workflowEditor.updateShortcutHints();
   if (diagnosticCapture) workflowEditor.conversation.schedulePoll = () => {};
   workflowEditor.conversation.connectRuntime(workflowEditor.runtime);
   workflowLibraryClient = new WorkflowLibraryClient(workflowEditor, { api,
@@ -320,6 +328,7 @@ function renderComposer() {
   $('resume-button').disabled = !session || !ready || busy || state.resuming || state.historyLoading; $('resume-button').textContent = state.resuming ? '恢复中…' : '恢复会话';
   $('message-input').disabled = !session || !ready || busy || session.workflowManaged || state.resuming || state.historyLoading; $('send-button').disabled = $('message-input').disabled || !$('message-input').value.trim();
   $('message-input').placeholder = session?.workflowManaged ? '工作流运行记录（只读）' : '输入消息';
+  updateChatShortcutHints($('message-input'), $('send-button'), activeShortcuts());
   $('interrupt-button').disabled = !session || !ready || !busy || state.interrupting.has(session.id);
   $('turn-status').textContent = safeText(!session ? '等待选择任务' : !ready ? '等待后端连接' : pending ? `等待你的处理 · ${pending} 项` : tool ? `工具运行中：${tool}` : busy ? 'Hermes 正在执行…' : state.historyLoading ? '正在读取历史…' : session.workflowManaged ? '工作流运行记录 · 只读' : `${session.model || state.info.get(session.id)?.model || state.backend.model || 'Hermes'} · 就绪`);
   $('turn-indicator').className = `dot ${pending || busy ? 'waiting' : ready && session ? 'live' : ''}`;
@@ -449,9 +458,16 @@ function renderEvents() { $('settings-event-count').textContent = `${state.event
 function addEvent(event) { state.events = appendDiagnosticEvent(state.events, event, { redact }); renderEvents(); }
 function renderNewTaskState() { const ready = state.backend.state === 'ready'; $('create-session-button').disabled = !ready || !state.csrfToken || state.creating; $('create-session-button').textContent = state.creating ? '创建中…' : '创建任务'; $('new-task-model').textContent = safeText(hermesModels.label()); $('new-task-connection').textContent = state.newTaskError || (ready ? '' : '请先连接 Hermes，再创建任务。'); $('new-task-connection').className = state.newTaskError ? 'error-text' : 'helper'; $('new-task-connect').hidden = ready; $('new-task-connect').disabled = state.connecting || !state.csrfToken; }
 function openNewTask() { state.newTaskError = ''; $('session-cwd').value = state.route.cwd || preferences().defaultWorkspace || state.backend.cwdDefault || ''; renderNewTaskState(); $('new-task-dialog').showModal(); $('session-title').focus(); }
-function applyPreferences(prefs) { document.documentElement.dataset.theme = ['light', 'dark'].includes(prefs.theme) ? prefs.theme : 'system'; document.documentElement.dataset.density = prefs.density === 'compact' ? 'compact' : 'comfortable'; try { localStorage.setItem('workbench-appearance', JSON.stringify({ theme: prefs.theme, density: prefs.density })); } catch {} }
+function applyPreferences(prefs) {
+  document.documentElement.dataset.theme = ['light', 'dark'].includes(prefs.theme) ? prefs.theme : 'system'; document.documentElement.dataset.density = prefs.density === 'compact' ? 'compact' : 'comfortable';
+  try { localStorage.setItem('workbench-appearance', JSON.stringify({ theme: prefs.theme, density: prefs.density })); } catch {}
+  if (state.settings) shortcutSettings.accept(state.settings);
+  workflowEditor?.updateShortcutHints(); workflowEditor?.conversation?.updateShortcutHints(); applicationConversation?.updateShortcutHints();
+  updateChatShortcutHints($('message-input'), $('send-button'), prefs.shortcuts);
+}
 function renderSettings() {
   assistantPermissions.render();
+  if (state.settings) shortcutSettings.accept(state.settings);
   const settings = state.settings; const runtime = settings?.runtime || {}; const prefs = preferences();
   if (!state.settingsDirty) { $('setting-theme').value = prefs.theme; $('setting-density').value = prefs.density; $('setting-workspace').value = prefs.defaultWorkspace; }
   $('save-preferences').disabled = state.saving || !state.csrfToken || !settings; $('save-preferences').textContent = state.saving ? '保存中…' : '保存偏好';
@@ -500,7 +516,7 @@ async function loadHistory(id, { quiet = false } = {}) {
   finally { if (id === state.selectedId && state.historyRevision.get(id) === revision) { state.historyLoading = false; renderComposer(); } }
 }
 async function loadRuns(id) { if (!id) return; try { const result = await api(`/api/sessions/${encodeURIComponent(id)}/runs`); state.runs.set(id, result.runs || []); if (id === state.selectedId) renderTaskRuns(); } catch (error) { if (id === state.selectedId) $('task-runs').replaceChildren(empty('无法读取执行记录', error.message, 'clock')); } }
-async function loadSettings() { if (state.settingsLoading) return; state.settingsLoading = true; try { state.settings = await api('/api/settings'); applyPreferences(preferences()); if (state.route.page === 'settings') renderSettings(); renderNewTaskState(); } catch (error) { if (state.route.page === 'settings') $('preferences-status').textContent = `设置读取失败：${error.message}`; } finally { state.settingsLoading = false; } }
+async function loadSettings() { if (state.settingsLoading) return; const revision = state.settingsRevision; state.settingsLoading = true; try { const settings = await api('/api/settings'); if (revision !== state.settingsRevision) return; state.settings = settings; applyPreferences(preferences()); if (state.route.page === 'settings') renderSettings(); renderNewTaskState(); } catch (error) { if (revision === state.settingsRevision && state.route.page === 'settings') $('preferences-status').textContent = `设置读取失败：${error.message}`; } finally { state.settingsLoading = false; } }
 async function loadSkills(force = false) { if (state.skillsLoading || state.skills && !force) return; state.skillsLoading = true; renderSkills(); try { state.skills = await api('/api/skills'); } catch (error) { state.skills = { connected: state.backend.state === 'ready', skills: [], error: error.message }; } finally { state.skillsLoading = false; if (state.route.page === 'skills') renderSkills(); } }
 async function loadSkillDetail(name) { if (!name || state.skillDetails.has(name) || state.skillLoading === name) return; state.skillLoading = name; try { state.skillDetails.set(name, await api(`/api/skills/${encodeURIComponent(name)}`)); } catch (error) { state.skillDetails.set(name, { error: error.message }); } finally { state.skillLoading = null; if (state.route.page === 'skills' && state.route.name === name) renderSkills(); } }
 async function loadStatistics(force = false) { const days = $('statistics-period').value; if (state.statsPending.has(days) || state.stats.has(days) && !force) return; state.statsPending.add(days); renderStatistics(); try { state.stats.set(days, await api(`/api/statistics?days=${days}`)); } catch (error) { state.stats.set(days, { error: error.message }); } finally { state.statsPending.delete(days); if (state.route.page === 'statistics') renderStatistics(); } }
@@ -574,7 +590,7 @@ function receiveEvent(event) {
     case 'backend.status': state.backend = { ...state.backend, ...(payload.backend || payload) }; if (['stopped', 'disconnected', 'error'].includes(state.backend.state)) { state.streams.clear(); state.tools.clear(); state.posting.clear(); if (state.route.page === 'task') renderMessages(); } renderBackend(); if (state.route.page === 'settings') renderSettings(); break;
     case 'models.updated': void hermesModels.refresh({ preserveSelection: hermesModels.nodes.dialog.open }); break;
     case 'backend.error': state.backend = { ...state.backend, state: 'error', lastError: payload.error || payload.message || '后端发生错误。' }; renderBackend(); break;
-    case 'settings.updated': if (payload.preferences) { state.settings = { ...(state.settings || {}), preferences: payload.preferences }; applyPreferences(preferences()); renderNewTaskState(); if (state.route.page === 'settings' && !state.saving) renderSettings(); } break;
+    case 'settings.updated': if (payload.preferences) { state.settingsRevision++; state.settings = { ...(state.settings || {}), preferences: payload.preferences }; applyPreferences(preferences()); renderNewTaskState(); if (state.route.page === 'settings' && !state.saving) renderSettings(); } break;
     case 'session.updated': upsertSession(payload.session || payload); updateSessionViews(); break;
     case 'request.open': { const request = payload.request || payload; if (request.id !== undefined) state.requests.set(String(request.id), { ...request, sessionId: request.sessionId || id }); renderRequests(); updateSessionViews(); break; }
     case 'request.cancel': state.requests.delete(String(payload.id)); renderRequests(); updateSessionViews(); break;
@@ -614,6 +630,20 @@ document.addEventListener('keydown', event => {
     event.preventDefault(); closeMobileSidebar({ focus: true });
   }
 });
+document.addEventListener('keydown', event => handleGlobalChatShortcut(event, {
+  getShortcuts: activeShortcuts,
+  isBlocked: () => shortcutSettings.isRecording() || Boolean(document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]:not([hidden])')),
+  getChat: () => {
+    if (state.route?.page === 'workflows' && workflowEditor?.active && workflowEditor.documentLoaded !== false) {
+      const chat = workflowEditor.conversation;
+      if (!chat?.workflowId) return null;
+      return { focus: () => { chat.toggle(true); chat.input.focus(); }, toggle: () => { const show = chat.panel.hidden; chat.toggle(show); (show ? chat.input : chat.openButton).focus(); } };
+    }
+    if (state.route?.page === 'conversations' && state.route.id && applicationConversation) return { focus: () => { applicationConversation.toggle(true); applicationConversation.input.focus(); } };
+    if (state.route?.page === 'task' && !$('message-input').disabled) return { focus: () => $('message-input').focus() };
+    return null;
+  },
+}), true);
 $('sidebar-connect').addEventListener('click', () => state.backend.state === 'ready' ? navigate('#/settings') : connectBackend());
 $('notice-close').addEventListener('click', () => notify(''));
 $('connect-button').addEventListener('click', connectBackend);
@@ -626,12 +656,12 @@ $('skill-search').addEventListener('input', renderSkills);
 $('refresh-skills').addEventListener('click', () => { state.skillDetails.clear(); void loadSkills(true).then(() => loadSkillDetail(state.route.name)); });
 $('statistics-period').addEventListener('change', () => { renderStatistics(); void loadStatistics(); });
 $('preferences-form').addEventListener('input', () => { state.settingsDirty = true; $('preferences-status').textContent = '有未保存的更改'; });
-$('preferences-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.saving) return; state.saving = true; $('preferences-status').textContent = '正在保存…'; renderSettings(); try { const prefs = { theme: $('setting-theme').value, density: $('setting-density').value, defaultWorkspace: $('setting-workspace').value.trim() }; state.settings = await api('/api/settings', { method: 'POST', body: { preferences: prefs } }); state.settingsDirty = false; applyPreferences(preferences()); await synchronize(); $('preferences-status').textContent = '偏好已保存'; } catch (error) { $('preferences-status').textContent = `保存失败：${error.message}`; } finally { state.saving = false; renderSettings(); } });
+$('preferences-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.saving) return; state.saving = true; $('preferences-status').textContent = '正在保存…'; renderSettings(); try { const prefs = { theme: $('setting-theme').value, density: $('setting-density').value, defaultWorkspace: $('setting-workspace').value.trim() }; state.settings = await api('/api/settings', { method: 'POST', body: { preferences: prefs } }); state.settingsRevision++; state.settingsDirty = false; applyPreferences(preferences()); await synchronize(); $('preferences-status').textContent = '偏好已保存'; } catch (error) { $('preferences-status').textContent = `保存失败：${error.message}`; } finally { state.saving = false; renderSettings(); } });
 $('session-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.creating || state.backend.state !== 'ready') return; state.creating = true; state.newTaskError = ''; renderNewTaskState(); notify(''); try { const result = await api('/api/sessions', { method: 'POST', body: { title: $('session-title').value.trim(), cwd: $('session-cwd').value.trim() } }); const session = result.session || result; upsertSession(session); state.histories.set(session.id, []); state.historyLoading = false; $('session-title').value = ''; $('session-cwd').value = ''; $('new-task-dialog').close(); navigate(taskURL(session.id)); } catch (error) { notify(`创建任务失败：${error.message}`, true); state.newTaskError = safeText(error.message); } finally { state.creating = false; renderNewTaskState(); } });
 $('resume-button').addEventListener('click', async () => { const id = state.selectedId; if (!id || state.resuming) return; const turnRevision = state.turnRevision.get(id) || 0; state.resuming = true; state.historyRevision.set(id, (state.historyRevision.get(id) || 0) + 1); notify(''); renderComposer(); try { const result = await api(`/api/sessions/${encodeURIComponent(id)}/resume`, { method: 'POST', body: {} }); if ((state.turnRevision.get(id) || 0) !== turnRevision) { await synchronize(); await loadHistory(id, { quiet: true }); notify('会话已恢复，并同步了较新的执行状态。'); return; } upsertSession(result.session); const snapshot = result.snapshot || {}; state.histories.set(id, snapshot.messages || []); state.info.set(id, snapshot.info || {}); for (const [key, request] of state.requests) if (request.sessionId === id) state.requests.delete(key); for (const request of snapshot.open_requests || []) state.requests.set(String(request.id), { ...request, sessionId: request.sessionId || id }); if (snapshot.inflight?.streaming || snapshot.running || snapshot.inflight === true) { const inflight = Array.isArray(snapshot.inflight) ? snapshot.inflight.at(-1) : snapshot.inflight; state.streams.set(id, { role: 'assistant', text: typeof inflight?.text === 'string' ? inflight.text : typeof inflight?.assistant === 'string' ? inflight.assistant : '' }); } else state.streams.delete(id); renderTask(); await loadHistory(id, { quiet: true }); notify('任务会话已恢复。'); } catch (error) { notify(`恢复失败：${error.message}`, true); } finally { state.resuming = false; renderComposer(); } });
 $('message-form').addEventListener('submit', async (event) => { event.preventDefault(); const id = state.selectedId; const text = $('message-input').value.trim(); if (!id || !text || isBusy(id) || state.backend.state !== 'ready') return; state.posting.add(id); state.messageRevision.set(id, (state.messageRevision.get(id) || 0) + 1); notify(''); const message = { role: 'user', text }; const messages = state.histories.get(id) || []; messages.push(message); state.histories.set(id, messages); $('message-input').value = ''; state.messageDrafts.delete(id); renderMessages({ follow: true }); try { await api(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { text } }); } catch (error) { const history = state.histories.get(id); const index = history?.indexOf(message) ?? -1; if (index >= 0) history.splice(index, 1); if (state.selectedId === id && !$('message-input').value) $('message-input').value = text; state.messageDrafts.set(id, text); notify(`发送失败：${error.message}`, true); if (id === state.selectedId) renderMessages(); } finally { state.posting.delete(id); updateSessionViews(); } });
 $('message-input').addEventListener('input', () => { if (state.selectedId) state.messageDrafts.set(state.selectedId, $('message-input').value); renderComposer(); });
-$('message-input').addEventListener('keydown', (event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); if (!$('send-button').disabled) $('message-form').requestSubmit(); } });
+bindChatSendShortcut($('message-input'), { getShortcuts: activeShortcuts, canSend: () => !$('send-button').disabled, send: () => $('message-form').requestSubmit() });
 $('interrupt-button').addEventListener('click', async () => { const id = state.selectedId; if (!id || state.interrupting.has(id)) return; state.interrupting.add(id); renderComposer(); try { await api(`/api/sessions/${encodeURIComponent(id)}/interrupt`, { method: 'POST', body: {} }); notify('停止请求已发送，等待后端确认。'); } catch (error) { notify(`停止失败：${error.message}`, true); } finally { state.interrupting.delete(id); renderComposer(); } });
 $('clear-events-button').addEventListener('click', () => { state.events = []; renderEvents(); });
 window.addEventListener('hashchange', routeChanged);

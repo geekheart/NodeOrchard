@@ -348,6 +348,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
+        '/shortcut-settings-ui.js': ['shortcut-settings-ui.js', 'text/javascript'],
+        '/keyboard-shortcuts.js': ['keyboard-shortcuts.js', 'text/javascript'],
         '/conversation-hub-ui.js': ['conversation-hub-ui.js', 'text/javascript'],
         '/statistics-dashboard.js': ['statistics-dashboard.js', 'text/javascript'],
         '/statistics-dashboard.css': ['statistics-dashboard.css', 'text/css'],
@@ -377,6 +379,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       // Browser-safe domain modules are explicit assets; no repository browsing.
       const sharedAssets = {
         '/shared/diagnostics.mjs': '../diagnostics.mjs',
+        '/shared/keyboard-shortcuts.mjs': '../keyboard-shortcuts.mjs',
         '/shared/workflow/workflow-components.mjs': 'workflow-components.mjs',
         '/shared/workflow/workflow-capability-contract.mjs': 'workflow-capability-contract.mjs',
         '/shared/workflow/workflow-conversation-commands.mjs': 'workflow-conversation-commands.mjs',

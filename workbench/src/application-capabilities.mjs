@@ -68,6 +68,8 @@ const FEATURES = [
     note: '精确版本审核卡由用户通过、修改或停止；人工修改不限次数。Skill节点接收本次反馈；工具节点须由AI重新生成核心代码候选，沿用proposal-only流程编辑入口，后续有Skill也不重跑原工具代替修改；模型不能代批或自动重试。' },
   { id: 'schedules', status: 'ui-only', inspect: 'workbench.inspect', note: '定时任务可读取；创建、修改、暂停使用已有界面。' },
   { id: 'models-and-settings', status: 'ui-only', inspect: 'workbench.inspect', note: '可读取当前设置；模型、提供商和认证由Hermes原生入口管理。' },
+  { id: 'keyboard-shortcuts', status: 'ui-only', inspect: 'workbench.inspect', tools: [],
+    note: '设置中的快捷键操作表由用户录制、禁用、恢复和保存，跨页面生效并检查冲突；工作流、总控和任务对话共用发送组合。助手可读当前偏好，但没有快捷键设置写工具，快捷键不增加执行或审核权限。' },
   { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '可读预设目录，创建与版本保存使用已有界面。' },
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '现有聊天可准备明确目标的学习候选；训练答案和验证样本不开放给全局诊断模型。' },
   { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },

@@ -542,6 +542,81 @@ test('editor controls retain Save and history shortcuts while canvas editing key
   assert.equal(instance.space, true); assert.equal(deleted, 1); assert.equal(prevented, 6);
 });
 
+test('rebound editor shortcuts replace old keys and preserve native text editing', t => {
+  globalValue(t, 'Element', FakeElement);
+  const instance = editor(), shortcuts = { 'workflow.save': ['Alt+S'], 'workflow.undo': ['Alt+U'],
+    'workflow.redo': ['Alt+R'], 'canvas.delete': ['Alt+Delete'] };
+  instance.getShortcuts = () => shortcuts;
+  let saved = 0, removed = 0; const history = [];
+  instance.saveDraft = () => saved++; instance.undo = redo => history.push(Boolean(redo)); instance.deleteSelection = () => removed++;
+  const event = (key, target, modifiers = {}) => ({ key, target, ...modifiers, preventDefault() {} });
+  const text = new FakeElement('textarea'), canvas = new FakeElement();
+  instance.onKeyDown(event('s', text, { ctrlKey: true })); assert.equal(saved, 0);
+  instance.onKeyDown(event('s', text, { altKey: true })); assert.equal(saved, 1);
+  instance.onKeyDown(event('u', text, { altKey: true })); assert.deepEqual(history, []);
+  instance.onKeyDown(event('u', canvas, { altKey: true })); instance.onKeyDown(event('r', canvas, { altKey: true })); assert.deepEqual(history, [false, true]);
+  instance.onKeyDown(event('Delete', canvas)); assert.equal(removed, 0);
+  instance.onKeyDown(event('Delete', canvas, { altKey: true })); assert.equal(removed, 1);
+  instance.onKeyDown(event('s', text, { altKey: true, shiftKey: true })); assert.equal(saved, 1, 'additional modifiers cannot trigger a rebound action');
+});
+
+test('canvas commands share existing actions and are isolated from closed views, chat, controls and composition', t => {
+  globalValue(t, 'Element', FakeElement); globalValue(t, 'innerWidth', 1200);
+  const instance = editor(), calls = []; const canvas = new FakeElement();
+  instance.fit = () => calls.push('fit'); instance.openHelp = () => calls.push('help'); instance.applySettings = () => calls.push('panels');
+  const event = (key, target = canvas, other = {}) => ({ key, target, preventDefault() {}, ...other });
+  instance.onKeyDown(event('f')); instance.onKeyDown(event('l')); instance.onKeyDown(event('p')); instance.onKeyDown(event('?', canvas, { shiftKey: true, code: 'Slash' }));
+  assert.deepEqual(calls, ['fit', 'panels', 'panels', 'help']);
+  assert.equal(instance.settings.libraryClosed, true); assert.equal(instance.settings.propertiesClosed, false);
+  calls.length = 0;
+  instance.onKeyDown(event('f', new FakeElement('textarea'))); instance.onKeyDown(event('f', new FakeElement('button')));
+  const chat = new FakeElement(); chat.closest = selector => selector.includes('.wf-conversation') ? chat : null;
+  instance.onKeyDown(event('f', chat));
+  for (const state of [{ isComposing: true }, { keyCode: 229 }, { repeat: true }, { defaultPrevented: true }]) instance.onKeyDown(event('f', canvas, state));
+  instance.settings.canvasClosed = true; instance.onKeyDown(event('f')); instance.settings.canvasClosed = false;
+  instance.documentLoaded = false; instance.onKeyDown(event('f')); instance.documentLoaded = true;
+  instance.dialog.open = true; instance.onKeyDown(event('f')); instance.dialog.open = false;
+  assert.deepEqual(calls, []);
+});
+
+test('read-only workflows reject mutation through configured shortcut keys', t => {
+  globalValue(t, 'Element', FakeElement); const instance = editor(); instance.libraryLifecycle = 'trashed';
+  instance.getShortcuts = () => ({ 'workflow.save': ['Alt+S'], 'workflow.undo': ['Alt+U'], 'workflow.redo': ['Alt+R'],
+    'canvas.delete': ['Alt+Delete'], 'canvas.duplicate': ['Alt+D'], 'canvas.paste': ['Alt+V'] });
+  for (const method of ['saveDraft', 'undo', 'deleteSelection', 'pasteSelection', 'copySelection']) instance[method] = () => assert.fail('readonly shortcuts cannot mutate a workflow');
+  let prevented = 0;
+  for (const key of ['s', 'u', 'r', 'Delete', 'd', 'v', 'ArrowRight']) instance.onKeyDown({ key, altKey: key !== 'ArrowRight', target: new FakeElement(), preventDefault() { prevented++; } });
+  assert.equal(prevented, 7);
+});
+
+test('toolbar shortcut hints update and clear with saved bindings without accumulating old labels', () => {
+  const instance = editor(), save = new FakeElement('button'), undo = new FakeElement('button');
+  for (const [button, label] of [[save, '保存工作流'], [undo, '撤销']]) {
+    button.className = 'wf-toolbar-button'; button.setAttribute('aria-label', label); button.title = label;
+    button.getAttribute = name => button.attributes[name];
+  }
+  instance.root.querySelectorAll = selector => selector === '[data-action="save"]' ? [save] : selector === '[data-action="undo"]' ? [undo] : [];
+  const bindings = { 'workflow.save': ['Alt+S'], 'workflow.undo': ['Alt+U'] }; instance.getShortcuts = () => bindings;
+  instance.updateShortcutHints(); instance.updateShortcutHints();
+  assert.equal(save.title, '保存工作流 · Alt + S'); assert.equal(save.attributes['aria-label'], save.title); assert.equal(save.dataset.tooltip, save.title);
+  bindings['workflow.save'] = ['Alt+Shift+S']; bindings['workflow.undo'] = [];
+  instance.updateShortcutHints(); instance.updateShortcutHints();
+  assert.equal(save.title, '保存工作流 · Alt + Shift + S'); assert.equal(save.dataset.tooltip, save.title);
+  assert.equal(undo.title, '撤销'); assert.equal(undo.attributes['aria-label'], '撤销'); assert.equal(undo.dataset.tooltip, '撤销');
+});
+
+test('shortcut help reads current configuration instead of advertising retired default combinations', t => {
+  globalValue(t, 'document', { createElement: tag => new FakeElement(tag) });
+  const instance = editor(), dialog = new FakeElement('dialog');
+  instance.openDialog = () => dialog;
+  instance.getShortcuts = () => ({ 'workflow.save': ['Alt+S'], 'workflow.undo': [], 'canvas.fit': ['Alt+F'] });
+  instance.openHelp();
+  const text = node => [node.textContent || '', ...(node.children || []).map(text)].join('\n');
+  const output = text(dialog);
+  assert.match(output, /保存工作流：Alt \+ S/); assert.match(output, /撤销：未设置/); assert.match(output, /适应画布：Alt \+ F/);
+  assert.equal(output.includes('⌘/Ctrl + S'), false); assert.equal(output.includes('⌘/Ctrl + Z'), false);
+});
+
 test('UTF-8 size limits reject a large draft before changing document, history or stored data', t => {
   const instance = editor();
   const initial = JSON.stringify({ version: 1, document: instance.doc, ui: {} });

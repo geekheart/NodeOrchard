@@ -175,7 +175,7 @@ export class Application extends EventEmitter {
         if (['manual', 'smart'].includes(approval?.value)) approvalMode = approval.value;
       } catch { /* A disconnected or unsupported backend has no confirmed approval mode. */ }
     }
-    return { preferences: { ...this.preferences }, runtime: {
+    return { preferences: structuredClone(this.preferences), runtime: {
       provider: this.backend.provider, hermesVersion: this.config.hermesVersion,
       hermesRoot: this.config.hermesRoot, hermesHome: this.config.hermesHome,
       workspaceRoot: this.config.workspaceRoot,
@@ -198,7 +198,7 @@ export class Application extends EventEmitter {
     this.store.savePreferences(preferences);
     this.preferences = preferences;
     this.backend.cwdDefault = join(this.config.workspaceRoot, preferences.defaultWorkspace);
-    this.publish('settings.updated', null, { preferences: { ...preferences } });
+    this.publish('settings.updated', null, { preferences: structuredClone(preferences) });
     return this.settings();
   }
 

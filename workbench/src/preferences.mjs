@@ -1,8 +1,9 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '../shared/keyboard-shortcuts.mjs';
 
 export const DEFAULT_PREFERENCES = Object.freeze({
-  theme: 'system', density: 'comfortable', defaultModel: '', defaultWorkspace: '.',
+  theme: 'system', density: 'comfortable', defaultModel: '', defaultWorkspace: '.', shortcuts: DEFAULT_SHORTCUTS,
 });
 
 const KEYS = new Set(Object.keys(DEFAULT_PREFERENCES));
@@ -42,6 +43,15 @@ export function validatePreferences(patch, current, { workspaceRoot } = {}) {
     next.density = patch.density;
   }
   if (Object.hasOwn(patch, 'defaultWorkspace')) next.defaultWorkspace = workspacePreference(patch.defaultWorkspace, workspaceRoot);
+  if (Object.hasOwn(patch, 'shortcuts')) {
+    const changes = patch.shortcuts;
+    if (!record(changes) || ![Object.prototype, null].includes(Object.getPrototypeOf(changes))
+      || Reflect.ownKeys(changes).some(key => typeof key !== 'string')
+      || Object.values(Object.getOwnPropertyDescriptors(changes)).some(field => !Object.hasOwn(field, 'value'))) {
+      throw new Error('快捷键设置必须是操作与组合列表组成的数据对象。');
+    }
+    next.shortcuts = normalizeShortcuts({ ...(current.shortcuts || {}), ...changes });
+  }
   if (Object.hasOwn(patch, 'defaultModel')) {
     if (patch.defaultModel !== '') throw new Error('模型选择已交给 Hermes，请使用顶部的模型切换入口。');
     next.defaultModel = '';
@@ -50,7 +60,7 @@ export function validatePreferences(patch, current, { workspaceRoot } = {}) {
 }
 
 export function loadPreferences(saved, workspaceRoot) {
-  const result = { ...DEFAULT_PREFERENCES };
+  const result = { ...DEFAULT_PREFERENCES, shortcuts: normalizeShortcuts() };
   if (!record(saved)) return result;
   for (const key of KEYS) {
     if (!Object.hasOwn(saved, key)) continue;

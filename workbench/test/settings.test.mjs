@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Application } from '../src/application.mjs';
 import { readConfig } from '../src/config.mjs';
+import { DEFAULT_SHORTCUTS } from '../shared/keyboard-shortcuts.mjs';
+import { createWorkbenchServer } from '../src/server.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-hermes.mjs', import.meta.url));
 
@@ -44,7 +46,7 @@ async function setup(t) {
 test('saved preferences and the Hermes default survive restart without a local model override', async t => {
   const { app, create, config } = await setup(t);
   const expected = {
-    theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: '',
+    theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: '', shortcuts: DEFAULT_SHORTCUTS,
   };
   await app.connect();
   assert.deepEqual((await app.saveSettings({ preferences: expected })).preferences, expected);
@@ -62,6 +64,47 @@ test('saved preferences and the Hermes default survive restart without a local m
   assert.equal((await restarted.history(session.id)).info.model, 'local-model');
   assert.equal((await restarted.history(session.id)).info.provider, 'fixture-local');
   assert.equal((await restarted.settings()).approvalMode, 'manual');
+});
+
+test('shortcut preference patches persist across restart without resetting other bindings or connecting Hermes', async t => {
+  const { app, create } = await setup(t);
+  assert.deepEqual((await app.settings()).preferences.shortcuts, DEFAULT_SHORTCUTS);
+  await app.saveSettings({ preferences: { shortcuts: { 'chat.send': ['Ctrl+Shift+Enter'], 'canvas.fit': [] } } });
+  await app.saveSettings({ preferences: { theme: 'dark', shortcuts: { 'canvas.toggleProperties': ['H'], 'canvas.toggleLibrary': ['F'] } } });
+  const saved = (await app.settings()).preferences;
+  assert.deepEqual(saved.shortcuts['chat.send'], ['Ctrl+Shift+Enter']); assert.deepEqual(saved.shortcuts['canvas.fit'], []);
+  assert.deepEqual(saved.shortcuts['canvas.toggleProperties'], ['H']); assert.deepEqual(saved.shortcuts['workflow.undo'], DEFAULT_SHORTCUTS['workflow.undo']);
+  assert.deepEqual(saved.shortcuts['canvas.toggleLibrary'], ['F'], 'a disabled current action does not conflict with its obsolete default');
+  assert.equal(app.adapter.state, 'stopped'); await app.close();
+  const restarted = create(); assert.deepEqual((await restarted.settings()).preferences, saved);
+  assert.equal(restarted.adapter.state, 'stopped');
+});
+
+test('settings HTTP rejects shortcut conflicts atomically and serves the shared keyboard contract without side effects', async t => {
+  const { app, config } = await setup(t), bridge = createWorkbenchServer({ ...config, port: 0 }, app), origin = await bridge.listen();
+  t.after(() => bridge.close());
+  const boot = await (await fetch(origin + '/api/bootstrap')).json();
+  const initial = (await app.settings()).preferences;
+  const response = await fetch(origin + '/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Workbench-Token': boot.csrfToken },
+    body: JSON.stringify({ preferences: { theme: 'dark', shortcuts: { 'chat.focus': ['Ctrl+Enter'] } } }) });
+  assert.equal(response.status, 400); assert.match((await response.json()).error, /冲突/);
+  assert.deepEqual((await app.settings()).preferences, initial);
+  const accepted = await fetch(origin + '/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Workbench-Token': boot.csrfToken },
+    body: JSON.stringify({ preferences: { shortcuts: { 'chat.send': ['Ctrl+Shift+Enter'] } } }) });
+  assert.equal(accepted.status, 200); assert.deepEqual((await accepted.json()).preferences.shortcuts['chat.send'], ['Ctrl+Shift+Enter']);
+  const script = await fetch(origin + '/shared/keyboard-shortcuts.mjs');
+  assert.equal(script.status, 200); assert.match(script.headers.get('content-type'), /javascript/); assert.match(await script.text(), /SHORTCUT_ACTIONS/);
+  assert.equal(app.adapter.state, 'stopped');
+});
+
+test('legacy preferences and malformed persisted shortcut maps fall back without discarding valid appearance settings', async t => {
+  const { app, create } = await setup(t);
+  app.store.savePreferences({ theme: 'dark', density: 'compact', defaultWorkspace: '.', shortcuts: { unknown: ['Ctrl+Enter'] } });
+  await app.close();
+  const restarted = create(), loaded = (await restarted.settings()).preferences;
+  assert.equal(loaded.theme, 'dark'); assert.equal(loaded.density, 'compact'); assert.deepEqual(loaded.shortcuts, DEFAULT_SHORTCUTS);
+  restarted.store.savePreferences({ theme: 'light', density: 'comfortable', defaultWorkspace: '.' }); await restarted.close();
+  const legacy = create(); assert.deepEqual(legacy.preferences.shortcuts, DEFAULT_SHORTCUTS); assert.equal(legacy.preferences.theme, 'light');
 });
 
 test('a new installation starts sessions directly in its workspace root', async t => {

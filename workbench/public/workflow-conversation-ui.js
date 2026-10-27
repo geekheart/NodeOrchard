@@ -3,6 +3,7 @@ import { runArtifacts, STUDIO_STATUS } from '../shared/workflow/workflow-studio-
 import { conversationTurnGroups, canRetryConversationTurn, parseConversationIssueResolution } from '../shared/workflow/workflow-conversation-issues.mjs';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
+import { bindChatSendShortcut, updateChatShortcutHints } from './keyboard-shortcuts.js';
 
 export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -75,8 +76,9 @@ export const canDismissConversationTurn = turn => ['proposed', 'error', 'interru
 export const isConversationRunCommand = value => /^(?:(?:请|帮我)\s*)?(?:运行|开始运行|立即运行|直接运行|运行一次|执行|开始执行|直接执行|运行当前流程|运行流程|执行当前流程)[。！!\s]*$/.test(value.trim());
 
 export class WorkflowConversationUI {
-  constructor(editor, { api, getBackend = () => null, getPageDiagnostics = () => ({}) }) {
+  constructor(editor, { api, getBackend = () => null, getPageDiagnostics = () => ({}), getShortcuts = () => undefined }) {
     this.getPageDiagnostics = getPageDiagnostics;
+    this.getShortcuts = getShortcuts;
     this.editor = editor; this.api = api; this.getBackend = getBackend; this.states = new Map(); this.runtime = null; this.workflowId = null; this.attachment = null; this.destroyed = false; this.applied = new Map(); this.actionPending = new Set(); this.documentGeneration = 0; this.detachedWorkflows = new Set();
     this.mount(); this.syncWorkflow();
   }
@@ -155,7 +157,7 @@ export class WorkflowConversationUI {
     advanced.append(this.intentSelect); this.followSelection = button('使用当前结果', () => { this.attachment = null; this.clearRetryTarget(); this.clearIssueTarget(); this.renderContext(); }, 'wf-conversation-link'); options.append(advanced, this.followSelection);
     this.input = element('textarea'); this.input.rows = 3; this.input.maxLength = 8000; this.input.placeholder = '输入消息'; this.input.setAttribute('aria-label', '给工作流 AI 的消息');
     this.input.addEventListener('input', () => { const state = this.state(); state.draft = this.input.value; state.messageEdit++; this.retryTargetFor(state.draft.trim(), this.getContext(), state); this.updateSendButton(); });
-    this.input.addEventListener('keydown', event => { event.stopPropagation(); if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void this.send(); } });
+    bindChatSendShortcut(this.input, { getShortcuts: () => this.getShortcuts(), canSend: () => !this.sendButton.disabled, send: () => void this.send() });
     const actions = element('div', 'wf-conversation-composer-actions'); this.runButton = button('运行当前流程', () => void this.startRun(), 'wf-button'); this.sendButton = element('button', 'wf-button primary', '发送'); this.sendButton.type = 'submit'; this.sendButton.setAttribute('aria-label', '发送工作流消息'); actions.append(this.runButton, this.sendButton);
     composer.addEventListener('submit', event => { event.preventDefault(); void this.send(); }); composer.addEventListener('keydown', event => event.stopPropagation()); composer.append(this.revisionHandoffHost, this.contextHost, options, this.input, actions);
     panel.append(this.resizeHandle, heading, this.notice, this.pendingHost, this.messages, this.resultHost, composer); this.panel = panel; this.editor.root.querySelector('.wf-body').append(panel);
@@ -352,7 +354,8 @@ export class WorkflowConversationUI {
   renderComposerHelp() {
     this.input.placeholder = '输入消息';
   }
-  updateSendButton() { const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status)); this.sendButton.disabled = !state.loaded || state.sending || !this.input.value.trim() || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; }
+  updateShortcutHints() { updateChatShortcutHints(this.input, this.sendButton, this.getShortcuts?.()); }
+  updateSendButton() { const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status)); this.sendButton.disabled = !state.loaded || state.sending || !this.input.value.trim() || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; this.updateShortcutHints(); }
   renderNotice() {
     const state = this.state(); this.notice.replaceChildren(); this.notice.hidden = !(state.error || state.loading && !state.loaded || state.retry);
     if (state.error) this.notice.append(element('p', 'wf-conversation-error', state.error)); else if (state.loading && !state.loaded) this.notice.append(element('p', '', '正在读取已保存的工作流对话…'));

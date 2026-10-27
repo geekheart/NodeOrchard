@@ -11,6 +11,7 @@ import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
 import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
+import { SHORTCUT_ACTIONS, matchesShortcut, shortcutLabel } from '../shared/keyboard-shortcuts.mjs';
 
 const STORAGE_KEY = 'workbench.workflow-editor.v1';
 const ACTIVE_KEY = 'workbench.workflow-active.v1';
@@ -130,7 +131,7 @@ export class WorkflowEditor {
     find('.wf-unloaded-actions').append(control('新建工作流', 'new', 'plus', { primary: true }), control('返回工作流看板', 'board', 'board'));
     const header = find('.wf-header-actions');
     header.append(toolbarControl('返回工作流看板', 'board', 'board'));
-    for (const [label, action, glyph] of [['重做 ⌘/Ctrl+Shift+Z', 'redo', 'redo'], ['撤销 ⌘/Ctrl+Z', 'undo', 'undo']]) header.prepend(toolbarControl(label, action, glyph));
+    for (const [label, action, glyph] of [['重做', 'redo', 'redo'], ['撤销', 'undo', 'undo']]) header.prepend(toolbarControl(label, action, glyph));
     for (const button of header.querySelectorAll('[data-mode]')) setToolbarControl(button, { label: button.dataset.mode === 'learn' ? '学习模式' : '执行模式', icon: button.dataset.mode === 'learn' ? 'book' : 'workflow' });
     header.append(toolbarControl('新建工作流', 'new', 'plus'), toolbarControl('导入工作流', 'import', 'upload'), toolbarControl('导出工作流', 'export', 'download'), toolbarControl('保存工作流', 'save', 'save'), toolbarControl('定时任务', 'schedules', 'clock'));
     const run = toolbarControl('运行当前流程', 'run', 'play', { primary: true }); run.disabled = true; header.append(run);
@@ -282,6 +283,21 @@ export class WorkflowEditor {
     this.nodeLibrary?.syncHeader();
     this.conversation?.syncWorkflow();
     this.versioning?.syncHeader();
+    this.updateShortcutHints();
+  }
+
+  updateShortcutHints() {
+    const bindings = this.getShortcuts?.();
+    const actions = { save: 'workflow.save', undo: 'workflow.undo', redo: 'workflow.redo', duplicate: 'canvas.duplicate',
+      delete: 'canvas.delete', fit: 'canvas.fit', 'toggle-library': 'canvas.toggleLibrary', 'toggle-properties': 'canvas.toggleProperties', help: 'canvas.help' };
+    for (const [action, id] of Object.entries(actions)) for (const button of this.root?.querySelectorAll?.(`[data-action="${action}"]`) || []) {
+      const previous = button.dataset.shortcutHint, current = button.getAttribute?.('aria-label') || button.title || SHORTCUT_ACTIONS.find(item => item.id === id).label;
+      const base = previous && current.endsWith(' · ' + previous) ? current.slice(0, -previous.length - 3) : current;
+      const hint = shortcutLabel(id, bindings), label = hint === '未设置' ? base : `${base} · ${hint}`;
+      button.dataset.shortcutHint = hint === '未设置' ? '' : hint;
+      button.setAttribute('aria-label', label); button.title = label;
+      if (button.classList.contains('wf-toolbar-button')) button.dataset.tooltip = label;
+    }
   }
 
   panelSettings() {
@@ -316,7 +332,15 @@ export class WorkflowEditor {
       const label = canvasClosed ? '显示画布' : '隐藏画布'; setToolbarControl(button, { label, icon: canvasClosed ? 'canvas-off' : 'canvas' }); button.setAttribute('aria-expanded', String(!canvasClosed));
     }
     for (const button of this.root.querySelectorAll('.wf-library-toggle')) { const label = this.studio?.view === 'run' ? '输入资料' : '节点库'; setToolbarControl(button, { label, icon: 'library' }); }
+    this.updateShortcutHints();
     this.requestGeometry();
+  }
+
+  togglePanel(panel) {
+    const panels = this.panelSettings(), key = panel + 'Closed'; panels[key] = !panels[key];
+    if (innerWidth <= 780 && !panels[key]) panels[panel === 'library' ? 'propertiesClosed' : 'libraryClosed'] = true;
+    if (panel === 'library' && this.studio?.view === 'run') this.studio.setTab('inputs');
+    this.applySettings(); if (this.studio?.view !== 'run') this.scheduleSave();
   }
 
   renderLibrary() {
@@ -891,8 +915,8 @@ export class WorkflowEditor {
       case 'fit': this.fit(); break;
       case 'zoom-in': this.zoomAt(this.doc.viewport.zoom * 1.2); break; case 'zoom-out': this.zoomAt(this.doc.viewport.zoom / 1.2); break; case 'reset-zoom': this.zoomAt(1); break;
       case 'toggle-canvas': this.setCanvasClosed(!this.settings.canvasClosed); break;
-      case 'toggle-library': { const panels = this.panelSettings(); panels.libraryClosed = !panels.libraryClosed; if (innerWidth <= 780 && !panels.libraryClosed) panels.propertiesClosed = true; if (this.studio?.view === 'run') this.studio.setTab('inputs'); this.applySettings(); if (this.studio?.view !== 'run') this.scheduleSave(); break; }
-      case 'toggle-properties': { const panels = this.panelSettings(); panels.propertiesClosed = !panels.propertiesClosed; if (innerWidth <= 780 && !panels.propertiesClosed) panels.libraryClosed = true; this.applySettings(); if (this.studio?.view !== 'run') this.scheduleSave(); break; }
+      case 'toggle-library': this.togglePanel('library'); break;
+      case 'toggle-properties': this.togglePanel('properties'); break;
       case 'snap': this.settings.snap = !this.settings.snap; this.applySettings(); this.scheduleSave(); break;
       case 'motion': this.settings.reduceMotion = !this.settings.reduceMotion; this.applySettings(); this.clearPulses(); this.scheduleSave(); this.toast(this.settings.reduceMotion ? '已减少动效。只影响视觉反馈。' : '已启用接线确认动效。'); break;
       case 'help': this.openHelp(); break;
@@ -1041,32 +1065,35 @@ export class WorkflowEditor {
   onHover(event) { if (this.gesture || this.pendingConnection) return; const card = event.target.closest?.('.wf-node'); if (card) { this.hoverNode = card.dataset.id; this.highlightEdges(); } }
 
   onKeyDown(event) {
-    if (!this.active || event.isComposing) return;
+    if (!this.active || this.documentLoaded === false || this.settings.canvasClosed || event.isComposing || event.keyCode === 229 || event.repeat || event.defaultPrevented) return;
     if (!this.root.contains(event.target)) return;
+    if (this.dialog.open || event.target.closest?.('.wf-runtime, .wf-runtime-dialog, .wf-runtime-confirm, .wf-learning, .wf-schedules-dialog, .wf-conversation')) return;
     if (event.key === 'Escape') { this.cancelGesture(); this.cancelConnection(); this.contextMenu.hidden = true; return; }
     if (this.gesture) return;
-    const meta = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
-    if (this.dialog.open) return;
-    if (event.target.closest?.('.wf-runtime, .wf-runtime-dialog, .wf-runtime-confirm, .wf-learning, .wf-schedules-dialog')) return;
-    if (this.libraryReadOnly && (meta && ['s', 'z', 'y', 'd', 'v'].includes(key) || !isTextTarget(event.target) && ['Delete', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key))) { event.preventDefault(); return; }
-    if (meta && key === 's') { event.preventDefault(); this.saveDraft(); return; }
+    const bindings = this.getShortcuts?.(), action = SHORTCUT_ACTIONS.find(item => ['editor', 'canvas'].includes(item.scope) && matchesShortcut(event, item.id, bindings))?.id;
+    if (action === 'workflow.save') { event.preventDefault(); if (!this.libraryReadOnly) this.saveDraft(); return; }
     if (isTextTarget(event.target)) return;
-    if (meta && key === 'z') { event.preventDefault(); this.undo(event.shiftKey); return; }
-    if (meta && key === 'y') { event.preventDefault(); this.undo(true); return; }
-    if (meta && key === 'a') { event.preventDefault(); this.selection = new Set(this.doc.nodes.map(n => n.id)); this.selectedEdge = null; this.renderSelection(); this.renderProperties(); return; }
-    if (meta && key === 'd') { event.preventDefault(); if (this.copySelection()) this.pasteSelection(); return; }
-    if (meta && key === 'c' && this.copySelection()) { event.preventDefault(); this.toast('已复制节点，可在本编辑器内粘贴。'); return; }
-    if (meta && key === 'v' && this.clipboard) { event.preventDefault(); this.pasteSelection(); return; }
+    if (this.libraryReadOnly && (['workflow.undo', 'workflow.redo', 'canvas.duplicate', 'canvas.paste', 'canvas.delete'].includes(action)
+      || ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key))) { event.preventDefault(); return; }
+    if (action === 'workflow.undo' || action === 'workflow.redo') { event.preventDefault(); this.undo(action === 'workflow.redo'); return; }
     // Preserve native activation and navigation for editor controls, including
     // icons inside buttons. Save and editor undo/redo remain available above.
     if (event.target.closest?.('button, a, summary')) return;
-    if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.deleteSelection(); return; }
     if (event.target.closest?.('.wf-port')) return;
+    if (action === 'canvas.selectAll') { event.preventDefault(); this.selection = new Set(this.doc.nodes.map(n => n.id)); this.selectedEdge = null; this.renderSelection(); this.renderProperties(); return; }
+    if (action === 'canvas.duplicate') { event.preventDefault(); if (this.copySelection()) this.pasteSelection(); return; }
+    if (action === 'canvas.copy') { if (this.copySelection()) { event.preventDefault(); this.toast('已复制节点，可在本编辑器内粘贴。'); } return; }
+    if (action === 'canvas.paste') { if (this.clipboard) { event.preventDefault(); this.pasteSelection(); } return; }
+    if (action === 'canvas.delete') { event.preventDefault(); this.deleteSelection(); return; }
+    if (action === 'canvas.fit') { event.preventDefault(); this.fit(); return; }
+    if (action === 'canvas.toggleLibrary') { event.preventDefault(); this.togglePanel('library'); return; }
+    if (action === 'canvas.toggleProperties') { event.preventDefault(); this.togglePanel('properties'); return; }
+    if (action === 'canvas.help') { event.preventDefault(); this.openHelp(); return; }
     if (event.code === 'Space') { event.preventDefault(); this.space = true; this.canvas.classList.add('pan-ready'); return; }
     const targetNode = event.target.closest?.('.wf-node'), targetEdge = event.target.closest?.('.wf-edge');
     if (event.key === 'Enter' && targetNode) { event.preventDefault(); this.selectNode(targetNode.dataset.id); return; }
     if (event.key === 'Enter' && targetEdge) { event.preventDefault(); this.selectEdge(targetEdge.dataset.id); return; }
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) && this.selection.size) {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) && this.selection.size && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); const amount = event.shiftKey ? 64 : 16, dx = event.key === 'ArrowLeft' ? -amount : event.key === 'ArrowRight' ? amount : 0, dy = event.key === 'ArrowUp' ? -amount : event.key === 'ArrowDown' ? amount : 0;
       this.commit({ ...this.doc, nodes: this.doc.nodes.map(n => this.selection.has(n.id) ? { ...n, ...this.snapPosition({ x: n.x + dx, y: n.y + dy }) } : n) }, '键盘移动节点');
     }
@@ -1278,7 +1305,10 @@ export class WorkflowEditor {
   }
   openHelp() {
     const dialog = this.openDialog('手动编辑工作流', ''), list = el('ul');
-    for (const text of ['从节点库拖入节点；点击或 Enter 也可添加。右键画布可搜索节点。', '拖动端口连线，或依次点击两个端口。Esc 取消；类型冲突、占用输入和循环连接会被拒绝。', '拖动空白、按住空格或鼠标中键可平移；滚轮缩放；Shift 拖动空白框选。', 'Shift 点击多选；拖动任一选中节点可整体移动。方向键微调，Shift + 方向键加大步长。', 'Delete / Backspace 删除；⌘/Ctrl + D 复制，⌘/Ctrl + C/V 在编辑器内复制粘贴。', '⌘/Ctrl + Z 撤销，⌘/Ctrl + Shift + Z 重做；⌘/Ctrl + S 保存并应用属性。', '代码在本机执行，不是 OS 沙箱；只运行你信任的代码。']) list.append(el('li', '', text)); dialog.append(list);
+    for (const text of ['从节点库拖入节点；点击或 Enter 也可添加。右键画布可搜索节点。', '拖动端口连线，或依次点击两个端口。Esc 取消；类型冲突、占用输入和循环连接会被拒绝。', '拖动空白、按住空格或鼠标中键可平移；滚轮缩放；Shift 拖动空白框选。', 'Shift 点击多选；拖动任一选中节点可整体移动。方向键微调，Shift + 方向键加大步长。', '代码在本机执行，不是 OS 沙箱；只运行你信任的代码。']) list.append(el('li', '', text)); dialog.append(list);
+    const shortcuts = el('ul');
+    for (const action of SHORTCUT_ACTIONS.filter(item => ['editor', 'canvas'].includes(item.scope))) shortcuts.append(el('li', '', `${action.label}：${shortcutLabel(action.id, this.getShortcuts?.())}`));
+    dialog.append(el('h3', '', '当前快捷键'), shortcuts);
   }
   loadExample() {
     if (this.libraryReadOnly) return;

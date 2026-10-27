@@ -67,6 +67,9 @@ test('workflow editor assets are served as same-origin code without starting a r
     ['workflow-editor.js', 'text/javascript'],
     ['diagnostic-events.js', 'text/javascript'],
     ['shared/diagnostics.mjs', 'text/javascript'],
+    ['shared/keyboard-shortcuts.mjs', 'text/javascript'],
+    ['keyboard-shortcuts.js', 'text/javascript'],
+    ['shortcut-settings-ui.js', 'text/javascript'],
     ...['components', 'conversation-commands', 'dataset', 'inputs', 'model', 'plan', 'presets', 'review-revision',
       'schedule-time', 'studio-utils', 'tools', 'validation', 'versioning']
       .map(name => [`shared/workflow/workflow-${name}.mjs`, 'text/javascript']),
@@ -127,7 +130,7 @@ test('the entire browser module graph resolves through public assets or the shar
     for (const match of source.matchAll(/\b(?:from\s*|import\s*\(\s*)['"]([^'"]+)['"]/g)) {
       const target = new URL(match[1], fixture.origin + path);
       assert.equal(target.origin, fixture.origin, `Browser import left the app origin: ${match[1]}`);
-      assert.ok(target.pathname.startsWith('/shared/workflow/') || target.pathname === '/shared/diagnostics.mjs' || /^\/[^/]+\.js$/.test(target.pathname), target.pathname);
+      assert.ok(target.pathname.startsWith('/shared/workflow/') || ['/shared/diagnostics.mjs', '/shared/keyboard-shortcuts.mjs'].includes(target.pathname) || /^\/[^/]+\.js$/.test(target.pathname), target.pathname);
       pending.push(target.pathname);
     }
   }
