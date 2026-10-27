@@ -260,6 +260,7 @@ export class WorkflowLearningUI {
   showNotice(value = '', error = false) { this.notice.textContent = clean(value); this.notice.hidden = !value; this.notice.classList.toggle('error', error); }
   isInspecting() { return this.editor.doc?.mode === 'learn' && Boolean(this.inspectionRunId); }
   syncMode() {
+    if (this.editor.documentLoaded === false) { this.unloadDocument(); return; }
     if (this.editor.nodeLibrary?.nested) { this.panel.hidden = true; this.runtime.panel.hidden = true; return; }
     const learning = this.editor.doc?.mode === 'learn'; this.panel.hidden = !learning; this.runtime.panel.hidden = learning && !this.inspectionRunId;
     this.runtime.panel.classList.toggle('wf-learning-inspection', learning && Boolean(this.inspectionRunId)); this.panel.classList.toggle('is-inspecting', learning && Boolean(this.inspectionRunId)); this.back.hidden = !this.inspectionRunId;
@@ -269,6 +270,7 @@ export class WorkflowLearningUI {
   }
   saveForm() { return Object.fromEntries(this.formControls.map(control => [control.id, control.value]).concat([['dataset', structuredClone(this.dataset)], ['editingCaseId', this.editingCaseId], ['caseDraftDirty', this.caseDraftDirty]])); }
   syncWorkflow() {
+    if (this.editor.documentLoaded === false) { this.unloadDocument(); return; }
     if (this.editor.nodeLibrary?.nested) return;
     if (this.workflowId) this.drafts.set(this.workflowId, this.saveForm());
     this.workflowId = this.editor.doc?.id; this.jobId = null; this.selectedRound = null; this.selectedCase = 0; this.roundPinned = false; this.inspectionRunId = null; this.loaded = false; this.loading = false; this.listRequest++; this.uncertain = false; this.formDirty = false; this.trainableSignature = null; this.trainableElements.clear(); this.trainableList.replaceChildren();
@@ -276,8 +278,14 @@ export class WorkflowLearningUI {
     this.dataset = structuredClone(saved?.dataset || { trainingCases: [], validationCases: [] }); this.editingCaseId = saved?.editingCaseId || null; this.caseDraftDirty = saved?.caseDraftDirty || false; this.pendingImport = null; this.importRevision++;
     this.expectedFormat.value = saved?.[this.expectedFormat.id] || 'text'; this.showNotice(); this.renderTrainable(); this.renderDataset(); this.renderCaseEditStatus(); this.renderImportPreview(); this.render();
   }
-  activate() { this.active = true; this.syncMode(); void this.loadRecent(); }
+  activate() { if (this.editor.documentLoaded === false) { this.unloadDocument(); return; } this.active = true; this.syncMode(); void this.loadRecent(); }
   deactivate() { this.active = false; }
+  unloadDocument() {
+    if (this.workflowId) this.drafts.set(this.workflowId, this.saveForm());
+    this.deactivate(); clearTimeout(this.renderTimer); this.renderTimer = null;
+    this.workflowId = null; this.jobId = null; this.selectedRound = null; this.selectedCase = 0; this.roundPinned = false; this.inspectionRunId = null;
+    this.listRequest++; this.loaded = false; this.loading = false; this.panel.hidden = true; this.runtime.panel.hidden = true;
+  }
   refreshBackend() { this.connection.hidden = this.runtime.getBackend()?.state === 'ready'; for (const control of this.connection.querySelectorAll('button')) control.disabled = this.runtime.connecting || this.runtime.getBackend()?.state === 'starting'; this.renderTask(); this.syncMode(); }
   updateRunButton() {
     let setupError = ''; try { learningSetupForDocument(this.editor.doc); } catch (error) { setupError = error.message; }
@@ -344,6 +352,7 @@ export class WorkflowLearningUI {
   }
   storeJob(job) { if (!job?.id || !job.workflowId) return; const previous = this.jobs.get(job.id); if (TERMINAL.has(previous?.status) && previous.status !== job.status) return; this.jobs.set(job.id, job); this.revisions.set(job.id, ++this.revision); if (!ACTIVE.has(job.status)) this.stopRequested.delete(job.id); }
   async loadRecent(force = false) {
+    if (this.editor.documentLoaded === false) return;
     const id = this.editor.doc?.id; if (!id || this.loading && !force) return; if (force) this.caseFailures.clear(); const request = ++this.listRequest, revision = this.revision; this.loading = true; this.updateRunButton();
     try { const data = await this.api(`/api/workflow-learning?workflowId=${encodeURIComponent(id)}`); if (request !== this.listRequest || id !== this.editor.doc?.id) return;
       for (const job of data.learnings || []) if ((this.revisions.get(job.id) || 0) <= revision) this.storeJob(job);

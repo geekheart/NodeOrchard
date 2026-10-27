@@ -116,6 +116,28 @@ function headless(value) {
   return instance;
 }
 
+test('unloading runtime detaches its selection and rejects late reads without interrupting a backend run', async t => {
+  fakeDOM(t); const value = run(), instance = headless(value), callbacks = [], requests = [];
+  const gate = {}; gate.promise = new Promise(resolve => { gate.resolve = resolve; });
+  t.after(() => { gate.resolve({ run: value }); clearTimeout(instance.renderTimer); });
+  instance.api = async (path, options) => { requests.push({ path, options }); return gate.promise; };
+  instance.panel = new FakeElement('panel'); instance.notice = new FakeElement('notice'); instance.confirmDialog = new FakeElement('dialog');
+  instance.active = true; instance.listRequest = 0; instance.render = () => callbacks.push('render');
+  instance.learning = { deactivate: () => callbacks.push('learning-deactivate'), unloadDocument: () => callbacks.push('learning-unload') };
+  instance.schedules = { close: () => callbacks.push('schedules-close'), unloadDocument: () => callbacks.push('schedules-unload') };
+  const reading = instance.loadRun(value.id);
+  instance.renderTimer = setTimeout(() => callbacks.push('late-render'), 10_000);
+  instance.editor.documentLoaded = false; instance.unloadDocument();
+  assert.equal(instance.workflowId, null); assert.equal(instance.currentRun(), null); assert.equal(instance.selectedNodeId, null);
+  assert.equal(instance.active, false); assert.equal(instance.panel.hidden, true); assert.equal(instance.renderTimer, null);
+  assert(callbacks.includes('learning-unload')); assert(callbacks.includes('schedules-unload'));
+  gate.resolve({ run: { ...value, status: 'complete' } }); await reading;
+  assert.equal(instance.runs.get(value.id).status, 'running'); assert(!callbacks.includes('render'));
+  await instance.loadRecent(); instance.activate();
+  assert.equal(instance.workflowId, null); assert.equal(instance.active, false);
+  assert.equal(requests.length, 1); assert(requests.every(request => !request.options?.method));
+});
+
 test('Skill labels keep capability names separate from learned version identities', () => {
   const skill = { name: 'internal-capability', displayName: '导出与命名' };
   assert.equal(skillDisplayName(skill), '导出与命名');
@@ -267,6 +289,20 @@ test('shared multi-Skill plan is used before POST and double start submits only 
   const first = instance.start(); await instance.start(); prepareResolve(value.document); await new Promise(resolve => setImmediate(resolve)); assert.equal(submits, 1);
   instance.handleEvent({ type: 'workflow.run', payload: { ...value, status: 'complete' } }); postResolve(value); await first;
   assert.equal(instance.runs.get(value.id).status, 'complete');
+});
+
+test('a submitted run can finish in the backend after unload without reopening its runtime view', async () => {
+  const value = run(), instance = headless(value); instance.runs.clear(); instance.input.value = 'false';
+  let finish; const pending = new Promise(resolve => { finish = resolve; }); const changes = [], calls = [];
+  Object.assign(instance, { panel: new FakeElement('panel'), notice: new FakeElement('notice'), listRequest: 0,
+    setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, render: () => changes.push('render'),
+    api: async (path, options) => { calls.push({ path, options }); return pending; } });
+  instance.editor.prepareRun = () => value.document; instance.editor.studio = { syncRawInput() {}, setView: () => changes.push('run-view') };
+  const starting = instance.start(); await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 1);
+  instance.editor.documentLoaded = false; instance.unloadDocument(); changes.length = 0;
+  finish({ run: { ...value, status: 'complete' } }); await starting;
+  assert.equal(instance.currentRun(), null); assert.deepEqual(changes, []); assert.equal(instance.runs.size, 0);
+  assert.equal(calls.length, 1); assert.equal(calls[0].path, '/api/workflow-runs');
 });
 
 test('a chat-started run explains the exact missing preparation instead of pointing to a hidden panel', async () => {

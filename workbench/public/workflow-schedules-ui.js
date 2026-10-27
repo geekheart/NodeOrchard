@@ -111,6 +111,7 @@ export class WorkflowSchedulesUI {
     this.formRevision++; this.showNotice(); this.renderFormState();
   }
   syncWorkflow() {
+    if (this.editor.documentLoaded === false) { this.unloadDocument(); return; }
     const id = this.editor.nodeLibrary?.rootDocument?.id || this.editor.doc?.id || null;
     if (this.workflowId !== id) {
       if (this.workflowId) this.drafts.set(this.workflowId, this.formValues());
@@ -121,12 +122,18 @@ export class WorkflowSchedulesUI {
     this.renderFormState(); if (this.dialog.open) this.renderList();
   }
   async open() {
+    if (this.editor.documentLoaded === false) return;
     if (this.editor.nodeLibrary?.nested) { this.editor.toast?.('请先应用或取消子流程内部编辑，再设置主流程定时任务。', true); return; }
     this.editor.cancelGesture?.(); this.editor.cancelConnection?.(); this.syncWorkflow();
     if (!this.dialog.open) this.dialog.showModal();
     this.renderList(); this.renderFormState(); await this.loadRecent();
   }
   close() { if (this.dialog.open) this.dialog.close(); }
+  unloadDocument() {
+    if (this.workflowId) this.drafts.set(this.workflowId, this.formValues());
+    this.close(); this.workflowId = null; this.editingId = null; this.listRequest++; this.loading = false; this.uncertain = false;
+    this.rows.clear(); this.list.replaceChildren();
+  }
   saveBlockReason() {
     if (this.editor.nodeLibrary?.nested) return '请先应用或取消子流程内部编辑，再保存定时任务。';
     if (!this.workflowId) return '请先创建工作流。';
@@ -156,6 +163,7 @@ export class WorkflowSchedulesUI {
   storeSchedule(value) { const record = responseSchedule(value), previous = this.records.get(record?.id); if (!record?.id || !record.workflowId || this.deleted.has(record.id) || Number.isInteger(previous?.revision) && Number.isInteger(record.revision) && record.revision < previous.revision) return false; this.records.set(record.id, record); this.revisions.set(record.id, ++this.revision); return true; }
   removeSchedule(id) { this.records.delete(id); this.deleted.add(id); this.revisions.set(id, ++this.revision); }
   async loadRecent() {
+    if (this.editor.documentLoaded === false) return;
     const workflowId = this.workflowId; if (!workflowId || this.loading || this.saving) return;
     const request = ++this.listRequest, revision = this.revision; this.loading = true; this.renderFormState();
     try {

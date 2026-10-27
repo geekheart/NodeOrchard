@@ -137,7 +137,7 @@ function stepLabel(run) {
 export class WorkflowRuntimeUI {
   constructor(editor, { api, connect, getBackend, getRequests, taskURL }) {
     this.editor = editor; this.api = api; this.connect = connect; this.getBackend = getBackend; this.getRequests = getRequests; this.taskURL = taskURL;
-    this.active = false; this.runs = new Map(); this.revisions = new Map(); this.revision = 0; this.currentRunId = null; this.workflowId = null;
+    this.active = false; this.runs = new Map(); this.revisions = new Map(); this.revision = 0; this.currentRunId = null; this.workflowId = null; this.documentGeneration = 0;
     this.selectedNodeId = null; this.nodeSelectionPinned = false; this.traceElements = new Map(); this.traceRunId = null;
     this.starting = false; this.submissionUncertain = false; this.stopping = new Set(); this.stopRequested = new Set(); this.loading = false; this.listRequest = 0; this.renderTimer = null;
     this.skills = null; this.skillsPromise = null; this.pickers = new Set(); this.skillPending = new Set();
@@ -223,21 +223,33 @@ export class WorkflowRuntimeUI {
   }
   showNotice(message = '', error = false) { this.notice.textContent = text(message); this.notice.hidden = !message; this.notice.classList.toggle('error', error); }
   currentRun() { return this.runs.get(this.currentRunId) || null; }
-  currentDocument() { return this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
+  currentDocument() { return this.editor.documentLoaded === false ? null : this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
   workflowRuns() { return [...this.runs.values()].filter(run => run.workflowId === this.currentDocument()?.id).sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || ''))); }
   activeRun() { return this.workflowRuns().find(run => ACTIVE.has(run.status)); }
 
   activate() {
+    if (!this.currentDocument()) { this.unloadDocument(); return; }
     this.active = true; this.syncWorkflow(); this.refreshBackend(); this.learning?.activate(); void this.loadRecent();
   }
-  deactivate() { this.active = false; this.learning?.deactivate(); this.schedules?.close(); if (this.confirmDialog.open) this.confirmDialog.close(); }
+  deactivate() { this.active = false; this.learning?.deactivate(); this.schedules?.close(); if (this.confirmDialog?.open) this.confirmDialog.close(); }
+  unloadDocument() {
+    this.deactivate(); this.documentGeneration = (this.documentGeneration || 0) + 1;
+    clearTimeout(this.renderTimer); this.renderTimer = null;
+    this.workflowId = null; this.currentRunId = null; this.selectedNodeId = null; this.nodeSelectionPinned = false; this.traceRunId = null;
+    this.listRequest++; this.loading = false; this.starting = false; this.submissionUncertain = false;
+    this.panel.hidden = true; this.refreshButton.disabled = false; this.showNotice(); this.editor.setRunStates?.({});
+    this.learning?.unloadDocument(); this.schedules?.unloadDocument();
+  }
   syncWorkflow() {
+    if (!this.currentDocument()) { this.unloadDocument(); return false; }
     this.schedules?.syncWorkflow();
     const id = this.currentDocument()?.id;
     if (this.workflowId === id) return false;
+    this.documentGeneration = (this.documentGeneration || 0) + 1;
     this.workflowId = id; this.currentRunId = null; this.selectedNodeId = null; this.nodeSelectionPinned = false; this.submissionUncertain = false; this.listRequest++; this.loading = false; this.refreshButton.disabled = false; this.showNotice(); this.render(); return true;
   }
   refreshBackend() {
+    if (!this.currentDocument()) { this.unloadDocument(); return; }
     const changed = this.syncWorkflow(); const ready = this.getBackend()?.state === 'ready', becameReady = ready && !this.backendReady; this.backendReady = ready; this.connection.hidden = ready || !workflowNeedsHermes(this.currentDocument());
     for (const control of this.connection.querySelectorAll('button')) control.disabled = this.connecting || this.getBackend()?.state === 'starting';
     this.updateRunButton(); this.renderApproval();
@@ -246,6 +258,7 @@ export class WorkflowRuntimeUI {
     if (changed && this.active) void this.loadRecent();
   }
   updateRunButton() {
+    if (!this.currentDocument()) { if (this.startButton) this.startButton.disabled = true; return; }
     if (this.editor.nodeLibrary?.nested) {
       for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) {
         if (control === this.startButton) { control.textContent = '内部编辑中'; control.setAttribute('aria-label', '内部编辑中'); control.title = '请先应用或取消内部修改，再从主流程运行。'; }
@@ -325,12 +338,14 @@ export class WorkflowRuntimeUI {
     return value;
   }
   async start() {
+    if (!this.currentDocument()) return;
     if (this.editor.nodeLibrary?.nested) { this.showNotice('请先应用或取消子流程内部修改，再从主流程运行。', true); return; }
     if (this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active') { this.showNotice('此工作流只读，请先在看板恢复。', true); return; }
     if (this.currentDocument()?.mode === 'learn' && this.learning) return this.learning.start();
     this.setExpanded(); this.syncWorkflow();
     if (this.currentDocument()?.mode === 'learn') { this.showNotice('学习面板未加载，请刷新页面后重试。', true); return; }
     if (this.starting || this.loading || !isV2(this.currentDocument()) && this.activeRun() || workflowNeedsHermes(this.currentDocument()) && this.skillPending.size || this.submissionUncertain) return;
+    const generation = this.documentGeneration;
     this.starting = true; this.updateRunButton(); let document, input;
     try {
       document = await this.editor.prepareRun();
@@ -345,15 +360,17 @@ export class WorkflowRuntimeUI {
         }
         input = prepared.input;
       }
-    } catch (error) { this.starting = false; this.updateRunButton(); this.showNotice(error.message, true); return; }
+    } catch (error) { if (generation === this.documentGeneration) { this.starting = false; this.updateRunButton(); this.showNotice(error.message, true); } return; }
+    if (generation !== this.documentGeneration || !this.currentDocument()) return;
     this.showNotice('正在提交本次流程快照…'); const revision = this.revision;
     try {
       const result = await this.api('/api/workflow-runs', { method: 'POST', body: { document, input } }); const run = result.run || result;
+      if (generation !== this.documentGeneration || !this.currentDocument()) return;
       if (!run?.id) throw new Error('服务未返回运行标识，请刷新运行记录确认状态。');
       if ((this.revisions.get(run.id) || 0) <= revision) this.storeRun(run);
       if (run.workflowId === this.currentDocument()?.id && this.currentRunId !== run.id) { this.currentRunId = run.id; this.selectedNodeId = null; this.nodeSelectionPinned = false; } this.showNotice(); this.editor.studio?.setView('run'); this.render();
-    } catch (error) { this.submissionUncertain = true; this.showNotice(`提交未确认：${error.message}。请求不会自动重试，请先刷新运行记录。`, true); }
-    finally { this.starting = false; this.updateRunButton(); }
+    } catch (error) { if (generation === this.documentGeneration) { this.submissionUncertain = true; this.showNotice(`提交未确认：${error.message}。请求不会自动重试，请先刷新运行记录。`, true); } }
+    finally { if (generation === this.documentGeneration) { this.starting = false; this.updateRunButton(); } }
   }
   async interrupt() {
     const run = ACTIVE.has(this.currentRun()?.status) ? this.currentRun() : this.activeRun(); if (!run || !ACTIVE.has(run.status) || this.stopping.has(run.id) || this.stopRequested.has(run.id)) return;
@@ -389,8 +406,10 @@ export class WorkflowRuntimeUI {
     finally { if (request === this.listRequest) { this.loading = false; this.refreshButton.disabled = false; this.updateRunButton(); } }
   }
   async loadRun(id) {
-    const revision = this.revisions.get(id) || 0;
+    if (!this.currentDocument()) return;
+    const revision = this.revisions.get(id) || 0, generation = this.documentGeneration;
     try { const result = await this.api(`/api/workflow-runs/${encodeURIComponent(id)}`); const run = result.run || result;
+      if (this.documentGeneration !== generation || !this.currentDocument()) return;
       if (run.id === id && (this.revisions.get(id) || 0) === revision) this.storeRun(run);
       if (this.currentRunId === id) this.render();
     } catch (error) { if (this.currentRunId === id) this.showNotice(`运行详情读取失败：${error.message}`, true); }
@@ -407,6 +426,7 @@ export class WorkflowRuntimeUI {
     this.render(); this.setExpanded();
   }
   handleEvent(event) {
+    if (!this.currentDocument()) return;
     if (event.type === 'workflow.run') {
       const run = event.payload?.run || event.payload; if (!run?.id) return; const isNew = !this.runs.has(run.id); this.storeRun(run);
       if (this.editor.studio?.delegatedRuns?.has(run.id)) { this.editor.studio.delegatedRuns.set(run.id, run); this.scheduleRender(); }
@@ -417,10 +437,12 @@ export class WorkflowRuntimeUI {
     this.schedules?.handleEvent(event);
   }
   scheduleRender() {
+    if (!this.currentDocument()) return;
     if (this.renderTimer) return;
     this.renderTimer = setTimeout(() => { this.renderTimer = null; this.render(); }, 80);
   }
   render() {
+    if (!this.currentDocument()) { this.panel.hidden = true; this.editor.setRunStates?.({}); return; }
     const records = this.workflowRuns(), run = this.currentRun();
     const recentSignature = JSON.stringify(records.map(item => [item.id, item.status, item.startedAt]));
     if (recentSignature !== this.recentSignature) {

@@ -33,7 +33,7 @@ const state = {
   eventRevision: 0, sessionRevision: new Map(), turnRevision: new Map(), messageRevision: new Map(), requestsRevision: 0, backendRevision: 0, lastEventId: null,
 };
 const appDiagnosticClient = createAppDiagnosticClient({ getState: () => ({ page: state.route?.page,
-  workflowId: state.route?.page === 'workflows' ? workflowEditor?.doc?.id : null,
+  workflowId: state.route?.page === 'workflows' && workflowEditor?.documentLoaded !== false ? workflowEditor?.doc?.id : null,
   runId: state.route?.page === 'workflows' ? workflowEditor?.runtime?.currentRun?.()?.id : null,
   canvasClosed: workflowEditor?.settings?.canvasClosed, transport: state.transport, backendState: state.backend?.state }) });
 const backendLabels = { stopped: '尚未连接', starting: '连接中', ready: '已连接', error: '连接异常', disconnected: '已断开' };
@@ -223,7 +223,15 @@ function ensureWorkflowEditor() {
   if (diagnosticCapture) workflowEditor.conversation.schedulePoll = () => {};
   workflowEditor.conversation.connectRuntime(workflowEditor.runtime);
   workflowLibraryClient = new WorkflowLibraryClient(workflowEditor, { api,
-    onDocumentChange(id) {
+    onDocumentChange(id, { preserveNavigation = false } = {}) {
+      if (id === null) {
+        workflowEditor.runtime.unloadDocument(); workflowEditor.conversation.unloadDocument();
+        if (!preserveNavigation && state.route.page === 'workflows') {
+          if (state.route.id) { history.replaceState(null, '', '#/workflows'); state.route = readRoute(); }
+          workflowLoading(); workflowEditor.activate(); renderShell();
+        }
+        return;
+      }
       if (!workflowEditor.active || state.route.page !== 'workflows' || workflowEditor.doc.id !== id) return;
       if (state.route.id !== id) { history.replaceState(null, '', `#/workflows/${encodeURIComponent(id)}`); state.route = readRoute(); }
       renderShell();
@@ -265,7 +273,9 @@ function renderPage() {
   for (const page of document.querySelectorAll('[data-page]')) page.hidden = page.dataset.page !== state.route.page;
   if (state.route.page === 'workflows') {
     ensureWorkflowEditor();
-    if (state.route.id && workflowLibraryClient.currentId === state.route.id && !$('workflow-load-status').textContent) {
+    const canResume = workflowLibraryClient.currentId && workflowEditor.documentLoaded !== false && workflowEditor.libraryReadOnly !== true;
+    if (!state.route.id && !canResume) { workflowLibraryClient.unload(); workflowLoading(); workflowEditor.activate(); }
+    else if (state.route.id && workflowLibraryClient.currentId === state.route.id && !$('workflow-load-status').textContent) {
       workflowEditor.activate(); void workflowEditor.runtime.activate();
     } else { workflowEditor.deactivate(); workflowEditor.runtime.deactivate(); workflowLoading('正在打开工作流…'); }
   } else { workflowEditor?.deactivate(); workflowEditor?.runtime?.deactivate(); }
@@ -504,12 +514,19 @@ async function loadRouteData() {
         await workflowLibraryClient.flush();
         if (load === routeLoad && state.route.page === 'board') { ensureWorkflowBoard(); await workflowBoard.load(); }
       } else {
-        const id = route.id || workflowLibraryClient.currentId;
-        if (!id) { navigate('#/board'); return; }
+        const canResume = workflowEditor.documentLoaded !== false && workflowEditor.libraryReadOnly !== true;
+        const id = route.id || (canResume ? workflowLibraryClient.currentId : null);
+        if (!id) { workflowLibraryClient.unload(); workflowLoading(); workflowEditor.activate(); renderShell(); return; }
         if (!route.id) { navigate(`#/workflows/${encodeURIComponent(id)}`); return; }
         const opened = await workflowLibraryClient.open(id);
         if (load === routeLoad && state.route.page === 'workflows' && state.route.id === id) {
-          if (!opened) { workflowLoading('工作流打开被状态变化中断，请重试；本地草稿已保留。', true); return; }
+          if (!opened || !workflowLibraryClient.currentId) {
+            if (!workflowLibraryClient.currentId) {
+              history.replaceState(null, '', '#/workflows'); state.route = readRoute();
+              workflowLoading(); workflowEditor.activate(); renderShell(); return;
+            }
+            workflowLoading('工作流打开被状态变化中断，请重试；本地草稿已保留。', true); return;
+          }
           if (workflowLibraryClient.currentId !== id) {
             history.replaceState(null, '', `#/workflows/${encodeURIComponent(workflowLibraryClient.currentId)}`); state.route = readRoute();
           }

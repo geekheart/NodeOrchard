@@ -71,6 +71,16 @@ test('open loads only the current workflow and repeated same-workflow sync leave
   ui.close(); assert.equal(ui.dialog.open, false);
 });
 
+test('unloading schedules saves its form and closes the dialog without changing scheduled work', async t => {
+  const { ui, runtime, calls } = mounted(t), workflowId = ui.workflowId;
+  await ui.open(); ui.input.value = '保留定时输入';
+  runtime.editor.documentLoaded = false; ui.syncWorkflow();
+  assert.equal(ui.workflowId, null); assert.equal(ui.dialog.open, false); assert.equal(ui.loading, false);
+  assert.equal(ui.drafts.get(workflowId).values[6], '保留定时输入');
+  await ui.open(); await ui.loadRecent(); assert.equal(calls.length, 1); assert.equal(ui.workflowId, null);
+  assert(calls.every(call => !call.options?.method));
+});
+
 test('creating a schedule freezes the current document, submits once and retains JSON false', async t => {
   const { ui, runtime } = mounted(t); ui.format.value = 'json'; ui.input.value = 'false';
   let done, body, count = 0; ui.api = (_path, options) => { count++; body = options.body; return new Promise(resolve => { done = resolve; }); };

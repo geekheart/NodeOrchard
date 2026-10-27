@@ -47,7 +47,7 @@ const FEATURES = [
   { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存；AI没有权限设置写工具。独立会话固定当前工作流与工作文件夹，双方均无源码或任意终端权限。' },
   { id: 'supervisor-workflow-management', status: 'available', roles: ['supervisor'], tools: ['workflow.copy', 'workflow.create-test', 'workflow.delete'], note: '总控在人工授权范围内复制、新增测试草稿或移入回收站；不自动运行，无永久删除。' },
   { id: 'workflow-recycle-bin', status: 'ui-only', inspect: 'workflows.list', tools: [], requiresUserConfirmation: true,
-    note: '工作流直接移入回收站并暂停定时任务，恢复后可编辑运行但定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
+    note: '工作流直接移入回收站并暂停定时任务，节点编辑器仅加载活动流程；当前流程移入回收站或删除后卸载至空态，保留本地草稿。恢复后需用户重新打开，定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
   { id: 'application-logs', status: 'available', roles: ['supervisor'], tools: ['app.logs'], note: '受限持久结构化日志支持debug/info/warn/error/fatal、时间/模块/关联ID筛选和分页；仅保存数字与身份元数据，按保留限制清理。Hermes原始诊断窗口仍仅当前进程。日志读取不能修改源码或权限。' },
   { id: 'assistant-model-diagnostics', status: 'available', tools: ['assistant.diagnose', 'assistant.probe'], note: '按归属轮次聚合模型时序、计量与部分输出状态；固定短请求验证当前连接，单轮一次。等待首字、输出空闲与总截止分离，保留进度；不读取控制会话正文、不切换模型或重放业务。' },
   { id: 'workflow-statistics', status: 'available', tools: ['workbench.inspect'], note: '只读工作流对话、模型用量、上下文、运行成败和登记产物统计；独立助手仅当前工作流。历史未采集Token保持未知，逐工作流CPU和内存及订阅费用尚未采集。' },

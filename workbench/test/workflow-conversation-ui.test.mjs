@@ -22,6 +22,49 @@ const validProposal = (id, turn, document) => {
     resultFingerprint: documentFingerprint(applyWorkflowOperations(document, turn.assistant.operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` }).document) };
 };
 
+test('unloading conversation clears UI bindings and timers while preserving its draft and rejecting late reads', async t => {
+  const { ui, document } = harness(), gate = deferred(), requests = [], callbacks = [];
+  ui.api = async (path, options) => { requests.push({ path, options }); return gate.promise; };
+  const saved = ui.state(); saved.draft = '保留未发送的说明'; saved.conversation.turns = [{ id: 'running-turn', status: 'thinking' }];
+  const reading = ui.load(true); ui.attachment = { workflowId: document.id, nodeId: 'trim' };
+  for (const timer of ['pollTimer', 'pendingRefreshTimer', 'progressTimer']) { ui[timer] = setTimeout(() => callbacks.push(timer), 10_000); t.after(() => clearTimeout(ui[timer])); }
+  ui.panel = { hidden: false }; ui.openButton = { hidden: false }; ui.editor.root = { classList: { remove() {} } };
+  t.after(() => gate.resolve(snapshot(document.id, 2)));
+  ui.editor.documentLoaded = false; ui.unloadDocument();
+  assert.equal(ui.workflowId, null); assert.equal(ui.attachment, null); assert.equal(ui.panel.hidden, true); assert.equal(ui.openButton.hidden, true);
+  assert.equal(saved.draft, '保留未发送的说明'); assert.equal(saved.loading, false);
+  assert.equal(saved.conversation.turns[0].status, 'thinking');
+  gate.resolve(snapshot(document.id, 2, [{ id: 'late-turn', status: 'complete' }])); await reading;
+  assert.equal(saved.conversation.turns[0].id, 'running-turn');
+  ui.syncWorkflow(); await ui.load(true); WorkflowConversationUI.prototype.schedulePoll.call(ui); ui.scheduleProgressClock();
+  ui.onEvent({ type: 'workflow.conversation', payload: snapshot(document.id, 3, [{ id: 'event-turn' }]) });
+  assert.equal(ui.workflowId, null); assert.equal(requests.length, 1); assert(requests.every(request => !request.options?.method));
+  assert.equal(saved.conversation.turns[0].id, 'running-turn'); assert.equal(ui.states.has(null), false); assert.deepEqual(callbacks, []);
+});
+
+for (const hidden of [false, true]) test(`reloading a conversation restores its ${hidden ? 'collapsed' : 'open'} panel after repeated unloads`, () => {
+  const { ui } = harness(), classes = new Set(hidden ? [] : ['wf-chat-open']);
+  ui.panel = { hidden }; ui.openButton = { hidden: !hidden }; ui.load = async () => {};
+  ui.editor.root = { classList: { remove: name => classes.delete(name), toggle(name, show) { if (show) classes.add(name); else classes.delete(name); } } };
+  ui.editor.documentLoaded = false; ui.unloadDocument(); ui.unloadDocument(); ui.syncWorkflow();
+  assert.equal(ui.panel.hidden, true); assert.equal(ui.openButton.hidden, true); assert.equal(classes.has('wf-chat-open'), false);
+  ui.editor.documentLoaded = true; ui.syncWorkflow();
+  assert.equal(ui.panel.hidden, hidden); assert.equal(ui.openButton.hidden, !hidden); assert.equal(classes.has('wf-chat-open'), !hidden);
+  // A later manual visibility change becomes the next unload's saved state.
+  ui.panel.hidden = !hidden; ui.editor.documentLoaded = false; ui.unloadDocument();
+  ui.editor.documentLoaded = true; ui.syncWorkflow();
+  assert.equal(ui.panel.hidden, !hidden); assert.equal(ui.openButton.hidden, hidden); assert.equal(classes.has('wf-chat-open'), hidden);
+});
+
+test('a message acknowledgement arriving after unload cannot consume its preserved draft or repaint conversation', async () => {
+  const { ui, document } = harness(), gate = deferred(); let renders = 0;
+  ui.state().draft = '归档前已提交但待确认的原文'; const saved = ui.state(); ui.api = async () => gate.promise;
+  const sending = ui.send(); ui.editor.documentLoaded = false; ui.unloadDocument(); ui.render = () => renders++;
+  gate.resolve(snapshot(document.id, 2, [{ id: 'late-message', status: 'thinking' }])); await sending;
+  assert.equal(saved.draft, '归档前已提交但待确认的原文'); assert.equal(saved.conversation.turns.length, 0); assert.equal(saved.sending, false);
+  assert.equal(renders, 0); assert.equal(ui.workflowId, null);
+});
+
 test('a natural resolution message targets the focused issue and waits for the server to retire it', async () => {
   const { ui, document, run } = harness(), old = { id: 'focused-issue', status: 'error', user: { text: '采集失败', context: { runId: run.id } }, assistant: { text: '原始错误' } };
   ui.state().conversation.turns = [old]; ui.focusIssue(old); ui.state().draft = '这个问题解决了'; let request;

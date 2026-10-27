@@ -51,7 +51,7 @@ export class WorkflowEditor {
     this.active = false; this.space = false; this.gesture = null; this.pendingConnection = null; this.hoverNode = null;
     this.clipboard = null; this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
     this.unsaved = false; this.storageValue = null; this.storageConflict = false; this.corruptDraft = null;
-    this.libraryLifecycle = 'active'; this.lifecycleDisabled = new WeakMap();
+    this.libraryLifecycle = 'active'; this.lifecycleDisabled = new WeakMap(); this.documentLoaded = true;
     this.settings = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: true, propertiesClosed: true };
     this.doc = createDocument({ schemaVersion: 2 }); this.doc.viewport = { x: 48, y: 90, zoom: 1 };
     this.restore(); this.mount();
@@ -100,6 +100,7 @@ export class WorkflowEditor {
       </header>
       <div class="wf-recovery" role="status" hidden></div>
       <div class="wf-recovery wf-lifecycle-notice" role="status" hidden></div>
+      <section class="wf-unloaded" aria-label="未加载工作流" hidden><div class="wf-unloaded-mark"></div><h2>未加载工作流</h2><div class="wf-unloaded-actions"></div></section>
       <div class="wf-body">
         <aside class="wf-library" aria-label="节点库"><div class="wf-library-head"><div class="wf-panel-heading"><h2>节点库</h2></div><input type="search" class="wf-search" aria-label="搜索节点" placeholder="搜索节点…" /></div><div class="wf-library-items"></div></aside>
         <section class="wf-center" aria-label="流程设计">
@@ -125,6 +126,8 @@ export class WorkflowEditor {
     this.nodesLayer = find('.wf-nodes'); this.properties = find('.wf-properties'); this.titleInput = find('.wf-document-title');
     this.contextMenu = find('.wf-context-menu'); this.dialog = find('.wf-dialog');
     find('.wf-empty-mark').append(icon('workflow'));
+    find('.wf-unloaded-mark').append(icon('workflow'));
+    find('.wf-unloaded-actions').append(control('新建工作流', 'new', 'plus', { primary: true }), control('返回工作流看板', 'board', 'board'));
     const header = find('.wf-header-actions');
     header.append(toolbarControl('返回工作流看板', 'board', 'board'));
     for (const [label, action, glyph] of [['重做 ⌘/Ctrl+Shift+Z', 'redo', 'redo'], ['撤销 ⌘/Ctrl+Z', 'undo', 'undo']]) header.prepend(toolbarControl(label, action, glyph));
@@ -186,7 +189,7 @@ export class WorkflowEditor {
     } catch (error) { this.titleDraft = draft; throw error; }
   }
 
-  activate() { if (this.active) return; this.active = true; this.requestGeometry(); }
+  activate() { if (this.documentLoaded === false || this.active) return; this.active = true; this.requestGeometry(); }
   deactivate() { if (!this.active) return; this.nodeLibrary?.cancelNested(true); this.active = false; this.cancelGesture(); this.cancelConnection(); this.contextMenu.hidden = true; this.clearPulses(); if (this.dialog.open) this.dialog.close(); }
 
   captureDocumentState() {
@@ -196,7 +199,7 @@ export class WorkflowEditor {
     this.nodeLibrary?.cancelNested(true);
     const next = validateDocument(document);
     this.cancelGesture(); this.cancelConnection(); clearTimeout(this.saveTimer);
-    this.doc = next; this.titleDraft = null; this.storageKey = DRAFT_PREFIX + next.id;
+    this.doc = next; this.documentLoaded = true; this.renderDocumentAvailability(); this.titleDraft = null; this.storageKey = DRAFT_PREFIX + next.id;
     try { this.storageValue = localStorage.getItem(this.storageKey); localStorage.setItem(ACTIVE_KEY, next.id); } catch { this.storageValue = null; }
     this.storageConflict = false; this.corruptDraft = null; this.saveError = ''; this.unsaved = false;
     this.history = clone(state?.history || []); this.future = clone(state?.future || []);
@@ -206,7 +209,31 @@ export class WorkflowEditor {
     if (persist && !this.libraryReadOnly) this.persist();
   }
 
-  get libraryReadOnly() { return Boolean(this.libraryLifecycle && this.libraryLifecycle !== 'active'); }
+  unloadDocument() {
+    this.documentLoaded = false; this.active = false;
+    this.nodeLibrary?.cancelNested(true); this.cancelGesture(); this.cancelConnection();
+    clearTimeout(this.saveTimer); clearTimeout(this.toastTimer);
+    if (this.geometryFrame) cancelAnimationFrame(this.geometryFrame);
+    this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
+    if (this.contextMenu) this.contextMenu.hidden = true;
+    if (this.dialog?.open) this.dialog.close();
+    this.clearPulses();
+    this.doc = createDocument({ schemaVersion: 2 });
+    this.storageKey = null; this.storageValue = null; this.storageConflict = false; this.corruptDraft = null;
+    this.saveError = ''; this.unsaved = false; this.libraryError = ''; this.libraryStatus = ''; this.libraryLifecycle = 'active';
+    this.titleDraft = null; this.history = []; this.future = []; this.selection.clear(); this.selectedEdge = null;
+    this.propertyDrafts.clear(); this.validationDraftErrors?.clear(); this.runStates = {}; this.canvasSize = null; this.offsets.clear();
+    this.clipboard = null; this.hoverNode = null;
+    try { localStorage.removeItem(ACTIVE_KEY); } catch { /* Stored drafts remain available when browser storage is unavailable. */ }
+    this.renderDocumentAvailability(); this.renderGraph(); this.renderProperties(); this.renderHeader();
+  }
+  renderDocumentAvailability() {
+    const unloaded = this.documentLoaded === false;
+    this.root?.classList?.toggle('document-unloaded', unloaded);
+    const empty = this.root?.querySelector?.('.wf-unloaded'); if (empty) empty.hidden = !unloaded;
+  }
+
+  get libraryReadOnly() { return this.documentLoaded === false || Boolean(this.libraryLifecycle && this.libraryLifecycle !== 'active'); }
   setLibraryLifecycle(lifecycle) {
     if (lifecycle === 'archived') lifecycle = 'trashed';
     if (!['active', 'trashed', 'deleted'].includes(lifecycle)) throw new Error('无效的工作流管理状态。');
@@ -239,6 +266,7 @@ export class WorkflowEditor {
   }
 
   renderHeader() {
+    this.renderDocumentAvailability(); if (this.documentLoaded === false) return;
     if (document.activeElement !== this.titleInput) this.titleInput.value = this.titleDraft?.documentId === this.doc.id ? this.titleDraft.value : this.doc.title;
     const status = this.root.querySelector('.wf-save-status');
     status.textContent = this.storageConflict ? '另一标签页有更新' : this.corruptDraft ? '原草稿待恢复' : this.saveError || (this.propertyDrafts.size ? `${this.propertyDrafts.size} 个属性待应用` : this.unsaved ? '保存中…' : this.libraryStatus || (this.storageValue ? '已保存 · 此浏览器' : '本浏览器草稿'));
@@ -326,6 +354,7 @@ export class WorkflowEditor {
 
   renderGraph() {
     this.nodesLayer.replaceChildren(); this.nodeElements.clear(); this.offsets.clear();
+    if (this.documentLoaded === false) { this.svg.replaceChildren(); this.edgeElements.clear(); return; }
     for (const node of this.doc.nodes) {
       const definition = TYPES.get(node.type), group = GROUPS.get(definition.category);
       const card = el('div', 'wf-node' + (['foreach', 'loop'].includes(node.type) ? ' loop-node' : '') + (node.type === 'subflow' ? ' subflow-node' : ''));
@@ -537,6 +566,7 @@ export class WorkflowEditor {
   }
 
   renderProperties() {
+    if (this.documentLoaded === false) { this.properties?.replaceChildren(); return; }
     const parent = this.properties; parent.replaceChildren();
     const heading = el('div', 'wf-properties-head'); heading.append(el('h2', '', this.selectedEdge ? '连线属性' : '节点属性'), control('关闭属性面板', 'toggle-properties', 'close', { compact: true })); parent.append(heading);
     if (this.selectedEdge) { this.renderEdgeProperties(); this.applyLibraryReadOnly(); return; }
@@ -833,6 +863,12 @@ export class WorkflowEditor {
   }
 
   onClick(event) {
+    if (this.documentLoaded === false) {
+      const action = event.target.closest?.('button')?.dataset.action;
+      if (action === 'new') this.onCreateWorkflow?.();
+      else if (action === 'board') this.onReturnToBoard?.();
+      return;
+    }
     if (event.target !== this.titleInput) { try { if (!this.flushTitleDraft()) return; } catch (error) { this.toast(error.message, true); return; } }
     const button = event.target.closest('button');
     if (this.nodeLibrary?.nested && ['new', 'example', 'import', 'export', 'run', 'schedules', 'board'].includes(button?.dataset.action)) { this.toast('请先应用或取消子流程内部修改，再操作主流程。', true); return; }
@@ -1096,6 +1132,7 @@ export class WorkflowEditor {
     } catch (error) { this.toast(`属性未应用：${error.message}`, true); }
   }
   prepareRun() {
+    if (this.documentLoaded === false) throw new Error('未加载工作流，请先从看板打开或新建工作流。');
     if (this.validationDraftErrors?.size) throw new Error('校验规则有无效的 JSON 或字段配置，请修正后运行。');
     if (this.nodeLibrary?.nested) throw new Error('请先应用或取消子流程内部编辑，再从主流程运行。');
     if (this.libraryReadOnly) throw new Error('此工作流为只读，请先回看板恢复。');

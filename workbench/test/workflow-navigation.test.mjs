@@ -133,22 +133,111 @@ function declaration(name, next) {
 }
 const controllerSource = declaration('async function loadRouteData() {', '\nasync function synchronize()');
 const loadingSource = declaration('function workflowLoading(', '\nfunction renderPage()');
-function controller(client) {
-  const nodes = new Map(), state = { route: { page: 'workflows', id: 'target' } };
+const documentChangeSource = declaration('    onDocumentChange(', '\n    },');
+const renderPageSource = declaration('function renderPage() {', '\nfunction factList(');
+
+test('rendering an editor route without an id reveals its empty canvas when the selection is unavailable', () => {
+  for (const selection of [{ currentId: null }, { currentId: 'previous', documentLoaded: false }, { currentId: 'previous', libraryReadOnly: true }]) {
+  const calls = [], dependencies = {
+    document: { querySelectorAll: () => [] }, state: { route: { page: 'workflows', id: '' } }, ensureWorkflowEditor() {},
+    workflowLibraryClient: { currentId: selection.currentId, unload: () => calls.push('unload') },
+    workflowEditor: { ...selection, activate: () => calls.push('activate'), deactivate: () => calls.push('deactivate'), runtime: { activate: () => calls.push('runtime'), deactivate: () => calls.push('runtime-deactivate') } },
+    workflowLoading: message => calls.push(message || 'clear-loading'), workflowBoard: null, conversationHub: null,
+  };
+  new Function(...Object.keys(dependencies), renderPageSource + '\nrenderPage();')(...Object.values(dependencies));
+  assert.deepEqual(calls, ['unload', 'clear-loading', 'activate']);
+  }
+});
+
+test('rendering an editor route without an id retains an active selection while its explicit route is revalidated', () => {
+  const calls = [], dependencies = {
+    document: { querySelectorAll: () => [] }, state: { route: { page: 'workflows', id: '' } }, ensureWorkflowEditor() {},
+    workflowLibraryClient: { currentId: 'previous', unload: () => calls.push('unload') },
+    workflowEditor: { documentLoaded: true, libraryReadOnly: false, activate: () => calls.push('activate'), deactivate: () => calls.push('deactivate'), runtime: { activate: () => calls.push('runtime'), deactivate: () => calls.push('runtime-deactivate') } },
+    workflowLoading: message => calls.push(message || 'clear-loading'), workflowBoard: null, conversationHub: null,
+  };
+  new Function(...Object.keys(dependencies), renderPageSource + '\nrenderPage();')(...Object.values(dependencies));
+  assert.deepEqual(calls, ['deactivate', 'runtime-deactivate', '正在打开工作流…']);
+});
+
+function lifecycleView(page = 'workflows', id = 'archived') {
+  const state = { route: { page, id: page === 'workflows' ? id : undefined } }, calls = { runtime: 0, conversation: 0, activate: 0, clearLoading: 0, render: 0 };
+  const location = { hash: page === 'workflows' ? `#/workflows/${id}` : '#/settings' };
+  const dependencies = {
+    state, workflowEditor: { active: page === 'workflows', doc: { id: 'unloaded-placeholder' },
+      runtime: { unloadDocument: () => calls.runtime++ }, conversation: { unloadDocument: () => calls.conversation++ }, activate: () => calls.activate++ },
+    history: { replaceState(_state, _title, hash) { location.hash = hash; } },
+    readRoute: () => ({ page: 'workflows', id: '' }), workflowLoading: () => calls.clearLoading++, renderShell: () => calls.render++,
+  };
+  const callbacks = new Function(...Object.keys(dependencies), `let routeLoad = 7; return { changed: ({${documentChangeSource}}}).onDocumentChange, loadGeneration: () => routeLoad };`)(...Object.values(dependencies));
+  return { ...callbacks, state, location, calls };
+}
+
+test('current workflow unloading immediately detaches runtime and conversation and clears the editor route', () => {
+  const ui = lifecycleView(); ui.changed(null);
+  assert.equal(ui.location.hash, '#/workflows'); assert.equal(ui.state.route.id, '');
+  assert.deepEqual(ui.calls, { runtime: 1, conversation: 1, activate: 1, clearLoading: 1, render: 1 });
+});
+
+test('workflow unloading while another page is open detaches UI bindings without navigating', () => {
+  const ui = lifecycleView('settings'); ui.changed(null);
+  assert.equal(ui.location.hash, '#/settings'); assert.equal(ui.state.route.page, 'settings');
+  assert.deepEqual(ui.calls, { runtime: 1, conversation: 1, activate: 0, clearLoading: 0, render: 0 });
+});
+
+test('unloading a previous workflow during navigation detaches bindings and preserves the new route and load generation', () => {
+  const ui = lifecycleView('workflows', 'new-target'); ui.changed(null, { preserveNavigation: true });
+  assert.equal(ui.location.hash, '#/workflows/new-target'); assert.equal(ui.state.route.id, 'new-target'); assert.equal(ui.loadGeneration(), 7);
+  assert.deepEqual(ui.calls, { runtime: 1, conversation: 1, activate: 0, clearLoading: 0, render: 0 });
+});
+function controller(client, route = { page: 'workflows', id: 'target' }, editorState = {}) {
+  const nodes = new Map(), state = { route };
   const root = { inert: true, classes: new Set(), classList: { toggle(name, value) { if (value) root.classes.add(name); else root.classes.delete(name); } } };
   const status = { hidden: false, children: [], replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); } };
   nodes.set('workflow-root', root); nodes.set('workflow-load-status', status);
-  const calls = { activate: 0, runtime: 0, render: 0 }, editor = { activate: () => calls.activate++, runtime: { activate: async () => calls.runtime++ } };
+  const calls = { activate: 0, runtime: 0, render: 0 }, editor = { ...editorState, activate: () => calls.activate++, runtime: { activate: async () => calls.runtime++ } };
+  const location = { hash: route.id ? `#/workflows/${route.id}` : '#/workflows' };
   const dependencies = {
     state, workflowLibraryClient: client, workflowEditor: editor, ensureWorkflowEditor() {},
     renderShell: () => calls.render++, $: id => nodes.get(id),
     element: (tag, className, textContent) => ({ tag, className, textContent }),
     button: (textContent, onclick) => ({ tag: 'button', textContent, onclick }),
     link: (href, textContent, className) => ({ tag: 'a', href, textContent, className }),
+    history: { replaceState(_state, _title, hash) { location.hash = hash; } },
+    readRoute: () => ({ page: 'workflows', id: decodeURIComponent(location.hash.split('/')[2] || '') }),
+    navigate: hash => { location.hash = hash; },
   };
   const load = new Function(...Object.keys(dependencies), 'let routeLoad = 0;\n' + loadingSource + '\n' + controllerSource + '\nreturn loadRouteData;')(...Object.values(dependencies));
-  return { load, state, root, status, calls };
+  return { load, state, root, status, calls, location };
 }
+
+test('the editor route without an id stays empty when its selection was cleared or is unavailable', async () => {
+  for (const selection of [{ currentId: null }, { currentId: 'previous', documentLoaded: false }, { currentId: 'previous', libraryReadOnly: true }]) {
+  let unloads = 0, opens = 0;
+  const client = { currentId: selection.currentId, initialize: async () => {}, unload() { unloads++; this.currentId = null; }, open: async () => { opens++; return true; } };
+  const ui = controller(client, { page: 'workflows', id: '' }, selection); await ui.load();
+  assert.equal(unloads, 1); assert.equal(opens, 0); assert.equal(client.currentId, null);
+  assert.equal(ui.location.hash, '#/workflows'); assert.equal(ui.status.hidden, true); assert.equal(ui.root.inert, false);
+  assert.equal(ui.calls.activate, 1); assert.equal(ui.calls.runtime, 0);
+  }
+});
+
+test('the editor route without an id resumes its loaded active selection through an explicit revalidated route', async () => {
+  let unloads = 0; const opened = [];
+  const client = { currentId: 'previous', initialize: async () => {}, unload() { unloads++; this.currentId = null; }, open: async id => { opened.push(id); return true; } };
+  const ui = controller(client, { page: 'workflows', id: '' }, { documentLoaded: true, libraryReadOnly: false }); await ui.load();
+  assert.equal(ui.location.hash, '#/workflows/previous'); assert.equal(unloads, 0); assert.deepEqual(opened, []);
+  ui.state.route = { page: 'workflows', id: 'previous' }; await ui.load();
+  assert.deepEqual(opened, ['previous']); assert.equal(ui.calls.activate, 1); assert.equal(ui.calls.runtime, 1);
+});
+
+test('an inactive direct link clears its route and shows the empty editor without a retry error', async () => {
+  const client = { currentId: null, initialize: async () => {}, open: async () => false };
+  const ui = controller(client); await ui.load();
+  assert.equal(ui.location.hash, '#/workflows'); assert.equal(ui.state.route.id, '');
+  assert.equal(ui.status.hidden, true); assert.equal(ui.status.children.length, 0); assert.equal(ui.root.inert, false);
+  assert.equal(ui.calls.activate, 1); assert.equal(ui.calls.runtime, 0);
+});
 
 test('the actual route controller turns a current false open into a retryable error and the retry clears its loading overlay', async () => {
   let opened = false;

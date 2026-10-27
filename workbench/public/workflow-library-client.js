@@ -13,7 +13,7 @@ const lifecycle = record => record?.lifecycle === 'archived' ? 'trashed' : ['act
 export class WorkflowLibraryClient {
   constructor(editor, { api, onDocumentChange = () => {}, onSaved = () => {} }) {
     this.editor = editor; this.api = api; this.onDocumentChange = onDocumentChange; this.onSaved = onSaved;
-    this.slots = new Map(); this.states = new Map(); this.generation = 0; this.suppressed = false; this.openRequest = null; this.hasLeftEditor = false;
+    this.slots = new Map(); this.states = new Map(); this.currentId = null; this.generation = 0; this.unloadEpoch = 0; this.suppressed = false; this.openRequest = null; this.hasLeftEditor = false;
     this.initialDraft = editor.storageValue && !editor.corruptDraft ? copy(editor.doc) : null;
     try { this.acknowledgements = JSON.parse(localStorage.getItem(ACK_KEY) || '{}'); } catch { this.acknowledgements = {}; }
     if (!this.acknowledgements || typeof this.acknowledgements !== 'object' || Array.isArray(this.acknowledgements)) this.acknowledgements = {};
@@ -24,7 +24,16 @@ export class WorkflowLibraryClient {
     if (!this.slots.has(id)) this.slots.set(id, { revision: 0, saved: null, queued: null, pending: null, error: '', lifecycle: 'active', epoch: 0, refreshRequired: false });
     return this.slots.get(id);
   }
-  documentId() { return this.editor.nodeLibrary?.rootDocument?.id || this.editor.doc.id; }
+  documentId() { return this.editor.documentLoaded === false ? null : this.editor.nodeLibrary?.rootDocument?.id || this.editor.doc?.id || null; }
+  unload({ preserveNavigation = false } = {}) {
+    const changed = this.currentId !== null || this.editor.documentLoaded !== false;
+    this.unloadEpoch++;
+    if (!preserveNavigation) { this.generation++; this.openRequest = null; this.hasLeftEditor = true; }
+    this.currentId = null; this.initialDraft = null;
+    if (changed) this.editor.unloadDocument();
+    this.status();
+    if (changed) this.onDocumentChange(null, { preserveNavigation });
+  }
   adopt(record) {
     if (!record?.id || record.document?.id !== record.id || !Number.isInteger(record.revision)) throw new Error('工作流保存记录无效。');
     const slot = this.slot(record.id);
@@ -50,11 +59,17 @@ export class WorkflowLibraryClient {
     if (Number.isInteger(value.revision) && value.revision === slot.revision && next === slot.lifecycle && !slot.refreshRequired) return true;
     slot.epoch++; slot.revision = Math.max(slot.revision, value.revision || 0); slot.lifecycle = next; slot.queued = null; slot.error = '';
     slot.refreshRequired = next === 'active'; slot.wasInactive = true;
-    if (this.documentId() !== id || (this.openRequest && this.openRequest.id !== id)) return true;
+    const current = this.documentId() === id;
+    if (!current && this.openRequest?.id !== id) return true;
+    if (this.openRequest && this.openRequest.id !== id) {
+      if (current && next !== 'active') this.unload({ preserveNavigation: true });
+      return true;
+    }
     // A previous canvas remains mounted while navigation loads its replacement.
     // Lifecycle events still update that workflow's slot, but cannot navigate
     // back to it or cancel the controller's newer open request.
-    if (next === 'active' && (this.hasLeftEditor || this.editor.active === false)) return true;
+    if (next !== 'active') { this.unload(); return true; }
+    if (this.hasLeftEditor || this.editor.active === false) return true;
     // An active event is only permission to fetch the latest revision, never to
     // publish an old cached draft using its freshly learned acknowledgement.
     this.setEditorLifecycle(next === 'active' ? 'trashed' : next); this.status();
@@ -75,7 +90,7 @@ export class WorkflowLibraryClient {
     this.editor.renderHeader();
   }
   queue(document) {
-    if (this.suppressed) return;
+    if (this.suppressed || this.editor.documentLoaded === false || !document?.id) return;
     if (this.editor.nodeLibrary?.nested && document.id !== this.documentId()) return;
     const slot = this.slot(document.id), next = signature(document);
     if (slot.lifecycle !== 'active' || slot.refreshRequired || (this.editor.doc.id === document.id && this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active')) { slot.queued = null; this.status(); return; }
@@ -87,6 +102,7 @@ export class WorkflowLibraryClient {
     void this.flush(document.id).catch(() => {});
   }
   flush(id = this.documentId()) {
+    if (!id) return Promise.resolve();
     const slot = this.slot(id);
     if (slot.lifecycle !== 'active' || slot.refreshRequired) { slot.queued = null; return slot.pending || Promise.resolve(); }
     if (slot.pending) return slot.pending;
@@ -123,15 +139,24 @@ export class WorkflowLibraryClient {
   }
   async migrateInitial() {
     const document = this.initialDraft; if (!document) return;
-    const slot = this.slot(document.id), epoch = slot.epoch;
+    const slot = this.slot(document.id), epoch = slot.epoch, unloadEpoch = this.unloadEpoch;
     let record;
     try { record = unwrap(await this.api(`/api/workflow-library/${encodeURIComponent(document.id)}`)); }
     catch (error) {
-      if (error.httpStatus === 410) { await this.handleLifecycle({ id: document.id, deleted: true }); this.use(document, undefined, { persist: false }); return; }
+      if (slot.epoch !== epoch || unloadEpoch !== this.unloadEpoch) return;
+      if (error.httpStatus === 410) {
+        const preserveNavigation = !!this.openRequest && this.openRequest.id !== document.id;
+        if (preserveNavigation) { slot.epoch++; slot.lifecycle = 'deleted'; slot.queued = null; slot.wasInactive = true; this.unload({ preserveNavigation }); }
+        else await this.handleLifecycle({ id: document.id, deleted: true });
+        return;
+      }
       if (error.httpStatus !== 404) throw error;
     }
-    if (slot.epoch !== epoch) return;
-    this.use(await this.reconcile(document, record, this.originalAcks[document.id]));
+    if (slot.epoch !== epoch || unloadEpoch !== this.unloadEpoch) return;
+    const reconciled = await this.reconcile(document, record, this.originalAcks[document.id]);
+    if (slot.epoch !== epoch || unloadEpoch !== this.unloadEpoch) return;
+    if (reconciled) this.use(reconciled);
+    else this.unload({ preserveNavigation: !!this.openRequest && this.openRequest.id !== document.id });
   }
   cached(id) {
     let raw;
@@ -146,7 +171,7 @@ export class WorkflowLibraryClient {
   async reconcile(document, record, acknowledgement) {
     if (record && lifecycle(record) !== 'active') {
       this.adopt(record); this.slot(record.id).wasInactive = true;
-      return record.document;
+      return null;
     }
     if (!record || record.origin === 'history' || content(record.document) === content(document) || acknowledgement === record.revision) {
       if (record) this.adopt(record);
@@ -164,10 +189,12 @@ export class WorkflowLibraryClient {
     return recovered;
   }
   use(document, state, { persist = true } = {}) {
+    if (!document || this.slot(document.id).lifecycle !== 'active') { this.unload(); return false; }
     this.suppressed = true;
     this.setEditorLifecycle(this.slot(document.id).lifecycle);
     try { this.editor.useDocument(document, state, { persist: persist && this.slot(document.id).lifecycle === 'active' }); } finally { this.suppressed = false; }
     this.currentId = document.id; this.status();
+    return true;
   }
   async create() {
     await this.initialize();
@@ -176,6 +203,7 @@ export class WorkflowLibraryClient {
     return document.id;
   }
   rememberCurrent() {
+    if (this.editor.documentLoaded === false || !this.editor.doc) return;
     this.editor.nodeLibrary?.cancelNestedForExternalChange?.();
     this.editor.cancelGesture(); this.editor.cancelConnection();
     const slot = this.slot(this.editor.doc.id);
@@ -191,7 +219,7 @@ export class WorkflowLibraryClient {
     try {
       await this.initialize();
       if (generation !== this.generation) return false;
-      const same = this.currentId === id && this.editor.doc.id === id;
+      const same = this.currentId === id && this.editor.doc?.id === id;
       if (this.currentId && !same) {
         this.rememberCurrent();
         try { await this.flush(this.editor.doc.id); }
@@ -209,11 +237,8 @@ export class WorkflowLibraryClient {
           // In particular, it cannot turn a freshly restored workflow deleted.
           if (epoch !== local.epoch) continue;
           if (error.httpStatus === 410) {
-            const cached = same ? this.editor.doc : this.cached(id);
             await this.handleLifecycle({ id, deleted: true });
-            if (generation !== this.generation) return false;
-            if (cached) { this.use(cached, undefined, { persist: false }); return true; }
-            throw error;
+            return false;
           }
           if (error.httpStatus !== 404 || !this.cached(id)) throw error;
         }
@@ -222,7 +247,7 @@ export class WorkflowLibraryClient {
         if (record && record.revision < local.revision) throw new Error('尚未读到工作流最新版本，请稍后重新打开。');
         if (record && lifecycle(record) !== 'active') {
           this.adopt(record); local.wasInactive = true; local.refreshRequired = false;
-          this.use(record.document, undefined, { persist: false }); return true;
+          this.unload(); return false;
         }
         if (local.refreshRequired || local.wasInactive) {
           if (!record) throw new Error('恢复后的工作流文档尚未确认。');
@@ -235,7 +260,7 @@ export class WorkflowLibraryClient {
         const document = cached ? await this.reconcile(cached, record, acknowledgement) : this.adopt(record).document;
         if (generation !== this.generation) return false;
         if (epoch !== local.epoch) continue;
-        this.use(document, this.states.get(id)); return true;
+        return this.use(document, this.states.get(id));
       }
       throw new Error('工作流状态在打开期间持续变化，请点击重试或回看板重新打开；本地草稿已保留。');
     } finally {

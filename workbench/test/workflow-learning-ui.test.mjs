@@ -67,6 +67,18 @@ function mountedInspection() {
   return { instance, runtime };
 }
 
+test('unloading learning preserves its form and detaches records and timers without stopping its job', async t => {
+  fakeDOM(t); const { instance, runtime } = mountedInspection(), workflowId = instance.workflowId, requests = [];
+  instance.api = async (path, options) => { requests.push({ path, options }); return { learning: [] }; };
+  instance.input.value = '保留学习输入'; instance.active = true;
+  instance.renderTimer = setTimeout(() => assert.fail('unloaded learning must not render later'), 10_000); t.after(() => clearTimeout(instance.renderTimer));
+  runtime.editor.documentLoaded = false; instance.syncMode();
+  assert.equal(instance.workflowId, null); assert.equal(instance.jobId, null); assert.equal(instance.inspectionRunId, null);
+  assert.equal(instance.active, false); assert.equal(instance.panel.hidden, true); assert.equal(runtime.panel.hidden, true); assert.equal(instance.renderTimer, null);
+  assert.equal(instance.drafts.get(workflowId)['wf-learning-input'], '保留学习输入');
+  await instance.loadRecent(true); instance.activate(); assert.equal(requests.length, 0); assert.equal(instance.workflowId, null);
+});
+
 test('opening a cached sample transfers focus to its runtime and returning restores the inspect control', async t => {
   const dom = fakeDOM(t), { instance, runtime } = mountedInspection();
   runtime.runs.set('candidate', { id: 'candidate', status: 'complete', output: false }); instance.inspect.focus();

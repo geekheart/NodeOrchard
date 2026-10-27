@@ -74,6 +74,55 @@ function editor(doc = documentWith()) {
 
 function titleField(instance) { instance.titleInput = new FakeElement('input'); instance.titleInput.value = instance.doc.title; instance.bindTitleInput(); return instance.titleInput; }
 
+test('unloading a workflow clears its active pointer and editing state while preserving every saved draft', t => {
+  const original = documentWith(), key = 'workbench.workflow-document.v1:' + original.id;
+  const raw = JSON.stringify({ version: 1, document: original }), legacy = '{preserve legacy draft';
+  const values = new Map([['workbench.workflow-active.v1', original.id], [key, raw], [STORAGE_KEY, legacy]]), writes = [];
+  globalValue(t, 'localStorage', {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => { writes.push(key); values.set(key, String(value)); },
+    removeItem: key => { writes.push(key); values.delete(key); },
+  });
+  const instance = editor(original), classes = new Set(), empty = { hidden: true }, box = { hidden: false };
+  instance.root.classList = { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); } };
+  instance.root.querySelector = selector => selector === '.wf-unloaded' ? empty : box;
+  instance.history.push({ document: original, label: 'old edit' }); instance.future.push({ document: original });
+  instance.selection.add('node-a'); instance.selectedEdge = 'old-edge'; instance.propertyDrafts.set('node-a', { title: 'unfinished' });
+  instance.validationDraftErrors = new Map([['node-a', 'invalid']]); instance.runStates = { 'node-a': { status: 'complete' } };
+  instance.storageKey = key; instance.storageValue = raw; instance.titleDraft = { documentId: original.id, value: 'unfinished name' };
+  instance.dialog.open = true; instance.pendingConnection = { node: 'node-a' }; let nestedCancelled = false;
+  instance.nodeLibrary = { cancelNested(all) { nestedCancelled = all; } };
+  instance.unloadDocument();
+  assert.equal(instance.documentLoaded, false); assert.equal(instance.active, false); assert.equal(empty.hidden, false); assert.ok(classes.has('document-unloaded'));
+  assert.equal(values.has('workbench.workflow-active.v1'), false); assert.equal(values.get(key), raw); assert.equal(values.get(STORAGE_KEY), legacy);
+  assert.deepEqual(writes, ['workbench.workflow-active.v1']); assert.notEqual(instance.doc.id, original.id); assert.deepEqual(instance.doc.nodes, []);
+  assert.equal(nestedCancelled, true); assert.equal(instance.pendingConnection, null); assert.equal(instance.dialog.open, false); assert.equal(instance.contextMenu.hidden, true);
+  assert.equal(instance.selection.size, 0); assert.equal(instance.selectedEdge, null); assert.equal(instance.propertyDrafts.size, 0); assert.equal(instance.validationDraftErrors.size, 0);
+  assert.equal(instance.history.length, 0); assert.equal(instance.future.length, 0); assert.deepEqual(instance.runStates, {}); assert.equal(instance.titleDraft, null); assert.equal(instance.unsaved, false);
+});
+
+test('an unloaded editor only delegates create and board actions until a workflow is explicitly opened', t => {
+  const values = new Map(), writes = [], original = documentWith(), instance = editor(original), empty = { hidden: true };
+  globalValue(t, 'localStorage', {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => { writes.push(key); values.set(key, String(value)); },
+    removeItem: key => values.delete(key),
+  });
+  instance.root.querySelector = selector => selector === '.wf-unloaded' ? empty : { hidden: false };
+  instance.requestGeometry = () => {}; let persisted = 0, created = 0, returned = 0, runs = 0;
+  instance.onPersist = () => persisted++; instance.onCreateWorkflow = () => created++; instance.onReturnToBoard = () => returned++;
+  instance.runtime = { start: () => runs++ }; instance.unloadDocument(); const placeholder = structuredClone(instance.doc);
+  instance.activate(); instance.persist(); instance.commit(original, 'late edit'); WorkflowEditor.prototype.scheduleSave.call(instance);
+  assert.equal(instance.active, false); assert.equal(instance.unsaved, false); assert.deepEqual(instance.doc, placeholder);
+  assert.equal(persisted, 0); assert.deepEqual(writes, []); assert.throws(() => instance.prepareRun(), /未加载工作流/);
+  for (const action of ['run', 'new', 'board']) { const button = new FakeElement('button'); button.dataset.action = action; instance.onClick({ target: button }); }
+  assert.equal(created, 1); assert.equal(returned, 1); assert.equal(runs, 0); assert.deepEqual(instance.doc, placeholder);
+  instance.useDocument(original, undefined, { persist: false }); instance.activate();
+  assert.equal(instance.documentLoaded, true); assert.equal(empty.hidden, true); assert.equal(instance.active, true); assert.equal(instance.doc.id, original.id);
+  assert.deepEqual(writes, ['workbench.workflow-active.v1']); assert.equal(values.get('workbench.workflow-active.v1'), original.id);
+  assert.equal(persisted, 0); assert.equal(values.has('workbench.workflow-document.v1:' + placeholder.id), false);
+});
+
 test('collapsing the canvas hides editing panels and restoring it keeps the saved layout', t => {
   globalValue(t, 'innerWidth', 1400); globalValue(t, 'requestAnimationFrame', callback => callback());
   globalValue(t, 'document', { createElementNS: (_namespace, tag) => new FakeElement(tag) });
