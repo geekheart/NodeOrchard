@@ -154,7 +154,7 @@ function runCode({ config, input, cwd, signal, onLog, pythonPath, context }) {
       try { result = JSON.parse(Buffer.concat(resultChunks).toString('utf8')); }
       catch { reject(errorFor('CODE_PROTOCOL_INVALID', `代码进程未返回有效结果${exitSignal ? `（${exitSignal}）` : ''}。`)); return; }
       if (result?.ok !== true || code !== 0 || !Object.hasOwn(result, 'output')) {
-        const known = new Set(['CODE_FAILED', 'OUTPUT_INVALID', 'OUTPUT_LIMIT']);
+        const known = new Set(['CODE_FAILED', 'CODE_ENVIRONMENT', 'OUTPUT_INVALID', 'OUTPUT_LIMIT']);
         reject(errorFor(known.has(result?.error?.code) ? result.error.code : 'CODE_FAILED',
           '代码执行失败：' + String(result?.error?.message || `进程退出码 ${code}`).slice(0, 4000)));
         return;

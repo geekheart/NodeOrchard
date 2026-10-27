@@ -17,6 +17,23 @@ class OutputError(ValueError):
         self.code = code
 
 
+def error_code(error):
+    if isinstance(error, OutputError):
+        return error.code
+    # Explicit typed causes preserve wrapped connection/dependency errors. An
+    # incidental exception context or a message alone is not a diagnosis.
+    seen = set()
+    current = error
+    for _ in range(8):
+        if not isinstance(current, BaseException) or id(current) in seen:
+            break
+        seen.add(id(current))
+        if isinstance(current, (ImportError, OSError)):
+            return "CODE_ENVIRONMENT"
+        current = current.__cause__
+    return "CODE_FAILED"
+
+
 def json_value(value, depth=0):
     if depth > 50:
         raise OutputError("结果嵌套过深。")
@@ -59,7 +76,7 @@ try:
         raise OutputError("代码输出不能超过 64KB JSON。", "OUTPUT_LIMIT")
     envelope = {"ok": True, "output": output}
 except BaseException as error:
-    envelope = {"ok": False, "error": {"code": getattr(error, "code", "CODE_FAILED"), "message": str(error)[:4000]}}
+    envelope = {"ok": False, "error": {"code": error_code(error), "message": str(error)[:4000]}}
     exit_code = 1
 
 try:

@@ -4,6 +4,31 @@ import { writeFileSync } from 'node:fs';
 
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_REQUEST_BYTES = 600000;
+const ENVIRONMENT_CODES = new Set([
+  'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED',
+  'ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO',
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED', 'CERT_REJECTED', 'CERT_UNTRUSTED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_DECRYPT_CERT_SIGNATURE', 'CERT_SIGNATURE_FAILURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_HANDSHAKE_TIMEOUT', 'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_DESTROYED',
+]);
+const errorProperty = (value, key) => { try { return value?.[key]; } catch { return undefined; } };
+
+// Only typed errors identify a known environment failure. Free-form business
+// messages and unknown error codes do not become environment diagnoses.
+function errorCode(error) {
+  const code = errorProperty(error, 'code');
+  if (['OUTPUT_INVALID', 'OUTPUT_LIMIT'].includes(code)) return code;
+  const seen = new Set(); let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === 'object' && !seen.has(current); depth++) {
+    seen.add(current);
+    if (ENVIRONMENT_CODES.has(errorProperty(current, 'code'))) return 'CODE_ENVIRONMENT';
+    current = errorProperty(current, 'cause');
+  }
+  return 'CODE_FAILED';
+}
 
 function jsonValue(value, depth = 0) {
   if (depth > 50) throw Object.assign(new Error('结果嵌套过深。'), { code: 'OUTPUT_INVALID' });
@@ -51,7 +76,7 @@ try {
   }
   envelope = { ok: true, output };
 } catch (error) {
-  envelope = { ok: false, error: { code: error?.code || 'CODE_FAILED', message: String(error?.message || error).slice(0, 4000) } };
+  envelope = { ok: false, error: { code: errorCode(error), message: String(error?.message || error).slice(0, 4000) } };
   exitCode = 1;
 }
 await Promise.all([flush(process.stdout), flush(process.stderr)]);

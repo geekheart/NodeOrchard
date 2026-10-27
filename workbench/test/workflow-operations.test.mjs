@@ -103,6 +103,58 @@ test('worker exceptions retain preceding stdout/stderr logs and report actual ex
   }
 });
 
+test('typed dependency failures from the real JavaScript worker remain environment failures', async t => {
+  const cwd = await workspace(t);
+  await assert.rejects(executeOperation({ node: operation({ code: "await import('nodeorchard_absent_learning_dependency_45fff'); return null;" }), input: null, cwd }),
+    error => error.code === 'CODE_ENVIRONMENT' && /nodeorchard_absent_learning_dependency_45fff/.test(error.message));
+});
+
+test('typed dependency failures from the real Python worker remain environment failures', async t => {
+  const cwd = await workspace(t);
+  await assert.rejects(executeOperation({ node: operation({ language: 'python', code: 'import nodeorchard_absent_learning_dependency_45fff\nreturn None' }), input: null, cwd }),
+    error => error.code === 'CODE_ENVIRONMENT' && /nodeorchard_absent_learning_dependency_45fff/.test(error.message));
+});
+
+test('known filesystem failures and Python environment exception families are kept out of business-code failures', async t => {
+  const cwd = await workspace(t);
+  const cases = [
+    ['javascript', "const fs=await import('node:fs'); return fs.readFileSync('missing-input-fixture.txt','utf8');"],
+    ['python', "with open('missing-input-fixture.txt') as source:\n    return source.read()"],
+    ['python', "raise ImportError('fixture dependency unavailable')"],
+    ['python', "raise PermissionError('fixture permission denied')"],
+    ['python', "raise ConnectionError('fixture connection failed')"],
+    ['python', "raise OSError('fixture environment failed')"],
+    ['python', "raise RuntimeError('wrapped dependency') from ModuleNotFoundError('fixture dependency')"],
+  ];
+  for (const [language, code] of cases) await assert.rejects(executeOperation({ node: operation({ language, code }), input: null, cwd }), { code: 'CODE_ENVIRONMENT' });
+});
+
+test('typed JavaScript cause codes identify known connection, DNS, certificate and dependency failures without networking', async t => {
+  const cwd = await workspace(t), code = "throw new Error('wrapped fixture failure', {cause: Object.assign(new Error('typed cause'), {code: input})});";
+  for (const input of ['MODULE_NOT_FOUND', 'EACCES', 'EPERM', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+    'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']) {
+    await assert.rejects(executeOperation({ node: operation({ code }), input, cwd }), { code: 'CODE_ENVIRONMENT' });
+  }
+});
+
+test('business syntax, type and value errors stay CODE_FAILED even when their messages resemble environment failures', async t => {
+  const cwd = await workspace(t);
+  for (const [language, code] of [
+    ['javascript', 'const = ;'], ['javascript', "throw new TypeError('fixture business shape');"],
+    ['javascript', "throw Object.assign(new Error('ENOENT Cannot find module ECONNREFUSED CERT_HAS_EXPIRED'), {code:'CUSTOM_BUSINESS_FAILURE'});"],
+    ['python', 'return ='], ['python', "raise TypeError('fixture business shape')"],
+    ['python', "raise ValueError('No module named ENOENT PermissionError ECONNREFUSED')"],
+  ]) await assert.rejects(executeOperation({ node: operation({ language, code }), input: null, cwd }), { code: 'CODE_FAILED' });
+});
+
+test('cyclic explicit error causes terminate classification and preserve ordinary failure semantics', async t => {
+  const cwd = await workspace(t);
+  for (const [language, code] of [
+    ['javascript', "const failure=new Error('business cause cycle'); failure.cause=failure; throw failure;"],
+    ['python', "failure=RuntimeError('business cause cycle')\nfailure.__cause__=failure\nraise failure"],
+  ]) await assert.rejects(executeOperation({ node: operation({ language, code }), input: null, cwd }), { code: 'CODE_FAILED' });
+});
+
 test('invalid JSON outputs and inputs are rejected instead of silently coerced', async t => {
   const cwd = await workspace(t);
   for (const code of ['return undefined;', 'return NaN;', 'return {value: undefined};', 'return new Date();', 'const x={}; x.self=x; return x;']) {
