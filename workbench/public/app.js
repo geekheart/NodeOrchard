@@ -10,9 +10,10 @@ import { HermesModelUI } from './hermes-model-ui.js';
 import { createAppDiagnosticClient } from './app-diagnostic-client.js';
 import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
+import { ConversationHubUI } from './conversation-hub-ui.js';
 
 const $ = (id) => document.getElementById(id);
-let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, routeLoad = 0;
+let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, applicationConversationSelection, conversationHub, routeLoad = 0;
 const diagnosticCapture = new URLSearchParams(location.search).get('diagnosticCapture') === 'readonly';
 const sidebarMedia = matchMedia('(max-width:720px)');
 let sidebarCollapsed = false, sidebarMobileOpen = false;
@@ -35,7 +36,7 @@ const appDiagnosticClient = createAppDiagnosticClient({ getState: () => ({ page:
   canvasClosed: workflowEditor?.settings?.canvasClosed, transport: state.transport, backendState: state.backend?.state }) });
 const backendLabels = { stopped: '尚未连接', starting: '连接中', ready: '已连接', error: '连接异常', disconnected: '已断开' };
 const sessionLabels = { idle: '空闲', ready: '已就绪', running: '进行中', busy: '进行中', waiting: '待处理', complete: '已完成', completed: '已完成', interrupted: '已停止', stopped: '已停止', unknown: '待确认', error: '失败', failed: '失败', disconnected: '未恢复' };
-const pageLabels = { board: '工作流看板', workflows: '节点编辑器', projects: '项目', skills: 'Skills', statistics: '统计', settings: '设置', task: '任务' };
+const pageLabels = { board: '工作流看板', workflows: '节点编辑器', conversations: '对话管理', skills: 'Skills', statistics: '统计', settings: '设置', task: '任务' };
 const defaults = { theme: 'system', density: 'comfortable', defaultWorkspace: '.' };
 const iconPaths = {
   workflow: 'M3 3h6v6H3zM15 3h6v6h-6zM15 15h6v6h-6zM9 6h6M6 9v9h9',
@@ -93,12 +94,13 @@ function readRoute() {
   const [pathname, query = ''] = (location.hash.slice(1) || '/board').split('?'); const parts = pathname.split('/').filter(Boolean);
   const decode = (value) => { try { return decodeURIComponent(value || ''); } catch { return ''; } }; const options = new URLSearchParams(query);
   if (parts[0] === 'task') return { page: 'task', id: decode(parts[1]), tab: ['workspace', 'runs', 'info'].includes(options.get('tab')) ? options.get('tab') : 'workspace', panel: ['execution', 'related'].includes(options.get('panel')) ? options.get('panel') : '' };
-  if (parts[0] === 'project') return { page: 'projects', cwd: decode(parts[1]) };
+  if (parts[0] === 'conversations') return { page: 'conversations', id: decode(parts[1]) };
+  if (parts[0] === 'project' || parts[0] === 'projects') return { page: 'conversations', id: '' };
   if (parts[0] === 'skills') return { page: 'skills', name: decode(parts[1]) };
   if (parts[0] === 'workflows') return { page: 'workflows', id: decode(parts[1]) };
-  return { page: ['board', 'projects', 'statistics', 'settings'].includes(parts[0]) ? parts[0] : 'board' };
+  return { page: ['board', 'statistics', 'settings'].includes(parts[0]) ? parts[0] : 'board' };
 }
-function normalizeRoute() { if (!location.hash || /^#\/workbench(?:[/?]|$)/.test(location.hash)) history.replaceState(null, '', '#/board'); }
+function normalizeRoute() { if (!location.hash || /^#\/workbench(?:[/?]|$)/.test(location.hash)) history.replaceState(null, '', '#/board'); else if (/^#\/projects?(?:[/?]|$)/.test(location.hash)) history.replaceState(null, '', '#/conversations'); }
 function navigate(hash) { if (location.hash === hash) void loadRouteData(); else location.hash = hash; }
 function selectSession(id) { navigate(taskURL(id)); }
 function setTaskQuery({ tab = state.route.tab, panel = state.route.panel } = {}) { navigate(taskURL(state.selectedId, tab, panel)); }
@@ -139,23 +141,26 @@ function renderShell() {
   const route = state.route || { page: 'board' }; const parent = route.page === 'task' ? 'board' : route.page;
   document.body.classList.toggle('workflow-active', route.page === 'workflows');
   document.body.classList.toggle('board-active', route.page === 'board');
-  const showApplicationChat = route.page !== 'workflows' && route.page !== 'task';
+  document.body.classList.toggle('conversation-hub-active', route.page === 'conversations');
+  const showApplicationChat = route.page === 'conversations' && Boolean(route.id);
   $('global-conversation-root').hidden = !showApplicationChat;
-  if (showApplicationChat && state.bootstrapped && !applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
+  if (showApplicationChat && state.bootstrapped) {
+    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot() }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
+    if (applicationConversationSelection !== route.id) { applicationConversationSelection = route.id; void applicationConversation.selectConversation(route.id).catch(error => notify(`总控会话打开失败：${error.message}`, true)); }
+  }
   renderSidebar();
   for (const nav of document.querySelectorAll('[data-nav]')) { nav.classList.toggle('active', nav.dataset.nav === parent); if (nav.dataset.nav === parent) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); }
   const crumb = $('breadcrumb'); crumb.replaceChildren(link('#/board', '个人空间'), element('span', 'separator', '/'));
   if (route.page === 'task') crumb.append(link('#/board', '工作流看板'), element('span', 'separator', '/'), element('span', '', selectedSession()?.title || '任务'));
   else if (route.page === 'workflows') crumb.append(link('#/board', '工作流看板'), element('span', 'separator', '/'), element('span', 'truncate', workflowLibraryClient?.currentId === route.id ? workflowEditor.doc.title : '节点编辑器'));
-  else if (route.cwd) crumb.append(link('#/projects', '项目'), element('span', 'separator', '/'), element('span', '', dirname(route.cwd)));
   else crumb.append(element('span', '', pageLabels[route.page]));
   $('details-button').hidden = route.page !== 'task'; $('details-button').setAttribute('aria-expanded', String(Boolean(route.panel)));
   $('inspector').hidden = route.page !== 'task' || !route.panel;
   $('new-task-button').disabled = !state.csrfToken;
-  $('new-task-button').hidden = route.page === 'board';
+  $('new-task-button').hidden = ['board', 'conversations'].includes(route.page);
   $('new-task-button').replaceChildren(icon('plus'), document.createTextNode(route.page === 'workflows' ? '新建工作流' : '新建任务'));
   $('nav-pending-count').hidden = !state.requests.size; $('nav-pending-count').textContent = String(state.requests.size);
-  $('nav-project-count').textContent = state.bootstrapped ? String(projectGroups().length) : '';
+  $('nav-conversation-count').textContent = conversationHub?.data ? String(conversationHub.data.workflows.length + conversationHub.data.supervisors.length) : '';
   document.title = `${route.page === 'task' ? selectedSession()?.title || '任务' : pageLabels[route.page]} · 个人工作台`;
   renderBackend();
 }
@@ -181,7 +186,6 @@ function renderBackend() {
 }
 function metric(label, value, footnote, iconName) { const card = element('div', 'metric-card'); const title = element('div', 'metric-label', label); if (iconName) title.append(icon(iconName)); card.append(title, element('div', 'metric-value', value), element('p', 'metric-footnote', footnote)); return card; }
 function badge(status) { const normalized = ['complete', 'completed'].includes(status) ? 'complete' : ['running', 'busy', 'waiting'].includes(status) ? 'running' : ['error', 'failed'].includes(status) ? 'error' : ''; const node = element('span', `status-badge ${normalized}`); node.append(element('span', `dot ${normalized === 'complete' ? 'live' : normalized === 'running' ? 'waiting' : normalized === 'error' ? 'error' : ''}`), document.createTextNode(sessionLabels[status] || status || '待开始')); return node; }
-function projectGroups() { const groups = new Map(); for (const session of state.sessions) { const key = session.cwd || ''; if (!groups.has(key)) groups.set(key, { cwd: key, sessions: [] }); groups.get(key).sessions.push(session); } return [...groups.values()]; }
 function sessionsTable(sessions, { showProject = true } = {}) {
   if (!sessions.length) return empty(state.bootstrapped ? '暂无任务' : '正在读取任务…', state.bootstrapped ? '新建一项任务，开始你的工作。' : '', 'task', state.bootstrapped ? button('新建任务', openNewTask, 'button quiet small') : undefined);
   const table = element('table'); const head = element('thead'); const tr = element('tr');
@@ -195,14 +199,11 @@ function sessionsTable(sessions, { showProject = true } = {}) {
   }
   table.append(body); return table;
 }
-function renderProjects() {
-  const groups = projectGroups(); const container = $('projects-content');
-  $('projects-title').textContent = state.route.cwd !== undefined ? dirname(state.route.cwd) : '项目';
-  $('projects-description').textContent = state.route.cwd !== undefined ? safeText(state.route.cwd || '未指定目录') : '按照任务实际使用的工作目录整理。';
-  $('project-page-count').textContent = `${groups.length} 个目录项目`;
-  if (state.route.cwd !== undefined) { const sessions = state.sessions.filter((session) => (session.cwd || '') === state.route.cwd); const back = link('#/projects', '← 所有项目', 'back-link'); const summary = element('div', 'project-summary', `${sessions.length} 项任务`); summary.append(element('span', 'helper', '按会话工作目录聚合')); const wrap = element('div', 'table-wrap'); wrap.append(sessionsTable(sessions, { showProject: false })); container.replaceChildren(back, summary, wrap); return; }
-  if (!groups.length) { container.replaceChildren(empty(state.bootstrapped ? '还没有目录项目' : '正在读取项目…', '创建任务后，相同工作目录的任务会汇集在这里。')); return; }
-  const grid = element('div', 'project-grid'); for (const group of groups) { const card = link(`#/project/${encodeURIComponent(group.cwd)}`, '', 'project-card'); card.append(icon('folder'), element('h3', '', dirname(group.cwd)), element('p', 'project-path mono', group.cwd || '未指定目录')); const footer = element('div', 'project-card-footer'); footer.append(element('span', '', `${group.sessions.length} 项任务`), element('span', '', `${group.sessions.filter((session) => ['running', 'busy', 'waiting'].includes(session.status)).length} 项进行中`)); card.append(footer); grid.append(card); } container.replaceChildren(grid);
+function ensureConversationHub() {
+  if (conversationHub) return;
+  conversationHub = new ConversationHubUI($('conversation-hub-root'), { api, openSupervisor: id => navigate(`#/conversations/${encodeURIComponent(id)}`),
+    getSessions: () => state.sessions, sessionLink: taskURL, readOnly: diagnosticCapture,
+    onCount: count => { $('nav-conversation-count').textContent = String(count); } });
 }
 function ensureWorkflowEditor() {
   if (workflowEditor) return;
@@ -264,7 +265,8 @@ function renderPage() {
   if (state.route.page === 'board') {
     ensureWorkflowBoard(); if (state.bootstrapped) workflowBoard.activate();
   } else workflowBoard?.deactivate();
-  if (state.route.page === 'projects') renderProjects();
+  if (state.route.page === 'conversations') { ensureConversationHub(); conversationHub.render(); }
+  else conversationHub?.deactivate();
   if (state.route.page === 'skills') renderSkills();
   if (state.route.page === 'statistics') renderStatistics();
   if (state.route.page === 'settings') renderSettings();
@@ -496,7 +498,8 @@ async function loadRouteData() {
       if (route.page === 'workflows') workflowLoading(`工作流打开失败：${error.message}`, true);
       else notify(`工作流草稿同步失败：${error.message}。本地草稿仍保留，可进入节点编辑器保存或导出。`, true);
     }
-  } else if (route.page === 'task') await Promise.allSettled([loadHistory(state.selectedId), loadRuns(state.selectedId)]);
+  } else if (route.page === 'conversations') { ensureConversationHub(); await conversationHub.activate(route); }
+  else if (route.page === 'task') await Promise.allSettled([loadHistory(state.selectedId), loadRuns(state.selectedId)]);
   else if (route.page === 'skills') { await loadSkills(); await loadSkillDetail(route.name); }
   else if (route.page === 'statistics') await loadStatistics();
   else if (route.page === 'settings') await Promise.allSettled([loadSettings(), assistantPermissions.refresh()]);
@@ -517,7 +520,7 @@ async function synchronize() {
     if (state.route.page === 'task') await loadHistory(state.selectedId, { quiet: true }); return true;
   } catch (error) { state.transport = 'error'; notify(`无法读取本地服务：${error.message}`, true); return false; } finally { state.refreshing = false; renderBackend(); }
 }
-function updateSessionViews() { renderShell(); if (state.route.page === 'board') workflowBoard?.renderPending(); if (state.route.page === 'projects') renderProjects(); if (state.route.page === 'task') { const session = selectedSession(); $('task-title').textContent = safeText(session?.title || '任务'); $('task-status').replaceWith(Object.assign(badge(session?.status), { id: 'task-status' })); renderTaskInfo(); renderComposer(); renderInspector(); } }
+function updateSessionViews() { renderShell(); if (state.route.page === 'board') workflowBoard?.renderPending(); if (state.route.page === 'conversations') conversationHub?.renderHistory(); if (state.route.page === 'task') { const session = selectedSession(); $('task-title').textContent = safeText(session?.title || '任务'); $('task-status').replaceWith(Object.assign(badge(session?.status), { id: 'task-status' })); renderTaskInfo(); renderComposer(); renderInspector(); } }
 function receiveEvent(event) {
   const payload = event.payload || {}; const id = event.sessionId || payload.sessionId; const revision = ++state.eventRevision;
   if (id) state.sessionRevision.set(id, revision);
@@ -546,6 +549,7 @@ function receiveEvent(event) {
   workflowEditor?.runtime?.handleEvent(event);
   workflowEditor?.conversation?.onEvent(event);
   applicationConversation?.onEvent(event);
+  conversationHub?.onEvent(event);
   workflowBoard?.handleEvent(event);
 }
 function scheduleReconnect() { if (state.closed || state.reconnectTimer) return; state.reconnectTimer = setTimeout(async () => { state.reconnectTimer = null; const ok = await synchronize(); if (ok) openEvents(); else scheduleReconnect(); }, Math.min(1000 * 2 ** state.retry++, 10000)); }
@@ -590,7 +594,7 @@ $('message-input').addEventListener('keydown', (event) => { if (event.key === 'E
 $('interrupt-button').addEventListener('click', async () => { const id = state.selectedId; if (!id || state.interrupting.has(id)) return; state.interrupting.add(id); renderComposer(); try { await api(`/api/sessions/${encodeURIComponent(id)}/interrupt`, { method: 'POST', body: {} }); notify('停止请求已发送，等待后端确认。'); } catch (error) { notify(`停止失败：${error.message}`, true); } finally { state.interrupting.delete(id); renderComposer(); } });
 $('clear-events-button').addEventListener('click', () => { state.events = []; renderEvents(); });
 window.addEventListener('hashchange', routeChanged);
-window.addEventListener('pagehide', () => { state.closed = true; state.source?.close(); clearTimeout(state.reconnectTimer); });
+window.addEventListener('pagehide', () => { state.closed = true; state.source?.close(); clearTimeout(state.reconnectTimer); conversationHub?.deactivate(); });
 window.addEventListener('pageshow', (event) => { if (event.persisted) { state.closed = false; state.reconnectTimer = null; void synchronize().then((ok) => ok ? openEvents() : scheduleReconnect()); } });
 try { const cached = JSON.parse(localStorage.getItem('workbench-appearance')); if (cached) applyPreferences(cached); } catch {}
 normalizeRoute();

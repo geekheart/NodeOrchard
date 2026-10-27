@@ -9,7 +9,7 @@
     <nav class="primary-nav">
       <a href="#/board" data-nav="board" aria-label="工作流看板"><span data-icon="home"></span><span>工作流看板</span><span id="nav-pending-count" class="nav-count" hidden></span></a>
       <a href="#/workflows" data-nav="workflows" aria-label="节点编辑器" title="节点编辑器"><span data-icon="workflow"></span><span>节点编辑器</span></a>
-      <a href="#/projects" data-nav="projects" aria-label="项目"><span data-icon="folder"></span><span>项目</span><span id="nav-project-count" class="nav-count"></span></a>
+      <a href="#/conversations" data-nav="conversations" aria-label="对话管理"><span data-icon="task"></span><span>对话管理</span><span id="nav-conversation-count" class="nav-count"></span></a>
       <a href="#/skills" data-nav="skills" aria-label="Skills"><span data-icon="sparkles"></span><span>Skills</span></a>
       <a href="#/statistics" data-nav="statistics" aria-label="统计"><span data-icon="chart"></span><span>统计</span></a>
     </nav>
@@ -27,7 +27,7 @@
       <main id="main-content" class="main-content">
         <section id="page-workflows" class="workflow-page" data-page="workflows" hidden><div id="workflow-root"></div><div id="workflow-load-status" class="workflow-load-status" role="status" hidden></div></section>
         <section id="page-board" class="workflow-board-page" data-page="board" hidden><div id="workflow-board-root"></div></section>
-        <section id="page-projects" class="page" data-page="projects" hidden><div class="page-heading"><div><p class="eyebrow">工作空间</p><h1 id="projects-title">项目</h1><p id="projects-description" class="page-description">按照任务实际使用的工作目录整理。</p></div><span id="project-page-count" class="subtle-label"></span></div><div id="projects-content"></div></section>
+        <section id="page-conversations" class="page conversation-hub-page" data-page="conversations" hidden><div class="page-heading"><div><p class="eyebrow">全局应用助手</p><h1>对话管理</h1><p class="page-description">总控统一查看与协调，各工作流保留独立对话和诊断进度。</p></div></div><div id="conversation-hub-root"></div></section>
         <section id="page-skills" class="page" data-page="skills" hidden><div class="page-heading"><div><p class="eyebrow">能力与流程</p><h1>Skills</h1><p class="page-description">查看 Hermes 中真实可用的技能与使用说明。</p></div><button id="refresh-skills" class="button quiet" type="button"><span data-icon="refresh"></span>刷新列表</button></div><div class="skills-toolbar"><label class="search-field"><span data-icon="search"></span><input id="skill-search" type="search" placeholder="搜索技能名称或说明" aria-label="搜索 Skills" /></label><span id="skills-count" class="subtle-label"></span></div><div id="skills-content" class="skills-layout"><div id="skill-list" class="skill-list"></div><article id="skill-detail" class="skill-detail"></article></div></section>
         <section id="page-statistics" class="page" data-page="statistics" hidden><div class="page-heading"><div><p class="eyebrow">执行记录</p><h1>统计</h1><p class="page-description">查看工作台内的任务运行情况。</p></div><label class="period-picker"><span>时间范围</span><select id="statistics-period" aria-label="统计时间范围"><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></label></div><p class="scope-note">按 UTC 自然日统计应用内记录，含今天；这里不代表 ChatGPT 账号用量。</p><div id="statistics-content"></div></section>
         <section id="page-settings" class="page settings-page" data-page="settings" hidden>

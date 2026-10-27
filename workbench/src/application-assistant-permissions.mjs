@@ -14,7 +14,8 @@ export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
 const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
-const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs']);
+const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
+const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs']);
 
 // Resolve even a not-yet-created path through its existing parent. A lexical
 // prefix alone admits symlinks and is insufficient for an assistant folder.
@@ -61,14 +62,15 @@ export class ApplicationAssistantPermissions {
   constructor(app, { readSettings = () => app.assistantPermissionSettings?.get?.() } = {}) {
     this.app = app; this.readSettings = readSettings; this.scopes = new WeakSet();
   }
-  async bind({ role, workflowId, document } = {}) {
+  async bind({ role, workflowId, document, readOnly = false } = {}) {
     if (!['workflow', 'supervisor'].includes(role)) fail('助手角色必须由服务端明确绑定。');
     if (workflowId !== undefined && !id(workflowId)) fail('助手工作流范围无效。', 400);
     if (role === 'workflow' && !workflowId) fail('独立会话必须绑定当前工作流。');
     if (document && document.id !== workflowId) fail('助手草稿与当前工作流不一致。', 409);
     const settings = settingsValue(await this.readSettings());
     const actual = await workingFolder(this.app);
-    const scope = Object.freeze({ role, workflowId: workflowId || null, workingFolder: actual,
+    if (typeof readOnly !== 'boolean') fail('助手诊断模式无效。');
+    const scope = Object.freeze({ role, readOnly, workflowId: workflowId || null, workingFolder: actual,
       revision: settings.revision, permissions: Object.freeze(settings[role]), baseDocument: document ? structuredClone(document) : null });
     this.scopes.add(scope); return scope;
   }
@@ -86,6 +88,9 @@ export class ApplicationAssistantPermissions {
   allowed(name, scope) {
     this.check(scope); const p = scope.permissions;
     if (!KNOWN.has(name)) return false;
+    if (scope.readOnly && (MANAGE.has(name) || ['workflow.propose', 'conversation.delegate'].includes(name))) return false;
+    if (CONVERSATIONS.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.crossWorkflowRead
+      && (name !== 'conversation.delegate' || p.manageWorkflows);
     if (KNOWLEDGE.has(name)) return true;
     if (name === 'app.logs') return scope.role === 'supervisor' && p.appLogs;
     if (MANAGE.has(name)) return scope.role === 'supervisor' && p.manageWorkflows;

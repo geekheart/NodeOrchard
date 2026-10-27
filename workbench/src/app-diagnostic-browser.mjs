@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const fail = message => Object.assign(new Error(message), { code: 'DIAGNOSTIC_CAPTURE_UNAVAILABLE' });
 const privateText = value => String(value || '').replace(/\b(?:sk-[\w-]{8,}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, '[REDACTED]').replace(/(Bearer\s+)[^\s"']+/gi, '$1[REDACTED]').replace(/((?:access_token|refresh_token|api_key|authorization|password)\s*[=:]\s*)[^\s,}]+/gi, '$1[REDACTED]').slice(0, 12000);
-const READ_API = /^\/api\/(?:bootstrap|settings|models|statistics|skills(?:\/[A-Za-z0-9_-]+)?|workflow-node-presets(?:\/[A-Za-z0-9_-]+)?|workflow-library(?:\/[A-Za-z0-9_-]+)?|workflow-conversations\/[A-Za-z0-9_-]+|workflow-schedules(?:\/[A-Za-z0-9_-]+)?|workflow-runs(?:\/[A-Za-z0-9_-]+(?:\/feedback)?)?|workflow-v2\/queue|workflow-v2\/artifacts\/[A-Za-z0-9_-]+|app-assistant)$/;
+const READ_API = /^\/api\/(?:bootstrap|settings|models|statistics|skills(?:\/[A-Za-z0-9_-]+)?|workflow-node-presets(?:\/[A-Za-z0-9_-]+)?|workflow-library(?:\/[A-Za-z0-9_-]+)?|workflow-conversations\/[A-Za-z0-9_-]+|workflow-schedules(?:\/[A-Za-z0-9_-]+)?|workflow-runs(?:\/[A-Za-z0-9_-]+(?:\/feedback)?)?|workflow-v2\/queue|workflow-v2\/artifacts\/[A-Za-z0-9_-]+|conversation-hub|app-assistant(?:\/conversations(?:\/[A-Za-z0-9_-]+)?)?)$/;
 const READ_ASSET = /^\/(?:[A-Za-z0-9_./-]+\.(?:js|mjs|css|svg|png|jpg|jpeg|webp|gif|ico|woff2?))?$/;
 // This constant is application-owned privacy protection, never model-supplied
 // JavaScript. The capture API does not expose an evaluate/script operation.

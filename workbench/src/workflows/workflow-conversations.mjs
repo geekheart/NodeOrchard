@@ -432,6 +432,36 @@ export class WorkflowConversations {
         artifactHashes: (record.artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) }, document).context;
     } catch { return null; }
   }
+  async messageReadOnly(workflowId, input, options = {}) {
+    this.assertOpen(workflowId, true);
+    object(input, ['clientMessageId', 'text', 'context', 'document'], '只读委派消息');
+    object(options, ['operationId', 'sourceConversationId'], '只读委派来源');
+    identifier(input.clientMessageId, '消息幂等 ID'); identifier(options.operationId, '委派操作 ID'); text(input.text, '消息');
+    if (options.sourceConversationId !== undefined) identifier(options.sourceConversationId, '总控会话 ID');
+    const document = safeDocument(input.document, workflowId);
+    if (document.mode === 'learn') fail('总控只读诊断不能展开学习或训练工作流。', 403);
+    const requestedContext = contextInput(input.context), requestDigest = digest({ ...input, ...options, readOnly: true });
+    const existing = this.db.prepare('SELECT id,private_value FROM workflow_conversation_turns WHERE workflow_id=? AND client_message_id=?').get(workflowId, input.clientMessageId);
+    if (existing) {
+      const stored = JSON.parse(existing.private_value);
+      if (stored.requestDigest !== requestDigest || stored.readOnly !== true) fail('相同委派消息 ID 不能对应不同内容。', 409);
+      return this.response(workflowId, this.readTurn(workflowId, existing.id).turn);
+    }
+    if (this.get(workflowId).conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) fail('此工作流助手正在处理消息，请稍后再委派。', 409);
+    const bound = this.bindContext(workflowId, requestedContext, document), createdAt = now();
+    const turn = { id: 'turn-' + randomUUID(), workflowId, clientMessageId: input.clientMessageId,
+      user: { text: input.text, context: bound.context, intent: 'discuss' }, assistant: { text: '已收到总控委派，正在只读诊断…' },
+      delegation: { readOnly: true, operationId: options.operationId, ...(options.sourceConversationId ? { sourceConversationId: options.sourceConversationId } : {}) },
+      actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
+    this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
+      .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic: false, page: null, readOnly: true }));
+    this.update(turn); this.emit(workflowId);
+    const controller = new AbortController(); this.active.set(turn.id, controller);
+    // This entry deliberately bypasses local rerun/review/learning/issue-close
+    // intent routes. The planner receives a second, enforced read-only scope.
+    void this.generate(turn, document, bound, controller);
+    return this.response(workflowId, turn);
+  }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
     object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId', 'replyToTurnId'], '对话请求');
@@ -506,7 +536,9 @@ export class WorkflowConversations {
   }
   async generate(turn, document, bound, controller) {
     try {
-      const previousTurns = this.get(turn.workflowId).conversation.turns.filter(item => item.id !== turn.id && item.status !== 'thinking');
+      const privateValue = this.readTurn(turn.workflowId, turn.id).privateValue, readOnly = privateValue.readOnly === true;
+      const previousTurns = this.get(turn.workflowId).conversation.turns.filter(item => item.id !== turn.id && item.status !== 'thinking'
+        && (!readOnly || !['skill', 'feedback'].includes(item.user?.intent) && !item.actions?.some(action => /learn|feedback/.test(action.kind || '')) && !item.outcome?.learningId));
       // The broker validates scope and freshness before reusing read-only facts.
       // A previous checkpoint never authorizes replaying proposals or operations.
       const checkpoint = previousTurns.findLast(item => ['error', 'interrupted'].includes(item.status) && item.assistant?.checkpoint)?.assistant.checkpoint;
@@ -516,8 +548,8 @@ export class WorkflowConversations {
       // records to this planning session. Only the selected execution metadata.
       const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
-      const page = this.readTurn(turn.workflowId, turn.id).privateValue.page;
-      const result = await this.planner(this.app, { role: 'workflow', operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
+      const page = privateValue.page;
+      const result = await this.planner(this.app, { role: 'workflow', readOnly, operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint, signal: controller.signal,
         onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
           turn.assistant.text = message; if (progress) turn.assistant.progress = clone(progress);
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
@@ -529,6 +561,7 @@ export class WorkflowConversations {
         onSession: sessionId => { if (!this.closed) { turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.update(turn); } } });
       if (this.closed || controller.signal.aborted) return;
       this.app.workflowLibrary.assertRunnable(turn.workflowId);
+      if (readOnly && (result.operations?.length || result.actions?.length)) fail('总控委派仅允许只读诊断，不能生成工作流修改或执行操作。', 403);
       turn.assistant = { ...turn.assistant, text: text(result.text || result.summary || '已生成建议。', 'AI 回复', { max: 24000 }),
         ...(result.evidence?.length ? { evidence: result.evidence } : {}),
         ...(result.operations?.length ? { operations: clone(result.operations), baseFingerprint: result.baseFingerprint || documentFingerprint(document), summary: result.summary || '' } : {}) };
@@ -572,6 +605,7 @@ export class WorkflowConversations {
     object(input, ['planFingerprint'], '流程修改校验');
     if (this.mutations.has(workflowId + ':' + turnId)) fail('此回复正在处理中，请稍候。', 409);
     const { turn, privateValue } = this.readTurn(workflowId, turnId);
+    if (privateValue.readOnly) fail('只读委派不能应用工作流修改。', 403);
     const pending = value => value.status === 'proposed' && !value.outcome
       && value.actions?.some(card => card.kind === 'mark-applied')
       && Array.isArray(value.assistant.operations) && value.assistant.operations.length;
@@ -601,6 +635,7 @@ export class WorkflowConversations {
     const key = workflowId + ':' + turnId;
     if (this.mutations.has(key)) fail('此回复正在处理中，请稍候。', 409);
     const { turn, privateValue } = this.readTurn(workflowId, turnId);
+    if (privateValue.readOnly && !['interrupt-turn', 'dismiss-turn'].includes(input.action)) fail('只读委派没有运行、审核、学习或应用修改的权限。', 403);
     if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return this.response(workflowId, turn); }
     if (input.action === 'dismiss-turn') {
       if (turn.status === 'dismissed') return this.response(workflowId, turn);

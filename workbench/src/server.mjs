@@ -57,6 +57,24 @@ export function createWorkbenchServer(config, application = new Application(conf
         }));
       }
       if (req.method === 'GET' && path === '/api/app-assistant') return json(res, 200, application.applicationAssistant.get());
+      if (req.method === 'GET' && path === '/api/conversation-hub') {
+        const allowed = ['lifecycle', 'search', 'limit'];
+        if ([...requestURL.searchParams.keys()].some(key => !allowed.includes(key) || requestURL.searchParams.getAll(key).length !== 1)) return json(res, 400, { error: '会话目录查询参数无效。' });
+        const args = Object.fromEntries(requestURL.searchParams);
+        if (args.limit !== undefined) args.limit = Number(args.limit);
+        return json(res, 200, { ...application.applicationAssistant.hub.list({ lifecycle: 'all', ...args }), supervisors: application.applicationAssistant.listConversations() });
+      }
+      if (path === '/api/app-assistant/conversations' && requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
+      if (req.method === 'GET' && path === '/api/app-assistant/conversations') return json(res, 200, { supervisors: application.applicationAssistant.listConversations() });
+      if (req.method === 'POST' && path === '/api/app-assistant/conversations') return json(res, 201, application.applicationAssistant.createConversation(await readJson(req, 4096)));
+      const supervisorConversation = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)(?:\/(messages|turns\/([A-Za-z0-9_-]+)\/action))?$/);
+      if (supervisorConversation) {
+        if (requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
+        const [, id, operation, turnId] = supervisorConversation;
+        if (req.method === 'GET' && !operation) return json(res, 200, application.applicationAssistant.get(id));
+        if (req.method === 'POST' && operation === 'messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000), id));
+        if (req.method === 'POST' && turnId) return json(res, 200, await application.applicationAssistant.action(turnId, await readJson(req, 4096), id));
+      }
       if (req.method === 'POST' && path === '/api/app-assistant/messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000)));
       const assistantAction = path.match(/^\/api\/app-assistant\/turns\/([A-Za-z0-9_-]+)\/action$/);
       if (req.method === 'POST' && assistantAction) return json(res, 200, await application.applicationAssistant.action(assistantAction[1], await readJson(req, 4096)));
@@ -304,6 +322,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
+        '/conversation-hub-ui.js': ['conversation-hub-ui.js', 'text/javascript'],
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],
         '/style.css': ['style.css', 'text/css'],
         '/workflow-editor.js': ['workflow-editor.js', 'text/javascript'],
