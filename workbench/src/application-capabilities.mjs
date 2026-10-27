@@ -24,8 +24,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
-  definition('workbench.inspect', '读取设置、模型目录、定时任务或节点预设的当前状态；不修改任何设置或任务。', {
-    section: { enum: ['settings', 'models', 'schedules', 'node-presets'] }, workflowId: text }),
+  definition('workbench.inspect', '只读读取设置、模型、定时任务、节点预设或统计；统计包含对话、执行、Token采集覆盖和最近上下文，独立助手限定当前工作流。', {
+    section: { enum: ['settings', 'models', 'schedules', 'node-presets', 'statistics'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
   definition('page.inspect', '读取发消息时当前页面的界面状态与脱敏操作、错误记录。', {}),
   definition('environment.probe', '检查固定工具版本，或检查 GitHub HTTPS 连接；代码解释器和库请使用 runtime.inspect。', { target: { enum: ['dependencies', 'github'] } }),
   definition('browser.capture', '在专用只读浏览器中真实截图或短录制，附复现步骤与错误；不会采集当前用户标签页或桌面。', {
@@ -47,6 +47,7 @@ const FEATURES = [
   { id: 'workflow-recycle-bin', status: 'ui-only', inspect: 'workflows.list', tools: [], requiresUserConfirmation: true,
     note: '工作流直接移入回收站并暂停定时任务，恢复后可编辑运行但定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
   { id: 'application-logs', status: 'available', roles: ['supervisor'], tools: ['app.logs'], note: '当前进程保留的应用事件摘要及Hermes日志，有界脱敏，无完整持久历史。' },
+  { id: 'workflow-statistics', status: 'available', tools: ['workbench.inspect'], note: '只读工作流对话、模型用量、上下文、运行成败和登记产物统计；独立助手仅当前工作流。历史未采集Token保持未知，逐工作流CPU和内存及订阅费用尚未采集。' },
   { id: 'diagnostics', status: 'available', tools: ['app.state', 'workflow.run', 'session.history', 'artifact.inspect', 'browser.capture'] },
   { id: 'conversation-lifecycle', status: 'available', channel: 'conversation-response', tools: [],
     note: '会话响应只读投影待处理状态；明确关联的成功重试接续旧聊天失败，审核按真实运行与尝试核对，不回写旧历史或业务状态。' },
@@ -118,7 +119,7 @@ export class ApplicationCapabilities {
       ...(section === 'tools' ? { assistantTools: this.tools(), codeModeRequiresRegistration: false } : {}),
       ...(section === 'overview' ? { features: structuredClone(FEATURES), skills: await this.skills.list(), next: ['node.describe', 'runtime.inspect', 'assistant.skills.read'] } : {}) };
   }
-  async inspectWorkbench({ section, workflowId }) {
+  async inspectWorkbench({ section, workflowId, days = 7 }) {
     if (workflowId !== undefined && (typeof workflowId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workflowId))) fail('工作流编号无效。');
     if (section === 'settings') { const settings = await this.app.settings(); return { section, preferences: settings.preferences, approvalMode: settings.approvalMode }; }
     if (section === 'models') return { section, ...(await this.app.modelOptions()) };
@@ -126,6 +127,18 @@ export class ApplicationCapabilities {
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };
     if (section === 'node-presets') return { section, presets: this.app.nodePresets.list() };
+    if (section === 'statistics') {
+      if (![7, 30].includes(days)) fail('统计周期只支持7或30天。');
+      const dashboard = this.app.statistics(days).dashboard;
+      if (workflowId) {
+        const workflow = dashboard.workflows.find(row => row.id === workflowId);
+        if (!workflow) fail('工作流统计不存在。', 404);
+        return { section, period: dashboard.period, generatedAt: dashboard.generatedAt, workflow };
+      }
+      return { section, period: dashboard.period, generatedAt: dashboard.generatedAt, totals: dashboard.totals,
+        workflows: dashboard.workflows.slice(0, 100).map(({ recentRuns, recentConversations, daily, ...row }) => row),
+        truncated: dashboard.workflows.length > 100, supervisor: dashboard.supervisor };
+    }
     fail('工作台检查分区无效。');
   }
 }

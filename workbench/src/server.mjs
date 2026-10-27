@@ -323,6 +323,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
         '/conversation-hub-ui.js': ['conversation-hub-ui.js', 'text/javascript'],
+        '/statistics-dashboard.js': ['statistics-dashboard.js', 'text/javascript'],
+        '/statistics-dashboard.css': ['statistics-dashboard.css', 'text/css'],
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],
         '/style.css': ['style.css', 'text/css'],
         '/workflow-editor.js': ['workflow-editor.js', 'text/javascript'],

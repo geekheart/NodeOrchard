@@ -448,7 +448,7 @@ export class WorkflowLearning {
       this.save(state.job);
       return this.model.createMemoryScope({ id: state.job.id, signal, modelRoute: state.job.modelRoute, onSession: id => {
         if (!this.current(state) || state.stopping) return;
-        state.job.modelSessionId = id; this.save(state.job);
+        state.job.modelSessionId = id; state.job.modelSessionIds = [...new Set([...(state.job.modelSessionIds || []), id])]; this.save(state.job);
       }, persist: state.plan.document.schemaVersion === 2 && state.plan.document.nodes.some(node => node.type === 'human') });
     });
     // The backend may have captured before a lost/late acknowledgment. Cleanup
@@ -590,6 +590,7 @@ export class WorkflowLearning {
     const text = await this.model.generate(prompt, { signal: state.controller.signal, memoryScopeId: state.job.memoryScopeId, modelRoute: state.job.modelRoute, onSession: id => {
       if (!this.current(state) || state.stopping) return;
       state.job.modelSessionId = id;
+      state.job.modelSessionIds = [...new Set([...(state.job.modelSessionIds || []), id])];
       this.save(state.job);
     } });
     this.ensure(state);

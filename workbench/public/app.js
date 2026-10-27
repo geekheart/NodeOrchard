@@ -1,4 +1,5 @@
 import { WorkflowEditor } from './workflow-editor.js';
+import { StatisticsDashboard } from './statistics-dashboard.js';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { WorkflowRuntimeUI, skillDisplayName, skillVersionLabel } from './workflow-runtime-ui.js';
 import { WorkflowBoard } from './workflow-board.js';
@@ -453,12 +454,16 @@ function renderSkills() {
   const fragment = document.createDocumentFragment(); for (const skill of skills) { const item = link(`#/skills/${encodeURIComponent(skill.name)}`, '', `skill-item${state.route.name === skill.name ? ' selected' : ''}`); const title = element('h3'); title.append(icon('sparkles'), document.createTextNode(safeText(skillDisplayName(skill)))); item.append(title, element('p', '', skill.description || '未提供说明'), element('span', 'skill-source', [`${skill.enabled === true ? '已启用 · ' : skill.enabled === false ? '未启用 · ' : ''}${skill.source || 'Hermes'}`, skillVersionLabel(skill)].filter(Boolean).join(' · '))); fragment.append(item); } if (!skills.length) fragment.append(empty(data ? '没有匹配的技能' : '正在读取 Skills…', '', 'search')); list.replaceChildren(fragment);
   const selected = state.skillDetails.get(state.route.name); if (!state.route.name) detail.replaceChildren(empty('选择一项技能', '', 'sparkles')); else if (!selected) detail.replaceChildren(empty('正在读取技能内容…', '', 'sparkles')); else if (selected.error) detail.replaceChildren(empty('无法读取技能内容', selected.error, 'sparkles')); else detail.replaceChildren(element('h2', '', skillDisplayName(selected)), element('span', 'skill-source mono', [selected.source || 'Hermes', skillVersionLabel(selected), skillDisplayName(selected) !== selected.name ? selected.name : ''].filter(Boolean).join(' · ')), element('p', '', selected.description || ''), element('pre', 'skill-content', selected.content || '这项技能未提供正文。'));
 }
+let statisticsDashboard, statisticsRefreshTimer;
 function renderStatistics() {
-  const days = $('statistics-period').value; const data = state.stats.get(days); const node = $('statistics-content'); if (!data) { node.replaceChildren(empty(state.statsPending.has(days) ? '正在读取统计…' : '统计暂不可用', '', 'chart')); return; } if (data.error) { node.replaceChildren(empty('统计读取失败', data.error, 'chart', button('重试', () => loadStatistics(true), 'button quiet small'))); return; }
-  const totals = data.totals || {}; const metrics = element('div', 'statistics-metrics'); const value = (key) => typeof totals[key] === 'number' ? totals[key] : '—'; metrics.append(metric('任务运行', value('runs'), `${value('sessions')} 项任务`, 'activity'), metric('已完成', value('completed'), '已确认完成的运行', 'task'), metric('成功率', typeof totals.successRate === 'number' ? `${Math.round(totals.successRate * 100)}%` : '—', '按本地执行记录计算', 'chart'), metric('失败 / 停止', `${value('failed')} / ${value('interrupted')}`, `${value('unknown')} 项状态待确认`, 'clock'));
-  const usage = element('div', 'usage-note'); for (const label of ['Token 用量', '订阅花费']) { const cell = element('div'); cell.append(element('span', '', label), element('span', '', '暂不可用 · 未采集')); usage.append(cell); }
-  const daily = element('section', 'content-section'); daily.append(element('div', 'section-heading', '每日执行 · UTC')); const table = element('table'); const head = element('thead'); const hr = element('tr'); for (const label of ['日期', '运行', '完成', '失败', '停止', '待确认']) hr.append(element('th', '', label)); head.append(hr); const body = element('tbody'); for (const day of data.daily || []) { const row = element('tr'); for (const key of ['date', 'runs', 'completed', 'failed', 'interrupted', 'unknown']) row.append(element('td', '', day[key] ?? '—')); body.append(row); } table.append(head, body); const wrap = element('div', 'table-wrap'); wrap.append(table); daily.append(wrap);
-  const recent = element('section', 'content-section'); recent.append(element('div', 'section-heading', '最近运行')); if (data.recentRuns?.length) { const wrap = element('div', 'table-wrap'); wrap.append(runsTable([...data.recentRuns].reverse(), true)); recent.append(wrap); } else recent.append(empty('这个时间范围内还没有运行记录', '', 'clock')); node.replaceChildren(metrics, usage, daily, recent);
+  const days = $('statistics-period').value, data = state.stats.get(days);
+  statisticsDashboard ||= new StatisticsDashboard($('statistics-content'), { onRefresh: () => void loadStatistics(true) });
+  statisticsDashboard.render(data?.dashboard, { days: Number(days), loading: state.statsPending.has(days), error: data?.error || '' });
+}
+function invalidateStatistics() {
+  state.stats.clear();
+  if (state.route.page !== 'statistics' || statisticsRefreshTimer) return;
+  statisticsRefreshTimer = setTimeout(() => { statisticsRefreshTimer = null; if (state.route.page === 'statistics') void loadStatistics(true); }, 3000);
 }
 async function loadHistory(id, { quiet = false } = {}) {
   if (!id || state.backend.state !== 'ready') return; const revision = (state.historyRevision.get(id) || 0) + 1; state.historyRevision.set(id, revision);
@@ -524,6 +529,7 @@ async function synchronize() {
 }
 function updateSessionViews() { renderShell(); if (state.route.page === 'board') workflowBoard?.renderPending(); if (state.route.page === 'conversations') conversationHub?.renderHistory(); if (state.route.page === 'task') { const session = selectedSession(); $('task-title').textContent = safeText(session?.title || '任务'); $('task-status').replaceWith(Object.assign(badge(session?.status), { id: 'task-status' })); renderTaskInfo(); renderComposer(); renderInspector(); } }
 function receiveEvent(event) {
+  if (/^(?:workflow\.(?:run|conversation|learning|lifecycle|document|artifact)|application\.conversation|session\.usage|message\.complete|session\.created|session\.deleted)/.test(event.type)) invalidateStatistics();
   const payload = event.payload || {}; const id = event.sessionId || payload.sessionId; const revision = ++state.eventRevision;
   if (id) state.sessionRevision.set(id, revision);
   if (id && (/^message\./.test(event.type) || /^request\./.test(event.type) || event.type === 'error')) state.turnRevision.set(id, revision);
@@ -541,7 +547,7 @@ function receiveEvent(event) {
     case 'request.cancel': state.requests.delete(String(payload.id)); renderRequests(); updateSessionViews(); break;
     case 'message.start': if (id) state.streams.set(id, { role: payload.role || 'assistant', text: typeof payload.text === 'string' ? payload.text : '' }); if (id === state.selectedId) renderMessages(); break;
     case 'message.delta': { if (!id) break; const stream = state.streams.get(id) || { role: 'assistant', text: '' }; if (typeof payload.text === 'string') stream.text += payload.text; state.streams.set(id, stream); if (id === state.selectedId) renderMessages(); break; }
-    case 'message.complete': { if (!id) break; const stream = state.streams.get(id); const text = typeof payload.text === 'string' ? payload.text : stream?.text || ''; if (text || payload.error) { const messages = state.histories.get(id) || []; messages.push({ role: stream?.role || 'assistant', text, status: payload.status, error: payload.error }); state.histories.set(id, messages); } state.streams.delete(id); state.tools.delete(id); state.posting.delete(id); if (id === state.selectedId) { renderMessages(); void loadRuns(id); } void loadHistory(id, { quiet: true }); state.stats.clear(); if (state.route.page === 'statistics') void loadStatistics(true); updateSessionViews(); break; }
+    case 'message.complete': { if (!id) break; const stream = state.streams.get(id); const text = typeof payload.text === 'string' ? payload.text : stream?.text || ''; if (text || payload.error) { const messages = state.histories.get(id) || []; messages.push({ role: stream?.role || 'assistant', text, status: payload.status, error: payload.error }); state.histories.set(id, messages); } state.streams.delete(id); state.tools.delete(id); state.posting.delete(id); if (id === state.selectedId) { renderMessages(); void loadRuns(id); } void loadHistory(id, { quiet: true }); updateSessionViews(); break; }
     case 'tool.start': if (id) state.tools.set(id, payload.name || payload.tool_name || payload.tool || '工具'); renderComposer(); renderInspector(); break;
     case 'tool.complete': if (id) state.tools.delete(id); renderComposer(); renderInspector(); break;
     case 'error': if (id) { state.streams.delete(id); state.tools.delete(id); state.posting.delete(id); } notify(`执行错误：${payload.message || payload.error || '请查看执行详情。'}`, true); if (id === state.selectedId) renderMessages(); break;

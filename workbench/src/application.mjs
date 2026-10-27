@@ -3,6 +3,8 @@ import { mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve, join, dirname } from 'node:path';
 import { HermesAdapter, redact } from './hermes-adapter.mjs';
 import { Store } from './store.mjs';
+import { collectWorkbenchStatistics } from './workbench-statistics.mjs';
+import { SessionUsage, sanitizeSessionUsage } from './session-usage.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
 import { validatePreferences } from './preferences.mjs';
@@ -24,8 +26,9 @@ import { AssistantPermissionSettings } from './assistant-permission-settings.mjs
 import { createAppDiagnosticBrowser } from './app-diagnostic-browser.mjs';
 
 function infoView(info = {}) {
-  return Object.fromEntries(['model', 'provider', 'version', 'cwd', 'running', 'yolo', 'approval_mode', 'tools', 'skills', 'credential_warning']
-    .filter(key => info[key] !== undefined).map(key => [key, info[key]]));
+  const usage = sanitizeSessionUsage(info.usage);
+  return { ...Object.fromEntries(['model', 'provider', 'version', 'cwd', 'running', 'yolo', 'approval_mode', 'tools', 'skills', 'credential_warning']
+    .filter(key => info[key] !== undefined).map(key => [key, info[key]])), ...(usage ? { usage } : {}) };
 }
 
 export class Application extends EventEmitter {
@@ -35,6 +38,8 @@ export class Application extends EventEmitter {
     this.adapter = adapter;
     this.models = new HermesModels(adapter);
     this.store = new Store(config.dataDir);
+    try { this.sessionUsage = new SessionUsage(this.store.db); this.store.sessionUsage = this.sessionUsage; }
+    catch { this.sessionUsage = null; /* Missing telemetry must not prevent task execution. */ }
     this.requests = new Map();
     this.sessionInfo = new Map();
     this.sequence = 0;
@@ -152,6 +157,7 @@ export class Application extends EventEmitter {
   statistics(days = 7) {
     const statistics = this.store.statistics(days);
     statistics.recentRuns = statistics.recentRuns.map(run => ({ ...run, error: redact(run.error) }));
+    statistics.dashboard = collectWorkbenchStatistics(this, { days });
     return statistics;
   }
 
@@ -276,6 +282,8 @@ export class Application extends EventEmitter {
     if (snapshot.info?.approval_mode === 'off') throw new Error('Hermes 当前配置关闭了审批。请在 Hermes 设置中启用审批后重试；应用不会修改你的全局配置。');
     snapshot.info = infoView(snapshot.info);
     this.sessionInfo.set(runtime, snapshot.info);
+    const current = this.store.byRuntime(runtime);
+    if (current) this.observeUsage(current.id, snapshot.info.usage, 'session.info');
     return snapshot;
   }
 
@@ -294,6 +302,8 @@ export class Application extends EventEmitter {
     this.checkReady();
     const session = this.store.create({ title: String(title || '新任务').slice(0, 120), cwd: directory,
       storedSessionId: snapshot.stored_session_id, runtimeSessionId: snapshot.session_id, model: snapshot.info.model, provider: snapshot.info.provider });
+    try { this.sessionUsage?.registerNew(session.id); } catch { /* Observation only. */ }
+    this.observeUsage(session.id, snapshot.info.usage, 'session.create');
     if (managedPurpose === 'assistant') this.store.db.prepare('INSERT OR IGNORE INTO application_model_sessions(id) VALUES(?)').run(session.id);
     else this.publish('session.updated', session.id, session);
     return session;
@@ -361,6 +371,7 @@ export class Application extends EventEmitter {
           model: snapshot.info.model || current.model, provider: snapshot.info.provider || current.provider,
           storedSessionId: snapshot.stored_session_id || current.storedSessionId,
           status: snapshot.inflight?.streaming || snapshot.running ? 'running' : idleStatus });
+        this.observeUsage(id, snapshot.info.usage, 'session.resume');
         for (const request of snapshot.open_requests || []) {
           if (!['approval', 'clarify'].includes(request.method)) continue;
           const frame = { jsonrpc: '2.0', id: request.id, method: request.method,
@@ -471,6 +482,9 @@ export class Application extends EventEmitter {
     }
     if (event.session_id && !session) return;
     const payload = event.payload || {};
+    if (session && ['session.info', 'session.usage', 'message.complete'].includes(event.type)) {
+      this.observeUsage(session.id, payload.usage, event.type, event.type === 'message.complete');
+    }
     if (session && event.type === 'session.info') this.sessionInfo.set(event.session_id, infoView(payload));
     if (session && event.type === 'message.start') this.updateSession(session.id, { status: 'running', hasPrompted: true });
     if (session && event.type === 'message.complete') {
@@ -490,6 +504,11 @@ export class Application extends EventEmitter {
       this.clearSessionRequests(session.id);
     }
     this.publish(event.type, session?.id || null, payload);
+  }
+
+  observeUsage(sessionId, usage, source, final = false) {
+    try { return this.sessionUsage?.observe(sessionId, usage, { source, final }) || null; }
+    catch { return null; /* A telemetry read/write never changes execution outcomes. */ }
   }
 
   onRequest(frame, replaying = false) {

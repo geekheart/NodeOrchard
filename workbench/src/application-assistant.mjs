@@ -199,6 +199,9 @@ export class ApplicationAssistant {
         const result = await this.plan({ role: 'supervisor', sourceConversationId: conversationId, operationNamespace: input.retryOfTurnId || turn.id, text: input.text, context, page: bounded(input.page || {}), signal: controller.signal,
           checkpoint: ['error', 'interrupted'].includes(previous?.status) ? previous.assistant?.checkpoint : undefined,
           history: this.get(conversationId).conversation.turns.filter(item => item.id !== turn.id).slice(-4).flatMap(item => [{ role: 'user', text: item.user.text }, { role: 'assistant', text: item.assistant.text }]),
+          onSession: sessionId => { if (!this.closed) {
+            turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.save(turn);
+          } },
           onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
             turn.assistant.text = message; if (progress) turn.assistant.progress = structuredClone(progress);
             turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId);

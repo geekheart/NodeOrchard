@@ -60,11 +60,14 @@ export class Store {
   }
   beginRun(sessionId) {
     const id = randomUUID();
-    this.db.prepare('INSERT INTO runs(id,session_id,status,started_at) VALUES(?,?,?,?)').run(id, sessionId, 'running', new Date().toISOString());
+    const startedAt = new Date().toISOString();
+    this.db.prepare('INSERT INTO runs(id,session_id,status,started_at) VALUES(?,?,?,?)').run(id, sessionId, 'running', startedAt);
+    try { this.sessionUsage?.beginRun(id, sessionId, startedAt); } catch { /* Telemetry cannot block execution. */ }
     this.update(sessionId, { status: 'running' });
     return id;
   }
   finishRun(sessionId, status, error = '', outcome = '') {
+    try { this.sessionUsage?.finishRuns(sessionId); } catch { /* Missing terminal telemetry is not an execution failure. */ }
     this.db.prepare("UPDATE runs SET status=?,completed_at=?,error=?,outcome=? WHERE session_id=? AND status IN ('running','waiting')")
       .run(status, new Date().toISOString(), error, outcome, sessionId);
   }
