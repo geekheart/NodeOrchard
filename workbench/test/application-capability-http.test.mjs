@@ -73,6 +73,11 @@ test('capability GET exposes real nodes, interfaces and internal Skill metadata 
   const interfaces = await f.request('/api/app-capabilities?section=interfaces'); assert.equal(interfaces.status, 200);
   assert.equal(interfaces.body.protocol.externalMcpServerAvailable, false);
   assert.equal(interfaces.body.features.find(feature => feature.id === 'execution').status, 'ui-only');
+  const editing = interfaces.body.features.find(feature => feature.id === 'workflow-editing');
+  assert.equal(editing.status, 'proposal-only'); assert.equal(editing.channel, 'conversation-request');
+  assert.deepEqual(editing.tools, ['node.describe', 'workflow.propose']);
+  const review = interfaces.body.features.find(feature => feature.id === 'human-review');
+  assert.equal(review.status, 'ui-only'); assert.equal(review.requiresUserConfirmation, true); assert.deepEqual(review.tools, []);
   assert.deepEqual(interfaces.body.tools.map(tool => tool.name), f.app.applicationAssistant.tools().map(tool => tool.name));
   const names = interfaces.body.tools.map(tool => tool.name);
   for (const name of ['node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workflow.propose', 'workflow.run']) assert(names.includes(name));

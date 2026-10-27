@@ -6,6 +6,8 @@ import { applicationHttpRoute, applicationResponseTrace, applicationErrorLocatio
 import { Application } from './application.mjs';
 import { redact } from './hermes-adapter.mjs';
 
+const PUBLIC_REVIEW_ERROR_CODES = new Set(['REVISION_REQUIRES_PROPOSAL']);
+
 async function readJson(req, limit = 1000000) {
   const chunks = []; let bytes = 0, oversized = false;
   for await (const part of req) {
@@ -384,6 +386,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/shared/workflow/workflow-model.mjs': 'workflow-model.mjs',
         '/shared/workflow/workflow-plan.mjs': 'workflow-plan.mjs',
         '/shared/workflow/workflow-presets.mjs': 'workflow-presets.mjs',
+        '/shared/workflow/workflow-review-revision.mjs': 'workflow-review-revision.mjs',
         '/shared/workflow/workflow-schedule-time.mjs': 'workflow-schedule-time.mjs',
         '/shared/workflow/workflow-studio-utils.mjs': 'workflow-studio-utils.mjs',
         '/shared/workflow/workflow-tools.mjs': 'workflow-tools.mjs',
@@ -406,7 +409,9 @@ export function createWorkbenchServer(config, application = new Application(conf
       try { application.logger?.write(error.httpStatus && error.httpStatus < 500 ? 'warn' : 'error', 'http.request.failed', {
         component: 'http', requestId, route, method, httpStatus: error.httpStatus || 400, errorName: error.name, errorCode: error.code,
         ...applicationErrorLocation(error, config.appRoot) }); } catch { /* Keep the existing HTTP error contract. */ }
-      return json(res, error.httpStatus || 400, { error: redact(error.message), ...(Array.isArray(error.details) ? { errors: error.details } : {}) });
+      return json(res, error.httpStatus || 400, { error: redact(error.message),
+        ...(PUBLIC_REVIEW_ERROR_CODES.has(error.code) ? { code: error.code } : {}),
+        ...(Array.isArray(error.details) ? { errors: error.details } : {}) });
     }
   });
   const onEvent = event => {

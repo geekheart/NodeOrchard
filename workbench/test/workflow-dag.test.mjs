@@ -167,15 +167,34 @@ test('a Skill uses an isolated workspace session and stages explicit files into 
   assert.equal(final.nodes.output.artifacts.some(artifact => artifact.name === 'saved.json'), true);
 });
 
-test('human review is durable, performs no model work while waiting, and resumes after restart', async t => {
-  let calls = 0; const executor = async () => { calls++; return { output: { image: 'candidate' } }; };
-  const { app, manager } = await setup(t, executor);
+test('human review restores the exact attempt and artifact hashes after restart without replaying workers or models', async t => {
+  let calls = 0, modelCalls = 0;
+  const executor = async ({ cwd }) => {
+    calls++; const path = join(cwd, 'candidate.txt'); await writeFile(path, 'immutable review candidate');
+    return { output: { path }, artifacts: [{ path }] };
+  };
+  const { app, manager, directory, db } = await setup(t, executor, { files: true });
+  app.createSession = app.submit = async () => { modelCalls++; throw Error('Restoring a human wait must not call a model.'); };
   const doc = graph([node('input', 'input'), code('produce'), node('human', 'review', { reviewTargetNodeId: 'produce' }), node('output', 'output')], [['input', 'produce'], ['produce', 'review'], ['review', 'output']]);
   const run = await manager.start({ document: doc, input: {} }); await until(() => manager.get(run.id).status === 'waiting_review'); assert.equal(calls, 1);
-  await manager.close(); const replacement = new WorkflowRuns(app, { executeOperation: executor }); app.workflows = replacement;
-  assert.equal(replacement.get(run.id).status, 'waiting_review'); assert.equal(calls, 1);
-  await replacement.approve(run.id, { nodeId: 'review', action: 'approve' });
-  await until(() => replacement.get(run.id).status === 'complete'); assert.equal(calls, 1); assert.equal(replacement.get(run.id).nodes.review.review.decision, 'approved');
+  const before = manager.get(run.id), artifact = before.nodes.review.artifacts[0];
+  assert.ok(artifact.id); assert.equal(artifact.sha256, createHash('sha256').update('immutable review candidate').digest('hex'));
+  await manager.close();
+  const reopened = new DatabaseSync(join(directory, 'data.sqlite')); app.store.db = reopened;
+  const replacement = new WorkflowRuns(app, { executeOperation: executor }); app.workflows = replacement;
+  try {
+    await delay(25);
+    const restored = replacement.get(run.id);
+    assert.equal(restored.status, 'waiting_review'); assert.deepEqual(restored.document, before.document);
+    assert.deepEqual(restored.nodes, before.nodes, 'Producer/reviewer attempt numbers, IDs, histories and artifact IDs/SHA must survive restoration.');
+    assert.equal(await readFile(artifact.path, 'utf8'), 'immutable review candidate');
+    assert.equal(calls, 1); assert.equal(modelCalls, 0);
+    const record = restored.nodes.review;
+    await replacement.approve(run.id, { nodeId: 'review', action: 'approve', expectedAttempt: record.attempt,
+      expectedAttemptId: record.attemptId, expectedArtifactHashes: record.artifacts.map(({ id, sha256 }) => ({ id, sha256 })) });
+    await until(() => replacement.get(run.id).status === 'complete');
+    assert.equal(calls, 1); assert.equal(modelCalls, 0); assert.equal(replacement.get(run.id).nodes.review.review.decision, 'approved');
+  } finally { await replacement.close(); reopened.close(); app.store.db = db; app.workflows = manager; }
 });
 
 test('delivery deletion cannot invalidate canonical artifacts or approved versions, including after restart', async t => {
@@ -271,6 +290,25 @@ test('explicit redo requirements reach the selected tool producer without changi
   assert.equal(manager.get(run.id).nodes.produce.history.length, 1);
 });
 
+test('review revision refuses unchanged Python code before consuming a revision or launching another worker', async t => {
+  const { manager } = await setup(t, undefined, { files: true });
+  const producer = code('produce', { language: 'python', code: "from pathlib import Path\npath = Path(context['outputDirectory']) / 'poster.txt'\npath.write_text('original poster', encoding='utf-8')\nreturn {'path': str(path)}" });
+  const doc = graph([node('input', 'input'), producer, node('human', 'review', { reviewTargetNodeId: 'produce' }), node('output', 'output')],
+    [['input', 'produce'], ['produce', 'review'], ['review', 'output']]);
+  const run = await manager.start({ document: doc, input: {} });
+  await until(() => manager.get(run.id).status === 'waiting_review');
+  const before = manager.get(run.id), candidate = before.nodes.review;
+  await assert.rejects(manager.approve(run.id, { nodeId: 'review', action: 'revise', feedback: 'Move the title below the illustration',
+    expectedAttempt: candidate.attempt, expectedAttemptId: candidate.attemptId, expectedArtifactHashes: candidate.artifacts.map(({ id, sha256 }) => ({ id, sha256 })) }),
+  error => error.httpStatus === 409 && error.code === 'REVISION_REQUIRES_PROPOSAL' && /候选/.test(error.message));
+  await delay(25);
+  assert.deepEqual(manager.get(run.id), before, 'A rejected prose request must preserve the candidate, attempts, history and quota.');
+  assert.equal(await readFile(before.nodes.produce.artifacts[0].path, 'utf8'), 'original poster');
+  await manager.rerun(run.id, { nodeIds: ['produce'] });
+  await until(() => manager.get(run.id).status === 'waiting_review' && manager.get(run.id).nodes.produce.attempt === 2);
+  assert.equal(await readFile(manager.get(run.id).nodes.produce.artifacts[0].path, 'utf8'), 'original poster', 'Explicit original-code rerun remains available.');
+});
+
 test('double review submissions are serialized and a stop invalidates an in-flight approval', async t => {
   const { manager, app } = await setup(t, async () => ({ output: {} }));
   const doc = graph([node('input', 'input'), code('produce'), node('human', 'review'), node('output', 'output')], [['input', 'produce'], ['produce', 'review'], ['review', 'output']]);
@@ -281,13 +319,37 @@ test('double review submissions are serialized and a stop invalidates an in-flig
   await manager.interrupt(run.id); release(); await assert.rejects(first, /候选已变化|已停止/); assert.equal(manager.get(run.id).status, 'interrupted');
 });
 
-test('explicit review revision reruns once with feedback and preserves fixed skill/config and old attempts', async t => {
-  const feedback = []; const { manager } = await setup(t, async ({ context }) => { feedback.push(context.reviewFeedback); return { output: { attempt: context.attempt } }; });
-  const doc = graph([node('input', 'input'), code('produce'), node('human', 'review', { reviewTargetNodeId: 'produce', maxRevisions: 1 }), node('output', 'output')], [['input', 'produce'], ['produce', 'review'], ['review', 'output']]);
+test('human review revisions continue past legacy limits and deliver each request to every affected Skill', async t => {
+  const calls = {}, prompts = [], histories = new Map(); let sessions = 0;
+  const { manager, app } = await setup(t, async ({ node, input }) => {
+    calls[node.id] = (calls[node.id] || 0) + 1; return { output: input };
+  });
+  const content = 'Return a bounded source-backed plan.', version = 'sha256:' + createHash('sha256').update(content).digest('hex');
+  app.skill = async name => ({ name, content, revision: version, source: 'local' });
+  app.createSession = async () => ({ id: 'review-session-' + (++sessions) });
+  app.submit = async (id, text) => { prompts.push(text); histories.set(id, [{ role: 'assistant', text: '{"planned":true}' }]);
+    queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+  app.history = async id => ({ messages: histories.get(id) }); app.interrupt = async () => ({});
+  manager.prepareSkill = async (_app, _session, detail, context) => ({ skill: detail, text: JSON.stringify(context.input), cleanup: async () => {} });
+  const skill = id => node('skill', id, { inputType: 'object', outputType: 'object', skillRef: 'fixture', version });
+  const doc = graph([node('input', 'input'), code('facts'), skill('plan'), skill('polish'), node('human', 'review', { reviewTargetNodeId: 'plan', maxRevisions: 1 }), node('output', 'output'), code('native'), node('output', 'native-output')],
+    [['input', 'facts'], ['facts', 'plan'], ['plan', 'polish'], ['polish', 'review'], ['review', 'output'], ['input', 'native'], ['native', 'native-output']]);
   const run = await manager.start({ document: doc, input: {} }); await until(() => manager.get(run.id).status === 'waiting_review');
-  await manager.approve(run.id, { nodeId: 'review', action: 'revise', feedback: 'Move label left' }); await until(() => manager.get(run.id).status === 'waiting_review');
-  assert.deepEqual(feedback, ['', 'Move label left']); assert.equal(manager.get(run.id).nodes.produce.history.length, 1);
-  await assert.rejects(manager.approve(run.id, { nodeId: 'review', action: 'revise', feedback: 'again' }), /次数上限/);
+  for (const [index, feedback] of ['Move label left', 'Keep title above the illustration', 'Increase the visible spacing', 'Fourth human request', 'Fifth human request'].entries()) {
+    await manager.approve(run.id, { nodeId: 'review', action: 'revise', feedback });
+    await until(() => manager.get(run.id).status === 'waiting_review' && manager.get(run.id).nodes.review.attempt === index + 2);
+    const current = manager.get(run.id);
+    for (const id of ['plan', 'polish']) {
+      assert.equal(current.nodes[id].reviewFeedback, feedback);
+      assert.equal(current.nodes[id].skill.revision, version);
+      assert.equal(current.frozenSkillDetails[id].content, content);
+    }
+    assert.ok(prompts.slice(-2).every(prompt => prompt.endsWith(feedback)), 'Both actual Skill submissions must receive the latest revision request.');
+    assert.equal(current.nodes.review.review.revisionCount, index + 1);
+  }
+  const before = manager.get(run.id);
+  assert.equal(prompts.length, 12); assert.equal(before.nodes.review.review.revisionCount, 5);
+  assert.deepEqual(calls, { facts: 1, native: 1 }); assert.equal(before.nodes.plan.history.length, 5); assert.deepEqual(before.document, doc);
   await manager.approve(run.id, { nodeId: 'review', action: 'approve' }); await until(() => manager.get(run.id).status === 'complete');
 });
 
@@ -298,7 +360,7 @@ test('partial rerun reuses completed upstream and invalidates only descendants',
   assert.deepEqual(counts, { left: 2, right: 1 }); assert.equal(manager.get(run.id).nodes.left.attempt, 2); assert.equal(manager.get(run.id).nodes.right.attempt, 1);
 });
 
-test('partial rerun feedback reaches affected fixed Skills while unrelated branches are reused', async t => {
+for (const executionMode of ['code', 'tool']) test(`${executionMode} review requires a proposal while explicit partial rerun feedback still reaches affected fixed Skills`, async t => {
   const counts = {}, prompts = [], histories = new Map(); let session = 0;
   const { manager, app } = await setup(t, async ({ node, input }) => {
     counts[node.id] = (counts[node.id] || 0) + 1; return { output: { ...input, [node.id]: counts[node.id] } };
@@ -314,9 +376,14 @@ test('partial rerun feedback reaches affected fixed Skills while unrelated branc
   manager.prepareSkill = async (_app, _session, detail, context) => ({ skill: detail, text: JSON.stringify(context.input), cleanup: async () => {} });
   const skill = node('skill', 'plan', { inputType: 'object', outputType: 'object', skillRef: 'fixture', version });
   const merge = node('merge', 'merge', {}, { inputs: ['front', 'back', 'native'].map(id => ({ id, label: id, type: 'object', required: true })), outputs: [{ id: 'out', label: 'out', type: 'object' }] });
-  const doc = graph([node('input', 'input'), code('facts'), skill, code('front'), code('back'), code('native'), merge, node('human', 'review'), node('output', 'output')],
+  const producer = executionMode === 'code' ? code('facts') : node('tool', 'facts', { executionMode: 'tool', toolName: 'json.stringify', outputType: 'any' });
+  const doc = graph([node('input', 'input'), producer, skill, code('front'), code('back'), code('native'), merge, node('human', 'review', { reviewTargetNodeId: 'facts' }), node('output', 'output')],
     [['input', 'facts'], ['facts', 'plan'], ['plan', 'front'], ['plan', 'back'], ['input', 'native'], ['front', 'merge', 'front'], ['back', 'merge', 'back'], ['native', 'merge', 'native'], ['merge', 'review'], ['review', 'output']]);
   const run = await manager.start({ document: doc, input: {} }); await until(() => manager.get(run.id).status === 'waiting_review');
+  const original = manager.get(run.id), initialPrompts = prompts.length;
+  await assert.rejects(manager.approve(run.id, { nodeId: 'review', action: 'revise', feedback: 'Regenerate this tool core code' }),
+    error => error.httpStatus === 409 && error.code === 'REVISION_REQUIRES_PROPOSAL');
+  assert.deepEqual(manager.get(run.id), original); assert.equal(prompts.length, initialPrompts);
   for (const feedback of [null, 4, 'x'.repeat(8001)]) await assert.rejects(manager.rerun(run.id, { nodeIds: ['facts'], feedback }), /8000/);
   assert.equal(manager.get(run.id).nodes.plan.attempt, 1);
   const feedback = 'Use the source-backed VO4 candidate; remove MAIN.';

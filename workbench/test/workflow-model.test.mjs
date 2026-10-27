@@ -2,13 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   NODE_TYPES, NODE_GROUPS, createDocument, createNode, getPorts, validateConnection,
-  connectNodes, updateNode, removeNodes, removeEdge, validateDocument, serializeDocument,
+  connectNodes, updateNode, removeNodes, removeEdge, validateDocument, serializeDocument, nodeConfigurationContract,
 } from '../shared/workflow/workflow-model.mjs';
 
 const node = (type, id, config = {}) => createNode(type, { x: 20, y: 40 }, { id, config });
 const graph = (...nodes) => ({ ...createDocument(), nodes });
 const wire = (sourceNode, targetNode, sourcePort = 'out', targetPort = 'in') => ({ sourceNode, sourcePort, targetNode, targetPort });
 const frozenCopy = value => JSON.parse(JSON.stringify(value));
+
+test('legacy human revision limits round-trip without being advertised as current configuration', () => {
+  const human = createNode('human', {}, { id: 'review' }), contract = nodeConfigurationContract('human');
+  assert.equal(Object.hasOwn(human.config, 'maxRevisions'), false);
+  assert.equal(Object.hasOwn(contract.defaults, 'maxRevisions'), false);
+  assert.equal(contract.allowedConfigKeys.includes('maxRevisions'), false);
+  for (const maximum of [1, 3, 12]) {
+    const legacy = createDocument({ schemaVersion: 2 });
+    legacy.nodes = [createNode('human', {}, { id: 'legacy-review', config: { maxRevisions: maximum } })];
+    assert.equal(validateDocument(legacy).nodes[0].config.maxRevisions, maximum);
+    assert.deepEqual(validateDocument(legacy), legacy, 'Compatibility must preserve the frozen document instead of rewriting it.');
+  }
+});
 
 test('fourteen node types use five stable groups, icons, defaults, and named ports', () => {
   assert.equal(NODE_TYPES.length, 14);

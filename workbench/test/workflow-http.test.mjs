@@ -109,6 +109,58 @@ const builtin = (id, toolName, inputType, outputType) => createNode('tool', { x:
   executionMode: 'tool', toolName, inputType, outputType,
 } });
 
+function reviewedV2(producer, inputType = 'object') {
+  let document = createDocument({ schemaVersion: 2, title: 'Isolated revision HTTP fixture' });
+  document.nodes = [createNode('input', {}, { id: 'input', config: { outputType: inputType } }), producer,
+    createNode('human', {}, { id: 'review', config: { inputType, outputType: inputType, reviewTargetNodeId: producer.id } }),
+    createNode('output', {}, { id: 'output' })];
+  for (let index = 1; index < document.nodes.length; index++) document = connectNodes(document, {
+    sourceNode: document.nodes[index - 1].id, sourcePort: 'out', targetNode: document.nodes[index].id, targetPort: 'in' });
+  return document;
+}
+
+test('HTTP review refuses fixed Python revisions with a public reason and preserves the exact candidate', async t => {
+  const f = await fixture(t, { connect: false });
+  const document = reviewedV2(code('poster', { inputType: 'object', outputType: 'object', language: 'python',
+    code: "return {'poster': 'original', 'private': 'SOURCE_SENTINEL'}" }));
+  const started = await f.api('/api/workflow-runs', { document, input: {} });
+  assert.equal(started.status, 202);
+  const before = (await until(() => f.api('/api/workflow-runs/' + started.body.id), value => value.body.status === 'waiting_review')).body;
+  const record = before.nodes.review, path = '/api/workflow-runs/' + before.id + '/review';
+  const result = await f.api(path, { nodeId: 'review', action: 'revise', feedback: 'FEEDBACK_SENTINEL',
+    expectedAttempt: record.attempt, expectedAttemptId: record.attemptId, expectedArtifactHashes: [] });
+  assert.equal(result.status, 409); assert.equal(result.body.code, 'REVISION_REQUIRES_PROPOSAL');
+  assert.deepEqual(Object.keys(result.body).sort(), ['code', 'error']);
+  assert.match(result.body.error, /候选/); assert.doesNotMatch(JSON.stringify(result.body), /SOURCE_SENTINEL|FEEDBACK_SENTINEL/);
+  assert.deepEqual((await f.api('/api/workflow-runs/' + before.id)).body, before);
+  const original = f.app.workflows.approve;
+  f.app.workflows.approve = async () => { throw Object.assign(new Error('Fixture rejection'), { httpStatus: 409, code: 'PRIVATE_SOURCE_SENTINEL' }); };
+  try { assert.deepEqual((await f.api(path, { nodeId: 'review', action: 'approve' })).body, { error: 'Fixture rejection' }); }
+  finally { f.app.workflows.approve = original; }
+  const stopped = await f.api(path, { nodeId: 'review', action: 'stop' }); assert.equal(stopped.status, 202);
+});
+
+test('HTTP human Skill revisions continue beyond the old frozen maximum until explicitly approved', async t => {
+  const f = await fixture(t);
+  const document = reviewedV2(createNode('skill', {}, { id: 'author', config: { inputType: 'text', outputType: 'text',
+    skillRef: f.skill.name, version: f.skill.revision } }), 'text');
+  document.nodes.find(node => node.id === 'review').config.maxRevisions = 3;
+  const started = await f.api('/api/workflow-runs', { document, input: 'original candidate' });
+  assert.equal(started.status, 202);
+  const path = '/api/workflow-runs/' + started.body.id;
+  await until(() => f.api(path), value => value.body.status === 'waiting_review');
+  for (let index = 0; index < 5; index++) {
+    assert.equal((await f.api(path + '/review', { nodeId: 'review', action: 'revise', feedback: 'revision-' + index })).status, 202);
+    await until(() => f.api(path), value => value.body.status === 'waiting_review' && value.body.nodes.review.attempt === index + 2);
+  }
+  const candidate = (await f.api(path)).body;
+  assert.equal(candidate.nodes.review.review.revisionCount, 5); assert.equal(candidate.nodes.review.attempt, 6);
+  assert.equal(candidate.nodes.author.history.length, 5); assert.equal(f.preparations(), 6);
+  assert.deepEqual(candidate.document, document);
+  assert.equal((await f.api(path + '/review', { nodeId: 'review', action: 'approve' })).status, 202);
+  await until(() => f.api(path), value => value.body.status === 'complete');
+});
+
 test('workflow HTTP runs bind a real adapter session, confirm history, and protect its fixed transcript', async t => {
   const f = await fixture(t);
   assert.equal(f.skill.revision, `sha256:${createHash('sha256').update(f.skill.content).digest('hex')}`);

@@ -391,6 +391,7 @@ test('review target options contain only true upstream retryable capabilities an
   studio.editor = { doc, properties: new FakeElement('aside') }; const calls = []; studio.updateConfig = (id, config) => calls.push([id, config]);
   assert.deepEqual(reviewTargetNodes(doc, 'gate').map(node => node.id), ['plan', 'render']); studio.renderReviewConfig(nodes.find(node => node.id === 'gate'));
   const section = studio.editor.properties.children[0], select = section.children.find(item => item.tag === 'select'); assert.deepEqual(select.children.map(option => option.value), ['', 'plan', 'render']); assert.equal(select.value, ''); assert.ok(section.children.some(item => /原修改目标.*重新选择/.test(item.textContent))); assert.deepEqual(doc, before); assert.equal(calls.length, 0);
+  assert.equal(section.children.some(item => item.attributes?.['aria-label'] === '最多修改次数' || /最多修改次数|1–3/.test(item.textContent || '')), false);
   select.value = 'plan'; select.listeners.change(); assert.deepEqual(calls, [['gate', { reviewTargetNodeId: 'plan' }]]);
 });
 
@@ -409,7 +410,9 @@ function reviewFixture() {
   const png = { id: 'front-png', nodeId: 'render', name: 'board_Pinout.png', mimeType: 'image/png', previewUrl: '/generated-png', downloadUrl: '/generated-png?download=1', attempt: 2 };
   const svg = { id: 'front-svg', nodeId: 'render', name: 'board_Pinout.svg', mimeType: 'image/svg+xml', previewUrl: '/generated-svg', attempt: 2 };
   const json = { id: 'project', nodeId: 'render', name: 'board_Pinout.json', mimeType: 'application/json', previewUrl: '/project', attempt: 2 };
+  for (const [index, artifact] of [original, png, svg, json].entries()) artifact.sha256 = String(index + 1).repeat(64);
   const run = { id: 'run', document: { nodes: [{ id: 'facts', title: '针脚事实', type: 'tool' }, { id: 'render', title: '生成正面 Pinout', type: 'tool' }, { id: 'gate', title: '审核正面 Pinout', type: 'human', config: { prompt: '核对标注' } }], edges: [{ sourceNode: 'facts', targetNode: 'render' }, { sourceNode: 'render', targetNode: 'gate' }] }, nodes: { gate: { status: 'waiting_review', attempt: 3, artifacts: [original, png, svg, json] } } };
+  run.nodes.gate.attemptId = 'gate-three';
   return { run, original, png, svg, json };
 }
 
@@ -482,7 +485,7 @@ test('historical inspector shows that attempt IO, logs, original-size images and
   assert.match(messages, /历史版本 · 只读/); for (const text of ['old input', 'old output', 'old stdout', 'old stderr']) assert.match(messages, new RegExp(text));
   assert.ok(all.some(item => item.tag === 'a' && item.href === '/old-png-original-size')); assert.ok(all.some(item => item.tag === 'a' && item.href === '/old-png-download' && item.textContent === '下载'));
   const latestReview = section.children.at(-1); assert.equal(latestReview.className, 'wf-studio-review is-compact'); assert.ok(descendants(latestReview).some(item => item.tag === 'img' && item.src === '/generated-png')); assert.equal(descendants(latestReview).some(item => item.tag === 'img' && item.src === '/old-png-original-size'), false);
-  await latestReview.children.at(-1).children[0].listeners.click(); assert.deepEqual(submitted, { path: '/api/workflow-runs/run/review', body: { nodeId: 'gate', action: 'approve', feedback: '' } }); assert.equal(run.nodes.gate.artifacts[1], png); assert.equal(run.nodes.gate.attempt, 3);
+  await latestReview.children.at(-1).children[0].listeners.click(); assert.deepEqual(submitted, { path: '/api/workflow-runs/run/review', body: { nodeId: 'gate', action: 'approve', feedback: '', expectedAttempt: 3, expectedAttemptId: 'gate-three', expectedArtifactHashes: run.nodes.gate.artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) } }); assert.equal(run.nodes.gate.artifacts[1], png); assert.equal(run.nodes.gate.attempt, 3);
 });
 
 test('delegated subflow waits open the actual child review and never approve the parent capability node', async t => {
@@ -625,8 +628,51 @@ test('mandatory image tools expose a checked disabled review control and merge s
 });
 test('human review requires revise feedback and sends approve/revise/stop through the actual review route', async t => {
   const old = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (old) globalThis.document = old; else delete globalThis.document; });
-  const run = { id: 'run-1', document: { nodes: [{ id: 'gate', config: { prompt: '检查图片' } }] } }; const calls = [], messages = []; const studio = Object.create(WorkflowStudioUI.prototype); studio.editor = { toast: message => messages.push(message) }; studio.runtime = { storeRun() {}, render() {} }; studio.api = async (path, options) => { calls.push({ path, body: options.body }); return { run }; };
+  const run = revisionReviewFixture(); run.id = 'run-1'; const calls = [], messages = []; const studio = Object.create(WorkflowStudioUI.prototype); studio.editor = { toast: message => messages.push(message) }; studio.runtime = { storeRun() {}, render() {} }; studio.api = async (path, options) => { calls.push({ path, body: options.body }); return { run }; };
   let controls = studio.reviewControls(run, 'gate'), actions = controls.children.at(-1).children; await actions[1].listeners.click(); assert.equal(calls.length, 0); assert.match(messages.at(-1), /填写/);
-  const feedback = controls.children.find(item => item.tag === 'textarea'); feedback.value = '标签请加大'; feedback.dispatchEvent({ type: 'input' }); await actions[1].listeners.click(); assert.deepEqual(calls.at(-1), { path: '/api/workflow-runs/run-1/review', body: { nodeId: 'gate', action: 'revise', feedback: '标签请加大' } });
+  const feedback = controls.children.find(item => item.tag === 'textarea'); feedback.value = '标签请加大'; feedback.dispatchEvent({ type: 'input' }); await actions[1].listeners.click(); assert.deepEqual(calls.at(-1), { path: '/api/workflow-runs/run-1/review', body: { nodeId: 'gate', action: 'revise', feedback: '标签请加大', expectedAttempt: 1, expectedAttemptId: 'gate-1', expectedArtifactHashes: run.nodes.gate.review.artifactHashes } });
   for (const [index, action] of [[0, 'approve'], [2, 'stop']]) { controls = studio.reviewControls(run, 'gate'); await controls.children.at(-1).children[index].listeners.click(); assert.equal(calls.at(-1).body.action, action); }
+});
+
+function revisionReviewFixture({ used = 0, code = false } = {}) {
+  const artifact = { id: 'poster', nodeId: 'render', attempt: used + 1, sha256: 'a'.repeat(64), mimeType: 'image/png' };
+  return { id: 'review-run', status: 'waiting_review', workflowId: 'workflow', document: { id: 'workflow', schemaVersion: 2, nodes: [
+    { id: 'render', type: code ? 'tool' : 'skill', title: '生成海报', config: { executionMode: code ? 'code' : 'skill', language: 'python', code: 'return input' } },
+    { id: 'gate', type: 'human', title: '审核海报', config: { reviewTargetNodeId: 'render', maxRevisions: 3 } },
+  ], edges: [{ sourceNode: 'render', targetNode: 'gate' }] }, nodes: {
+    render: { status: 'complete', attempt: used + 1, attemptId: `render-${used + 1}`, artifacts: [artifact] },
+    gate: { status: 'waiting_review', attempt: used + 1, attemptId: `gate-${used + 1}`, artifacts: [artifact], review: { revisionCount: used, artifactHashes: [{ id: artifact.id, sha256: artifact.sha256 }] } },
+  } };
+}
+
+test('review counts stay visible and Skill revisions remain available beyond the old limit after pending releases', t => {
+  const previous = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
+  const run = revisionReviewFixture({ used: 6 }), studio = Object.create(WorkflowStudioUI.prototype); studio.editor = {};
+  const box = studio.reviewControls(run, 'gate'), actions = box.children.at(-1).children;
+  assert.ok(box.children.some(item => item.textContent === '已修改 6 次')); assert.equal(box.children.some(item => /剩余|修改.*上限|6\s*\//.test(item.textContent || '')), false);
+  assert.equal(actions[1].disabled, false); assert.equal(actions[0].disabled, false); assert.equal(actions[2].disabled, false);
+  studio.setReviewPending(`${run.id}:gate`, true); studio.setReviewPending(`${run.id}:gate`, false);
+  assert.equal(actions[1].disabled, false); assert.equal(actions[0].disabled, false); assert.equal(actions[2].disabled, false);
+});
+
+test('fixed code review requests a full-feedback candidate once and locks repeat clicks instead of posting review', async t => {
+  const previous = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
+  const run = revisionReviewFixture({ used: 6, code: true }), studio = Object.create(WorkflowStudioUI.prototype), handoffs = [], requests = [];
+  let release; const pending = new Promise(resolve => { release = resolve; }); studio.editor = { conversation: { requestArtifactRevision: value => { handoffs.push(value); return pending; }, focusContext() {} } }; studio.api = async (...args) => requests.push(args);
+  const box = studio.reviewControls(run, 'gate'), feedback = box.children.find(item => item.tag === 'textarea');
+  feedback.value = '横向排列\n保留全部项目；字号放大'; feedback.dispatchEvent({ type: 'input' });
+  assert.deepEqual(box.children.at(-1).children.map(item => item.textContent), ['通过并继续', '停止本次运行', '生成修改候选']);
+  const candidate = box.children.at(-1).children.find(item => item.textContent === '生成修改候选'); assert.ok(candidate);
+  const sending = candidate.listeners.click(); assert.equal(candidate.disabled, true); await candidate.listeners.click(); assert.equal(requests.length, 0); assert.equal(handoffs.length, 1); release(); await sending;
+  assert.equal(candidate.disabled, false); assert.equal(box.children.at(-1).children.find(item => item.textContent === '通过并继续').disabled, false); assert.equal(box.children.at(-1).children.find(item => item.textContent === '停止本次运行').disabled, false);
+  assert.equal(handoffs[0].run, run); assert.equal(handoffs[0].humanNodeId, 'gate'); assert.equal(handoffs[0].feedback, feedback.value);
+});
+
+test('review requests bind the displayed attempt and hashes while errors persist on the card', async t => {
+  const previous = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
+  const run = revisionReviewFixture(), studio = Object.create(WorkflowStudioUI.prototype); let body;
+  studio.editor = { toast() {} }; studio.api = async (_path, options) => { body = options.body; throw new Error('版本已变化，请刷新'); };
+  let box = studio.reviewControls(run, 'gate'); await box.children.at(-1).children[0].listeners.click();
+  assert.deepEqual({ expectedAttempt: body.expectedAttempt, expectedAttemptId: body.expectedAttemptId, expectedArtifactHashes: body.expectedArtifactHashes }, { expectedAttempt: 1, expectedAttemptId: 'gate-1', expectedArtifactHashes: run.nodes.gate.review.artifactHashes });
+  box = studio.reviewControls(run, 'gate'); assert.ok(box.children.some(item => item.attributes.role === 'alert' && /版本已变化/.test(item.textContent || '')));
 });

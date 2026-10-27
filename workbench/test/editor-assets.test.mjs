@@ -67,7 +67,7 @@ test('workflow editor assets are served as same-origin code without starting a r
     ['workflow-editor.js', 'text/javascript'],
     ['diagnostic-events.js', 'text/javascript'],
     ['shared/diagnostics.mjs', 'text/javascript'],
-    ...['components', 'conversation-commands', 'dataset', 'inputs', 'model', 'plan', 'presets',
+    ...['components', 'conversation-commands', 'dataset', 'inputs', 'model', 'plan', 'presets', 'review-revision',
       'schedule-time', 'studio-utils', 'tools', 'validation', 'versioning']
       .map(name => [`shared/workflow/workflow-${name}.mjs`, 'text/javascript']),
     ['workflow-editor.css', 'text/css'],

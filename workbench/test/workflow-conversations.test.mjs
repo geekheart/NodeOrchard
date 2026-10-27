@@ -236,7 +236,7 @@ test('exact human review reply executes once; an unbound reply lists candidates 
   assert.deepEqual(f.adapter.calls, []);
 });
 
-test('review revise freezes old attempt and rejects stale, foreign run and foreign artifact replies', async t => {
+test('fixed-tool review prepares a proposal without redoing and version-bound replies reject stale or foreign candidates', async t => {
   const f = await fixture(t), document = graph(true);
   f.classifiedIntent = 'review';
   const started = await f.app.workflows.start({ document, input: '  abc  ' });
@@ -247,10 +247,15 @@ test('review revise freezes old attempt and rejects stale, foreign run and forei
   const proposal = await settledMessage(f, document.id, message(document, '要求修改：保持精简', { context: context(original) }));
   assert.equal(proposal.turn.status, 'awaiting_action'); assert.equal(proposal.turn.outcome, undefined);
   assert.equal(f.app.workflows.get(started.id).nodes.review.attemptId, original.nodes.review.attemptId);
-  const revise = proposal.turn.actions.find(action => action.kind === 'review-revise'); assert.ok(revise);
-  assert.equal(revise.feedback, '保持精简'); assert.equal(revise.context.attemptId, original.nodes.review.attemptId);
-  const changed = await f.app.conversations.action(document.id, proposal.turn.id, { action: revise.kind, actionId: revise.id });
-  assert.equal(changed.turn.outcome.status, 'complete');
+  assert.equal(proposal.turn.actions.some(action => action.kind === 'review-revise'), false);
+  const revision = proposal.turn.assistant.revisionProposals[0];
+  assert.equal(revision.feedback, '保持精简'); assert.equal(revision.context.attemptId, original.nodes.review.attemptId);
+  assert.equal(revision.targetNodeId, 'trim'); assert.match(proposal.turn.assistant.text, /未重跑.*未消耗/);
+  assert.deepEqual(f.app.workflows.get(started.id), original);
+  // An explicit original-configuration rerun is different from interpreting
+  // feedback. It gives this identity regression a genuinely new candidate.
+  await f.app.workflows.rerun(started.id, { nodeIds: ['trim'], expectedNodes: [{ nodeId: 'trim', attempt: original.nodes.trim.attempt,
+    attemptId: original.nodes.trim.attemptId, artifactHashes: [] }] });
   const second = await until(() => { const run = f.app.workflows.get(started.id); return run.status === 'waiting_review' && run.nodes.review.attempt === 2 && run; });
   await assert.rejects(() => f.app.conversations.message(document.id, message(document, '通过', { context: context(original) })), /新版本/);
   assert.equal(f.app.workflows.get(started.id).nodes.review.status, 'waiting_review');

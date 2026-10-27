@@ -47,6 +47,16 @@ test('file generation instructions use each worker language actual context and i
   assert.equal(source.runtimeContract.python.contextType, 'dict');
 });
 
+test('planning hides obsolete human revision limits while preserving the legacy source graph', async () => {
+  const doc = document(); doc.nodes = [createNode('human', {}, { id: 'review', config: { maxRevisions: 3 } })];
+  const before = structuredClone(doc), { app, calls } = fixture({ text: '候选待预览。', operations: [] });
+  await planWorkflowConversation(app, { text: '调整审核提示文案', document: doc });
+  const prompt = calls[0].prompt, source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(prompt.includes('maxRevisions'), false);
+  assert.equal(Object.hasOwn(source.workflow.nodes[0].config, 'maxRevisions'), false);
+  assert.deepEqual(doc, before);
+});
+
 test('focused catalogs retain current typed nodes, used tools and exact pinned Skills', async () => {
   const doc = document(); doc.nodes = [
     createNode('condition', {}, { id: 'branch' }),
@@ -198,7 +208,8 @@ test('one bounded repair maps an invalid human target field to exact model schem
   for (const call of calls) { assert.equal(call.prompt.includes('RUNTIME_OUTPUT_SECRET'), false); assert.equal(call.prompt.includes('VALIDATION_REPAIR_SECRET'), false); }
   const catalog = JSON.parse(calls[0].prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
   const human = catalog.find(row => row.type === 'human'), output = catalog.find(row => row.type === 'output');
-  for (const key of ['prompt', 'reviewTargetNodeId', 'maxRevisions', 'inputType', 'outputType']) assert.ok(human.allowedConfigKeys.includes(key));
+  for (const key of ['prompt', 'reviewTargetNodeId', 'inputType', 'outputType']) assert.ok(human.allowedConfigKeys.includes(key));
+  assert.equal(human.allowedConfigKeys.includes('maxRevisions'), false);
   assert.equal(output.defaults.inputType, 'any'); assert.equal(output.allowedConfigKeys.includes('outputType'), false);
 });
 

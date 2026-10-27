@@ -6,6 +6,8 @@ import { sanitizeDiagnosticEvidence } from '../app-diagnostics.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../../shared/workflow/workflow-conversation-commands.mjs';
 import { projectConversationIssues, canRetryConversationTurn, parseConversationIssueResolution, selectConversationIssue } from '../../shared/workflow/workflow-conversation-issues.mjs';
 import { redact } from '../hermes-adapter.mjs';
+import { reviewRevisionPolicy } from '../../shared/workflow/workflow-review-revision.mjs';
+import { bindArtifactRevisionProposal, assertArtifactRevisionCodeChange } from './workflow-review-proposals.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
@@ -252,7 +254,8 @@ export class WorkflowConversations {
       const artifacts = (record.artifacts || []).map(artifactView);
       return [{ id: `${run.id}:${node.id}:${record.attempt}`, kind: 'review', label: path + node.title, status: 'waiting_review',
         context: { runId: run.id, nodeId: node.id, attempt: record.attempt, attemptId: record.attemptId,
-          artifactIds: artifacts.map(item => item.id), artifactHashes: artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) }, artifacts }];
+          artifactIds: artifacts.map(item => item.id), artifactHashes: artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) }, artifacts,
+        revision: reviewRevisionPolicy(run, node.id) }];
     }));
   }
   bindContext(workflowId, input, document, { exact = false, review = false } = {}) {
@@ -460,20 +463,36 @@ export class WorkflowConversations {
   }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
-    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId', 'replyToTurnId'], '对话请求');
+    object(input, ['clientMessageId', 'text', 'context', 'document', 'intent', 'page', 'retryOfTurnId', 'replyToTurnId', 'revisionRequest'], '对话请求');
     identifier(input.clientMessageId, '消息幂等 ID'); text(input.text, '消息');
     if (input.intent !== undefined && !['auto', 'workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
     const document = safeDocument(input.document, workflowId), requestDigest = digest(input);
-    const existing = this.db.prepare('SELECT id,private_value FROM workflow_conversation_turns WHERE workflow_id=? AND client_message_id=?').get(workflowId, input.clientMessageId);
-    if (existing) {
+    const existingResponse = () => {
+      const existing = this.db.prepare('SELECT id,private_value FROM workflow_conversation_turns WHERE workflow_id=? AND client_message_id=?').get(workflowId, input.clientMessageId);
+      if (!existing) return null;
       if (JSON.parse(existing.private_value).requestDigest !== requestDigest) fail('相同消息 ID 不能对应不同内容。', 409);
       return this.response(workflowId, this.readTurn(workflowId, existing.id).turn);
+    };
+    const existing = existingResponse();
+    if (existing) return existing;
+    let revision;
+    if (input.revisionRequest !== undefined) {
+      const policy = this.app.applicationAssistant?.permissions;
+      if (!policy) fail('助手权限校验暂不可用。', 503);
+      const scope = await policy.bind({ role: 'workflow', workflowId, document });
+      await policy.admit('workflow.inspect', { workflowId }, scope, { document });
+      await policy.admit('workflow.propose', { workflowId }, scope, { document });
+      // Permission checks yield. A concurrent delivery may already have
+      // inserted this idempotent request while these checks were in flight.
+      const concurrent = existingResponse();
+      if (concurrent) return concurrent;
+      revision = bindArtifactRevisionProposal(this.app, workflowId, document, input.revisionRequest);
     }
-    const requestedContext = contextInput(input.context);
+    const requestedContext = revision ? revision.context : contextInput(input.context);
     if (input.replyToTurnId !== undefined) { identifier(input.replyToTurnId, '回复事项 ID'); this.readTurn(workflowId, input.replyToTurnId); }
-    const resolution = this.resolveIssueMessage(workflowId, input, document, requestedContext, requestDigest);
+    const resolution = !revision && this.resolveIssueMessage(workflowId, input, document, requestedContext, requestDigest);
     if (resolution) return resolution;
-    const automatic = !input.intent || input.intent === 'auto' || input.intent === 'redo';
+    const automatic = !!revision || !input.intent || input.intent === 'auto' || input.intent === 'redo';
     let intent = automatic ? 'auto' : input.intent;
     const candidates = ['feedback', 'skill'].includes(intent) && !requestedContext.runId ? this.feedbackRuns(workflowId, requestedContext) : [];
     const selectedContext = candidates.length === 1 ? { ...requestedContext, runId: candidates[0].id } : requestedContext;
@@ -482,6 +501,7 @@ export class WorkflowConversations {
       identifier(input.retryOfTurnId, '重试原事项 ID');
       const { turn: parent } = this.readTurn(workflowId, input.retryOfTurnId);
       if (!canRetryConversationTurn(parent)) fail('此事项不能作为重试对象；未确认的操作和人工审核不能自动重放。', 409);
+      if (digest(parent.user.revisionRequest || null) !== digest(revision?.request || null)) fail('重试不能改变产物修改的审核版本。', 409);
       if (parent.user.text !== input.text || digest(retryContext(parent.user.context || {})) !== digest(retryContext(bound.context))) fail('重试必须保持原消息和回复对象，请将新的问题单独发送。', 409);
       if (input.intent && input.intent !== 'auto' && input.intent !== parent.user.intent) fail('重试不能改变原事项的处理方式。', 409);
       intent = parent.user.intent;
@@ -489,12 +509,12 @@ export class WorkflowConversations {
     const createdAt = now(), turn = { id: 'turn-' + randomUUID(), workflowId, clientMessageId: input.clientMessageId,
       ...(input.retryOfTurnId !== undefined ? { retryOfTurnId: input.retryOfTurnId } : {}),
       ...(input.replyToTurnId !== undefined ? { replyToTurnId: input.replyToTurnId } : {}),
-      user: { text: input.text, context: bound.context, intent },
+      user: { text: input.text, context: bound.context, intent, ...(revision ? { revisionRequest: revision.request } : {}) },
       assistant: { text: '正在整理你的要求…' }, actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
       .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic, page: input.page ? sanitizeDiagnosticEvidence(input.page) : null }));
     this.update(turn);
-    const direct = directIntent(input.text);
+    const direct = !revision && directIntent(input.text);
     if (direct) {
       const candidates = direct.action.startsWith('review-') ? this.pending(workflowId) : [];
       const exact = !!bound.node && Number.isSafeInteger(input.context?.attempt) && input.context.attempt > 0
@@ -534,7 +554,8 @@ export class WorkflowConversations {
           { role: 'assistant', text: item.assistant.text.slice(0, 3000), intent: item.user.intent, status: item.status }]);
       // Never send inputs, outputs, artifact contents, training samples or validation
       // records to this planning session. Only the selected execution metadata.
-      const context = { ...bound.context, ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
+      const revision = turn.user.revisionRequest ? bindArtifactRevisionProposal(this.app, turn.workflowId, document, turn.user.revisionRequest) : null;
+      const context = { ...bound.context, ...(revision ? { requestKind: 'artifact-revision-proposal' } : {}), ...(bound.run ? { run: { id: bound.run.id, status: bound.run.status,
         ...(bound.node ? { node: { id: bound.node.id, title: bound.node.title, type: bound.node.type, status: bound.record.status } } : {}) } } : {}) };
       const page = privateValue.page;
       const hooks = {
@@ -555,6 +576,10 @@ export class WorkflowConversations {
           signal: controller.signal, startedAt: turn.createdAt, deadlineAt, ...hooks });
         if (controller.signal.aborted || this.closed) return;
         turn.user.intent = decision.intent; this.update(turn);
+        if (revision && ['feedback', 'skill'].includes(decision.intent)) {
+          turn.status = 'complete'; turn.assistant.text = 'AI未将这条意见识别为节点修改请求，未生成候选或重做产物；原始意见已保留。';
+          finishDiagnostic(turn.assistant, 'complete'); this.update(turn); this.emit(turn.workflowId); return;
+        }
         if (!readOnly && ['feedback', 'skill'].includes(decision.intent)) {
           const scope = await assistant.permissions.bind({ role: 'workflow', workflowId: turn.workflowId, document });
           await assistant.permissions.admit('workflow.inspect', { workflowId: turn.workflowId }, scope, { document });
@@ -579,19 +604,34 @@ export class WorkflowConversations {
             const candidates = this.pending(turn.workflowId).filter(item => (!bound.context.runId || item.context.runId === bound.context.runId)
               && (!bound.node || item.context.nodeId === bound.node.id && item.context.attemptId === bound.context.attemptId));
             if (candidates.length) {
-              turn.status = 'awaiting_action'; turn.assistant.text = '修改意见已准备，请确认对应审核版本后执行。';
-              turn.actions = candidates.map(item => ({ id: 'action-' + randomUUID(), kind: 'review-revise',
+              const direct = candidates.filter(item => item.revision.canRevise), proposals = candidates.filter(item => item.revision.strategy === 'proposal');
+              turn.status = direct.length || proposals.length ? 'awaiting_action' : 'complete';
+              turn.assistant.text = proposals.length ? '修改意见已保留。当前产物由固定代码或工具生成，请先在这里生成节点修改候选；未重跑产物，也未消耗修改次数。'
+                : direct.length ? '修改意见已准备，请确认对应审核版本后执行。' : candidates[0].revision.reason || '当前审核没有可直接重做的目标。';
+              if (proposals.length) turn.assistant.revisionProposals = proposals.map(item => ({ context: item.context, feedback: revision[1].trim(), targetNodeId: item.revision.targetNodeId }));
+              turn.actions = direct.map(item => ({ id: 'action-' + randomUUID(), kind: 'review-revise',
                 label: `按修改意见重做「${item.label}」`, context: item.context, feedback: revision[1].trim() }));
             }
           }
           finishDiagnostic(turn.assistant, 'complete'); this.update(turn); this.emit(turn.workflowId); return;
         }
       }
+      const proposalText = revision && decision?.intent === 'workflow'
+        ? `用户从产物审核卡明确请求生成节点修改候选。生产节点：${revision.target.id}（${revision.target.title}，${revision.target.type}）。按下列完整审核意见修改当前草稿中的生产能力，保持无关节点与人工审核。工具节点必须重新生成该节点的Python或JavaScript核心业务代码（executionMode=code），保留端口及输入输出合约；注册工具模式可转换为代码模式，禁止修改应用源码或内置工具实现。不能只改标题、超时、说明或原封不动重跑；无法实现时明确失败。只生成可审阅候选，不应用、不运行，不改旧运行快照。审核意见：\n${turn.user.text}`
+        : turn.user.text;
       const result = await this.planner(this.app, { role: 'workflow', readOnly, decision, diagnosticTurnId: turn.id,
-        operationNamespace: turn.retryOfTurnId || turn.id, text: turn.user.text, document, context, history, page, checkpoint,
+        operationNamespace: turn.retryOfTurnId || turn.id, text: proposalText, document, context, history, page, checkpoint,
         signal: controller.signal, deadlineAt, startedAt: turn.createdAt, modelCallOffset: decision?.modelCalls || 0,
         ...(decision?.modelRoute ? { modelRoute: decision.modelRoute } : {}), ...hooks });
       if (this.closed || controller.signal.aborted) return;
+      if (revision) {
+        bindArtifactRevisionProposal(this.app, turn.workflowId, document, turn.user.revisionRequest);
+        if (decision?.intent === 'workflow') {
+          const candidate = result.operations?.length ? applyWorkflowOperations(document, result.operations).document : document;
+          assertArtifactRevisionCodeChange(document, candidate, revision.target.id);
+        }
+        if (result.operations?.length) result.text += '\n这份候选只修改工作流草稿；旧运行和当前产物未改变。应用后需明确启动新运行验证。';
+      }
       this.app.workflowLibrary.assertRunnable(turn.workflowId);
       if (readOnly && (result.operations?.length || result.actions?.length)) fail('总控委派仅允许只读诊断，不能生成工作流修改或执行操作。', 403);
       turn.assistant = { ...turn.assistant, text: text(result.text || result.summary || '已生成建议。', 'AI 回复', { max: 24000 }),
@@ -644,10 +684,12 @@ export class WorkflowConversations {
       && Array.isArray(value.assistant.operations) && value.assistant.operations.length;
     if (!pending(turn)) fail('此事项已结束或没有可应用的流程修改。', 409);
     const document = privateValue.document;
+    if (turn.user.revisionRequest) bindArtifactRevisionProposal(this.app, workflowId, document, turn.user.revisionRequest);
     if (input.planFingerprint !== turn.assistant.baseFingerprint || documentFingerprint(document) !== turn.assistant.baseFingerprint) fail('流程修改计划版本不匹配。', 409);
     let generated = 0;
     const { document: candidate } = applyWorkflowOperations(document, turn.assistant.operations,
       { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` });
+    if (turn.user.revisionRequest) assertArtifactRevisionCodeChange(document, candidate, turn.user.revisionRequest.targetNodeId);
     const policy = this.app.applicationAssistant?.permissions;
     if (!policy) fail('助手权限校验暂不可用，未应用节点修改。', 503);
     const scope = await policy.bind({ role: 'workflow', workflowId, document });
@@ -655,6 +697,7 @@ export class WorkflowConversations {
     await policy.document(candidate, scope, { baseDocument: document });
     await policy.current(scope);
     this.assertOpen(workflowId, true);
+    if (turn.user.revisionRequest) bindArtifactRevisionProposal(this.app, workflowId, document, turn.user.revisionRequest);
     const latest = this.readTurn(workflowId, turnId).turn;
     if (!pending(latest) || latest.assistant.baseFingerprint !== turn.assistant.baseFingerprint
       || JSON.stringify(latest.assistant.operations) !== JSON.stringify(turn.assistant.operations)) fail('流程修改事项已变化，请重新读取当前建议。', 409);
@@ -707,11 +750,13 @@ export class WorkflowConversations {
     }
     if (input.action === 'review-revise' && !feedback.trim()) fail('请填写具体修改要求。');
     if (input.action === 'mark-applied') {
+      if (turn.user.revisionRequest) bindArtifactRevisionProposal(this.app, workflowId, document, turn.user.revisionRequest);
       if (!Array.isArray(turn.assistant.operations) || !turn.assistant.operations.length) fail('此轮没有可应用的流程修改。', 409);
       if (input.planFingerprint !== turn.assistant.baseFingerprint) fail('流程修改计划版本不匹配。', 409);
       let generated = 0;
       const applied = applyWorkflowOperations(document, turn.assistant.operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` });
       const expected = applied.document || applied;
+      if (turn.user.revisionRequest) assertArtifactRevisionCodeChange(document, expected, turn.user.revisionRequest.targetNodeId);
       const actual = safeDocument(input.document, workflowId);
       if (documentFingerprint(expected) !== documentFingerprint(actual)) fail('画布内容与本轮操作计划不一致，请重新生成建议。', 409);
       if (this.app.applicationAssistant?.permissions) {
@@ -719,6 +764,17 @@ export class WorkflowConversations {
         const scope = await policy.bind({ role: 'workflow', workflowId, document });
         await policy.admit('workflow.propose', { workflowId }, scope, { document });
         await policy.document(actual, scope, { baseDocument: document });
+        await policy.current(scope);
+      }
+      this.assertOpen(workflowId, true);
+      if (turn.user.revisionRequest) bindArtifactRevisionProposal(this.app, workflowId, document, turn.user.revisionRequest);
+      const latest = this.readTurn(workflowId, turnId).turn;
+      if (latest.outcome?.action === input.action && latest.outcome.actionId === card.id) return this.response(workflowId, latest);
+      if (latest.status !== 'proposed' || latest.outcome
+        || latest.assistant.baseFingerprint !== turn.assistant.baseFingerprint
+        || JSON.stringify(latest.assistant.operations) !== JSON.stringify(turn.assistant.operations)
+        || !latest.actions?.some(action => action.kind === input.action && action.id === card.id)) {
+        fail('流程修改事项已变化，请重新读取当前建议。', 409);
       }
     }
     this.mutations.add(key);

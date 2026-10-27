@@ -51,7 +51,7 @@ const DEFAULTS = {
   output: { inputType: 'any', fileName: '' },
 };
 const V2_DEFAULTS = { resource: 'default', resourceLimit: 1, sourceKind: 'value', path: '', extensions: [], multiple: false,
-  fileRole: '', fields: [], reviewTargetNodeId: '', maxRevisions: 3, valuePath: '', value: null,
+  fileRole: '', fields: [], reviewTargetNodeId: '', valuePath: '', value: null,
   document: null, maxDepth: 4, timeoutSeconds: 120, code: '', language: 'javascript', reviewImages: false };
 
 function portSet(value) {
@@ -155,7 +155,7 @@ function inputDefault(value) {
 
 function configFor(type, input = {}, v2 = true) {
   const defaults = DEFAULTS[nodeType(type)];
-  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])]);
+  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), 'maxRevisions', ...(type === 'output' ? ['stage'] : [])] : [])]);
   const result = { ...defaults };
   if (type === 'validation') result.rules = validationRules(defaults.rules);
   if (type === 'improvement') result.targetSkillNodeIds = [...defaults.targetSkillNodeIds];
@@ -179,8 +179,12 @@ function configFor(type, input = {}, v2 = true) {
       if (value !== null && (!['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value)))) fail('常量只支持文本、有效数字、布尔值。'); result[key] = value;
     } else if (v2 && key === 'document') {
       result[key] = value === null ? null : validateDocument(value);
-    } else if (v2 && ['resourceLimit', 'maxRevisions', 'maxDepth'].includes(key)) {
-      result[key] = number(value, key, 1, key === 'maxRevisions' ? 3 : key === 'maxDepth' ? 8 : 16, true);
+    } else if (v2 && key === 'maxRevisions') {
+      // Preserve obsolete fields when reading old drafts and frozen runs. Human
+      // revision policy ignores this value; new configuration never emits it.
+      result[key] = number(value, key, 1, Number.MAX_SAFE_INTEGER, true);
+    } else if (v2 && ['resourceLimit', 'maxDepth'].includes(key)) {
+      result[key] = number(value, key, 1, key === 'maxDepth' ? 8 : 16, true);
     } else if (v2 && key === 'resource') {
       if (!['default', 'model', 'eda', 'browser', 'drawio', 'memory', 'build'].includes(value)) fail('资源类型无效。'); result[key] = value;
     } else if (v2 && key === 'sourceKind') {
@@ -248,7 +252,8 @@ export function createDocument(options = {}) {
 }
 
 // The editor, assistant and adapters derive configuration discovery from the
-// same defaults and admitted keys as configFor, rather than a copied catalog.
+// same current defaults and keys as configFor. Compatibility-only historical
+// fields are accepted on read without being advertised for new configuration.
 export function nodeConfigurationContract(type, { schemaVersion = 2 } = {}) {
   nodeType(type);
   if (![1, 2].includes(schemaVersion)) fail('仅支持 schemaVersion 1 或 2。');

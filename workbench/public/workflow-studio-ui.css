@@ -95,6 +95,7 @@
 .wf-studio-review { border: 1px solid color-mix(in srgb,#fbbf24 50%,var(--wf-border)); background: color-mix(in srgb,#fbbf24 5%,var(--wf-panel)); border-radius: 8px; padding: 14px; margin: 12px 0; }
 .wf-studio-review h4 { margin: 0 0 8px; font-size: 13px; }
 .wf-studio-review p { font-size: 12px; line-height: 1.6; }
+.wf-studio-review .wf-studio-review-count { margin: 8px 0; color: var(--wf-secondary); font-variant-numeric: tabular-nums; }
 .wf-studio-review-files { margin: 12px 0; border-top: 1px solid var(--wf-border); padding-top: 10px; }
 .wf-studio-review-files>summary { cursor: pointer; font-size: 12px; font-weight: 550; }
 .wf-studio-review-files .wf-studio-artifacts { grid-template-columns: repeat(auto-fit,minmax(min(180px,100%),1fr)); }

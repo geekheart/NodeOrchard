@@ -3,6 +3,7 @@ import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutPositions, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
+import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
 
 const element = (tag, cls = '', value) => { const item = document.createElement(tag); item.className = cls; if (value !== undefined) item.textContent = String(value); return item; };
 const button = (label, handler, cls = 'wf-button') => { const item = element('button', cls, label); item.type = 'button'; item.addEventListener('click', handler); return item; };
@@ -412,7 +413,7 @@ export class WorkflowStudioUI {
     const targets = reviewTargetNodes(this.editor.doc, node.id), valid = targets.some(item => item.id === node.config.reviewTargetNodeId);
     for (const item of targets) select.append(new Option(item.title, item.id)); select.value = valid ? node.config.reviewTargetNodeId : ''; select.addEventListener('change', () => this.updateConfig(node.id, { reviewTargetNodeId: select.value })); section.append(select);
     section.append(element('p', node.config.reviewTargetNodeId && !valid ? 'wf-studio-input-error' : 'wf-field-help', node.config.reviewTargetNodeId && !valid ? '原修改目标已不在此审核节点的上游，请重新选择；原配置尚未更改。' : targets.length ? '只列出沿当前连线可返回重试的上游能力。' : '先连接上游能力，再选择要求修改时返回的节点。'));
-    const label = element('label', 'wf-field-help', '最多修改次数（1–3）'), max = element('input'); max.type = 'number'; max.min = '1'; max.max = '3'; max.value = node.config.maxRevisions ?? 3; max.setAttribute('aria-label', '最多修改次数'); max.addEventListener('change', () => this.updateConfig(node.id, { maxRevisions: Number(max.value) })); section.append(label, max); this.editor.properties.append(section);
+    this.editor.properties.append(section);
   }
   renderCapabilityConfig(node) { const section = element('section', 'wf-property-section'); section.append(element('h3', '', '产物审核')); const required = node.type === 'tool' && WORKFLOW_TOOLS.find(tool => tool.id === node.config.toolName)?.reviewRequired === true; const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = required || Boolean(node.config.reviewImages); checkbox.disabled = required; checkbox.addEventListener('change', () => { if (!required) this.updateConfig(node.id, { reviewImages: checkbox.checked }); }); const label = element('label', 'wf-studio-checkbox'); label.append(checkbox, element('span', '', '图片需要人工审核')); section.append(label, element('p', 'wf-field-help', required ? '此图片工具必须经过人工审核，请在下游连接人工审核节点。' : '开启后，下游必须经过显式的人工审核节点；实际新生成的图片同样需要审核。')); this.editor.properties.append(section); }
   renderSubflowPicker(node) {
@@ -517,6 +518,10 @@ export class WorkflowStudioUI {
       return box;
     }
     const prompt = definition?.config.prompt; if (prompt) box.append(element('p', '', prompt));
+    const policy = reviewRevisionPolicy(run, id), expected = structuredClone({ expectedAttempt: state.attempt, expectedAttemptId: state.attemptId,
+      expectedArtifactHashes: (state.artifacts || []).map(item => ({ id: item.id || item.artifactId, sha256: item.sha256 })) });
+    box.append(element('p', 'wf-studio-review-count', `已修改 ${policy.used} 次`));
+    if (policy.reason) box.append(element('p', 'wf-field-help', policy.reason));
     if (this.editor?.conversation) box.append(button('在对话中回复此审核', () => this.editor.conversation.focusContext({
       runId: run.id, nodeId: id, attempt: state.attempt, attemptId: state.attemptId,
       artifactIds: (state.artifacts || []).map(item => item.id || item.artifactId),
@@ -539,19 +544,34 @@ export class WorkflowStudioUI {
       const details = element('details', 'wf-studio-review-files'); details.append(element('summary', '', `${title} · ${items.length} 项`), element('p', 'wf-field-help', help), this.artifactGallery(items, { run, showOrigin: true })); box.append(details);
     }
     const feedback = element('textarea'); feedback.value = this.reviewDrafts.get(key) || ''; feedback.placeholder = '说明需要修改的内容'; feedback.setAttribute('aria-label', '审核反馈'); feedback.addEventListener('input', () => this.setReviewDraft(key, feedback.value)); box.append(feedback);
+    const error = element('p', 'wf-studio-input-error'); error.setAttribute('role', 'alert'); error.textContent = this.reviewErrors?.get(key) || ''; error.hidden = !error.textContent; box.append(error);
     const actions = element('div', 'wf-studio-inline-actions');
-    for (const [action, label] of [['approve', '通过并继续'], ['revise', '要求修改'], ['stop', '停止本次运行']]) actions.append(button(label, async () => {
+    const locked = Boolean(this.editor?.libraryReadOnly || this.editor?.nodeLibrary?.nested), disabled = new Map();
+    for (const [action, label] of [['approve', '通过并继续'], ['revise', '要求修改'], ['stop', '停止本次运行']]) { if (action === 'revise' && policy.strategy === 'proposal') continue; const control = button(label, async () => {
       if (this.reviewPending?.has(key)) return;
+      if (locked) return;
       const latest = (this.reviewDrafts.get(key) || '').trim();
-      if (action === 'revise' && !latest) return this.editor.toast('请先填写需要修改的内容。', true);
-      try { this.setReviewPending(key, true); const result = await this.api(`/api/workflow-runs/${encodeURIComponent(run.id)}/review`, { method: 'POST', body: { nodeId: id, action, feedback: latest } }); const next = result.run || result; if (this.delegatedRuns?.has(next.id)) this.delegatedRuns.set(next.id, next); this.runtime.storeRun(next); this.runtime.render(); }
-      catch (error) { this.editor.toast(error.message, true); }
+      if (action === 'revise' && !policy.canRevise) return this.setReviewError(key, policy.reason);
+      if (action === 'revise' && !latest) { this.setReviewError(key, '请先填写需要修改的内容。'); return this.editor.toast?.('请先填写需要修改的内容。', true); }
+      try { this.setReviewError(key, ''); this.setReviewPending(key, true); const result = await this.api(`/api/workflow-runs/${encodeURIComponent(run.id)}/review`, { method: 'POST', body: { nodeId: id, action, feedback: latest, ...expected } }); const next = result.run || result; if (this.delegatedRuns?.has(next.id)) this.delegatedRuns.set(next.id, next); this.runtime.storeRun(next); this.runtime.render(); }
+      catch (failure) { this.setReviewError(key, failure.message); this.editor.toast?.(failure.message, true); }
       finally { this.setReviewPending(key, false); }
-    }, action === 'approve' ? 'wf-button primary' : 'wf-button'));
+    }, action === 'approve' ? 'wf-button primary' : 'wf-button'); disabled.set(control, locked || action === 'revise' && !policy.canRevise); if (action === 'revise' && policy.reason) control.title = policy.reason; actions.append(control); }
+    if (policy.strategy === 'proposal') {
+      const candidate = button('生成修改候选', async () => {
+        if (locked || this.reviewPending?.has(key)) return;
+        const latest = this.reviewDrafts.get(key) || '';
+        if (!latest.trim()) return this.setReviewError(key, '请先填写需要修改的内容。');
+        try { this.setReviewPending(key, true); const submitted = await this.editor.conversation.requestArtifactRevision({ run, humanNodeId: id, feedback: latest }); this.setReviewError(key, submitted === false ? this.editor.conversation.state?.().revisionHandoffStatus || '候选请求尚未发送，修改意见已保留，请在对话中重试。' : ''); }
+        catch (failure) { this.setReviewError(key, failure.message); }
+        finally { this.setReviewPending(key, false); }
+      });
+      disabled.set(candidate, locked || !this.editor?.conversation?.requestArtifactRevision); actions.append(candidate);
+    }
     this.reviewFields ||= new Map(); const fields = this.reviewFields.get(key) || new Set();
     for (const field of fields) if (!field.feedback.isConnected) fields.delete(field);
-    fields.add({ feedback, actions }); this.reviewFields.set(key, fields);
-    for (const item of actions.children) item.disabled = Boolean(this.reviewPending?.has(key));
+    fields.add({ feedback, actions, error, disabled }); this.reviewFields.set(key, fields);
+    for (const item of actions.children) item.disabled = Boolean(this.reviewPending?.has(key)) || disabled.get(item);
     box.append(actions); return box;
   }
   setReviewDraft(key, value) {
@@ -560,7 +580,11 @@ export class WorkflowStudioUI {
   }
   setReviewPending(key, pending) {
     this.reviewPending ||= new Set(); if (pending) this.reviewPending.add(key); else this.reviewPending.delete(key);
-    for (const field of this.reviewFields?.get(key) || []) if (field.feedback.isConnected) for (const item of field.actions.children) item.disabled = pending;
+    for (const field of this.reviewFields?.get(key) || []) if (field.feedback.isConnected) for (const item of field.actions.children) item.disabled = pending || Boolean(field.disabled?.get(item));
+  }
+  setReviewError(key, message) {
+    this.reviewErrors ||= new Map(); if (message) this.reviewErrors.set(key, display(message)); else this.reviewErrors.delete(key);
+    for (const field of this.reviewFields?.get(key) || []) if (field.feedback.isConnected && field.error) { field.error.textContent = this.reviewErrors.get(key) || ''; field.error.hidden = !field.error.textContent; }
   }
   artifactGallery(items, options = {}) {
     const groups = groupArtifacts(items), gallery = element('div', 'wf-studio-artifact-gallery');

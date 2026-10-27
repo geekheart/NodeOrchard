@@ -140,6 +140,129 @@ function pendingDOM(t) {
 }
 const pendingDOMDescendants = node => [node, ...(node.children || []).flatMap(child => typeof child === 'object' ? pendingDOMDescendants(child) : [])];
 
+function revisionHandoffFixture() {
+  const fixture = harness(), { run } = fixture;
+  run.document.nodes.push({ id: 'gate', type: 'human', title: '海报审核', config: { reviewTargetNodeId: 'trim', maxRevisions: 3 } });
+  run.document.edges.push({ sourceNode: 'trim', targetNode: 'gate' });
+  run.nodes.gate = { status: 'waiting_review', attempt: 2, attemptId: 'human-two', artifacts: run.nodes.trim.artifacts, review: { revisionCount: 1, artifactHashes: [{ id: 'image-one', sha256: 'a'.repeat(64) }] } };
+  return fixture;
+}
+
+test('artifact revision handoff preserves an unrelated draft and sends exact review identity with complete feedback', async () => {
+  const { ui, document, run } = revisionHandoffFixture(), feedback = '横向排列\n保留10项内容；改成蓝色主题'; let request;
+  ui.state().draft = '尚未发送的其他问题'; ui.input.value = ui.state().draft;
+  ui.prepareArtifactRevision({ run, humanNodeId: 'gate', feedback });
+  assert.equal(ui.state().draft, '尚未发送的其他问题'); assert.equal(ui.input.value, '尚未发送的其他问题');
+  assert.equal(ui.state().revisionHandoff.text, feedback); assert.equal(ui.state().revisionHandoff.revisionRequest.humanNodeId, 'gate');
+  ui.api = async (_path, options) => { request = options.body; return snapshot(document.id, 2); };
+  await ui.sendArtifactRevision();
+  assert.equal(request.text, feedback); assert.equal(request.intent, 'auto'); assert.equal(request.context.nodeId, 'gate');
+  assert.deepEqual(request.revisionRequest, { runId: run.id, humanNodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: [{ id: 'image-one', sha256: 'a'.repeat(64) }], targetNodeId: 'trim' });
+  assert.equal(ui.state().draft, '尚未发送的其他问题'); assert.equal(ui.state().revisionHandoff, null);
+});
+
+test('a failed candidate request retries the original identity without consuming another draft', async () => {
+  const { ui, document, run } = revisionHandoffFixture(), requests = [], originalContext = structuredClone(ui.getContext());
+  ui.state().draft = '保留另外一个问题'; ui.prepareArtifactRevision({ run, humanNodeId: 'gate', feedback: '  请放大标题\n保留全部项目  ' });
+  ui.api = async (_path, options) => { requests.push(structuredClone(options.body)); if (requests.length === 1) throw new Error('fixture lost response'); return snapshot(document.id, 2); };
+  await ui.sendArtifactRevision();
+  assert.equal(ui.state().retry.revisionRequest.attemptId, 'human-two'); assert.ok(ui.state().revisionHandoff);
+  run.nodes.gate.attempt = 3; run.nodes.gate.attemptId = 'human-three';
+  await ui.send(ui.state().retry);
+  assert.equal(requests[0].clientMessageId, requests[1].clientMessageId); assert.deepEqual(requests[1].revisionRequest, requests[0].revisionRequest);
+  assert.equal(requests[1].text, '  请放大标题\n保留全部项目  '); assert.equal(ui.state().revisionHandoff, null);
+  assert.equal(ui.state().draft, '保留另外一个问题'); assert.deepEqual(ui.getContext(), originalContext);
+});
+
+test('pending code review submits a candidate with full feedback in one click while leaving the composer alone', async t => {
+  pendingDOM(t); const { ui, document, run } = revisionHandoffFixture(), requests = []; ui.pendingHost = new PendingElement('section');
+  ui.api = async (path, options) => { requests.push({ path, body: structuredClone(options.body) }); return { ...snapshot(document.id, 2), pending: structuredClone(ui.state().pending) }; };
+  const record = run.nodes.gate, context = { runId: run.id, nodeId: 'gate', attempt: record.attempt, attemptId: record.attemptId, artifactHashes: record.review.artifactHashes };
+  ui.state().pending = [{ id: 'code-review', kind: 'review', label: '海报审核', context }]; ui.attachment = { ...context, workflowId: ui.workflowId }; ui.state().draft = '另一个未发送问题';
+  ui.renderPending(conversationTurnGroups([])); const all = pendingDOMDescendants(ui.pendingHost), feedback = all.find(item => item.tagName === 'textarea');
+  feedback.value = '横向排列\n保持全部数据'; feedback.listeners.input();
+  assert.equal(all.some(item => item.textContent === '填写修改意见'), false);
+  assert.equal(all.find(item => item.textContent === '通过并继续').disabled, false); assert.equal(all.find(item => item.textContent === '停止此审核分支').disabled, false);
+  await all.find(item => item.textContent === '生成修改候选').listeners.click();
+  assert.equal(requests.length, 1); assert.equal(requests[0].path, `/api/workflow-conversations/${document.id}/messages`); assert.equal(requests[0].body.text, feedback.value); assert.equal(requests[0].body.intent, 'auto'); assert.equal(requests[0].body.revisionRequest.attemptId, 'human-two'); assert.equal(ui.state().revisionHandoff, null); assert.equal(ui.state().draft, '另一个未发送问题');
+  ui.state().revisionHandoff = null; run.nodes.gate.attemptId = 'human-newer';
+  await all.find(item => item.textContent === '生成修改候选').listeners.click(); ui.renderPending(conversationTurnGroups([]));
+  assert.equal(ui.state().revisionHandoff, null); assert.ok(pendingDOMDescendants(ui.pendingHost).some(item => item.attributes?.role === 'alert' && /审核版本已变化/.test(item.textContent)));
+});
+
+test('review action errors stay in the review row after unrelated notice updates', async t => {
+  pendingDOM(t); const { ui, run } = revisionHandoffFixture(); ui.pendingHost = new PendingElement('section');
+  const context = { runId: run.id, nodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: run.nodes.gate.review.artifactHashes };
+  ui.state().pending = [{ id: 'code-review', kind: 'review', label: '海报审核', context }];
+  const action = { id: 'review-action', kind: 'review-approve', context: { ...context, artifactIds: ['image-one'] } }, turn = { id: 'review-turn', status: 'awaiting_action', actions: [action] };
+  ui.api = async () => { throw new Error('当前审核已过期'); }; await ui.performAction(turn, action); ui.state().error = ''; ui.renderPending(conversationTurnGroups([]));
+  assert.ok(pendingDOMDescendants(ui.pendingHost).some(item => item.attributes?.role === 'alert' && /当前审核已过期/.test(item.textContent)));
+});
+
+test('a fixed-code review action offers a candidate without displaying the old direct-redo label', async t => {
+  pendingDOM(t); const { ui, document, run } = revisionHandoffFixture(), requests = [], context = { runId: run.id, nodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: run.nodes.gate.review.artifactHashes };
+  ui.api = async (path, options) => { requests.push({ path, body: structuredClone(options.body) }); return snapshot(document.id, 2); };
+  const action = { id: 'revise-old-card', kind: 'review-revise', label: '按修改意见重做', context, feedback: '横向排列\n保留全部10项' }, turn = { id: 'revision-turn', status: 'awaiting_action', user: { text: '要求修改海报' }, actions: [action] };
+  const all = pendingDOMDescendants(ui.turnView(turn)); assert.equal(all.some(item => item.textContent === action.label), false);
+  const candidate = all.find(item => item.textContent === '生成修改候选'); assert.ok(candidate); await candidate.listeners.click();
+  assert.equal(requests.length, 1); assert.equal(requests[0].path, `/api/workflow-conversations/${document.id}/messages`); assert.equal(requests[0].body.text, action.feedback); assert.equal(requests[0].body.revisionRequest.attemptId, 'human-two'); assert.equal(ui.state().revisionHandoff, null);
+});
+
+test('a failed candidate turn retries once with its complete revision identity without replacing the draft or context', async t => {
+  pendingDOM(t); const { ui, document, run } = revisionHandoffFixture(), requests = [], text = '  横向排列\n保留全部项目  ';
+  ui.prepareArtifactRevision({ run, humanNodeId: 'gate', feedback: text });
+  const original = structuredClone(ui.state().revisionHandoff), failed = { id: 'failed-candidate-turn', status: 'error', user: { text, intent: 'auto', context: original.context, revisionRequest: original.revisionRequest } };
+  ui.state().revisionHandoff = null; ui.state().conversation.turns = [failed]; ui.state().draft = '原来未发送的其他问题'; ui.input.value = ui.state().draft; const currentContext = structuredClone(ui.getContext());
+  ui.api = async (path, options) => { requests.push({ path, body: structuredClone(options.body) }); return snapshot(document.id, 2, [failed, { id: 'candidate-retry', status: 'complete' }]); };
+  const retry = pendingDOMDescendants(ui.turnView(failed)).find(item => item.textContent === '重试生成修改候选'); assert.ok(retry); await retry.listeners.click();
+  assert.equal(requests.length, 1); assert.equal(requests[0].path, `/api/workflow-conversations/${document.id}/messages`); assert.equal(requests[0].body.text, text); assert.equal(requests[0].body.intent, 'auto'); assert.equal(requests[0].body.retryOfTurnId, failed.id); assert.deepEqual(requests[0].body.revisionRequest, original.revisionRequest); assert.deepEqual(requests[0].body.context, original.context);
+  assert.equal(ui.state().draft, '原来未发送的其他问题'); assert.equal(ui.input.value, '原来未发送的其他问题'); assert.deepEqual(ui.getContext(), currentContext); assert.equal(ui.state().revisionHandoff, null);
+});
+
+test('a rejected candidate-turn retry retains the exact request and preserves the unrelated composer for a guarded retry', async () => {
+  const { ui, document, run } = revisionHandoffFixture(), requests = [], text = '修改标题'; ui.prepareArtifactRevision({ run, humanNodeId: 'gate', feedback: text });
+  const original = structuredClone(ui.state().revisionHandoff), failed = { id: 'interrupted-candidate-turn', status: 'interrupted', user: { text, intent: 'auto', context: original.context, revisionRequest: original.revisionRequest } };
+  ui.state().revisionHandoff = null; ui.state().conversation.turns = [failed]; ui.state().draft = '另外的聊天草稿'; const currentContext = structuredClone(ui.getContext()); run.nodes.gate.attemptId = 'newer-review';
+  ui.api = async (_path, options) => { requests.push(structuredClone(options.body)); if (requests.length === 1) throw new Error('审核版本已变化或当前权限不允许'); return snapshot(document.id, 2); };
+  await ui.beginRetry(failed); assert.equal(requests.length, 1); assert.deepEqual(requests[0].revisionRequest, original.revisionRequest); assert.equal(requests[0].retryOfTurnId, failed.id); assert.ok(ui.state().revisionHandoff); assert.match(ui.state().revisionHandoffStatus, /审核版本已变化/);
+  await ui.sendArtifactRevision(); assert.equal(requests.length, 2); assert.equal(requests[0].clientMessageId, requests[1].clientMessageId); assert.deepEqual(requests[1].revisionRequest, original.revisionRequest); assert.equal(ui.state().draft, '另外的聊天草稿'); assert.deepEqual(ui.getContext(), currentContext);
+});
+
+test('a classified review proposal prepares its exact candidate without replacing the composer and retains stale-review errors', async t => {
+  pendingDOM(t); const { ui, document, run } = revisionHandoffFixture(), requests = [], context = { runId: run.id, nodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: run.nodes.gate.review.artifactHashes }, feedback = '  改为横向排列\n保留全部10项；放大标题  ';
+  const turn = { id: 'classified-revision', status: 'awaiting_action', user: { text: '修改海报' }, assistant: { text: '请先生成修改候选。', revisionProposals: [{ context, feedback, targetNodeId: 'trim' }] }, actions: [] };
+  ui.state().draft = '另一个未发送的问题'; const originalContext = structuredClone(ui.getContext()); ui.api = async (path, options) => { requests.push({ path, body: structuredClone(options.body) }); return snapshot(document.id, 2); };
+  let all = pendingDOMDescendants(ui.turnView(turn)), candidate = all.find(item => item.textContent === '生成修改候选'); assert.ok(candidate); assert.equal(candidate.disabled, false);
+  await candidate.listeners.click(); assert.equal(requests.length, 1); assert.equal(requests[0].path, `/api/workflow-conversations/${document.id}/messages`); assert.equal(requests[0].body.text, feedback); assert.equal(requests[0].body.intent, 'auto'); assert.deepEqual(requests[0].body.revisionRequest, { runId: run.id, humanNodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: context.artifactHashes, targetNodeId: 'trim' }); assert.equal(ui.state().revisionHandoff, null);
+  assert.equal(ui.state().draft, '另一个未发送的问题'); assert.deepEqual(ui.getContext(), originalContext);
+  ui.state().revisionHandoff = null; run.nodes.gate.attemptId = 'human-newer'; await candidate.listeners.click(); ui.state().error = '';
+  all = pendingDOMDescendants(ui.turnView(turn)); assert.ok(all.some(item => item.attributes?.role === 'alert' && /审核版本已变化/.test(item.textContent))); assert.equal(ui.state().revisionHandoff, null);
+  turn.pendingState = { status: 'superseded' }; assert.equal(pendingDOMDescendants(ui.turnView(turn)).some(item => item.textContent === '生成修改候选'), false);
+});
+
+test('a busy conversation retains an immediately requested candidate with a clear retry state and preserves the draft', async () => {
+  const { ui, document, run } = revisionHandoffFixture(), requests = []; ui.state().draft = '保留原草稿'; ui.state().sending = true;
+  ui.api = async (path, options) => { requests.push({ path, body: structuredClone(options.body) }); return snapshot(document.id, 2); };
+  await ui.requestArtifactRevision({ run, humanNodeId: 'gate', feedback: '请加大标题' });
+  assert.equal(requests.length, 0); assert.equal(ui.state().revisionHandoff.text, '请加大标题'); assert.match(ui.state().revisionHandoffStatus, /稍后|保留|正在/);
+  ui.state().sending = false; await ui.sendArtifactRevision(); assert.equal(requests.length, 1); assert.equal(ui.state().revisionHandoff, null); assert.equal(ui.state().draft, '保留原草稿');
+});
+
+test('review cards show the count without a ceiling and keep Skill revision actions usable after many modifications', t => {
+  pendingDOM(t); const { ui, run } = harness(); ui.pendingHost = new PendingElement('section');
+  const context = { runId: run.id, nodeId: 'gate', attempt: 4, attemptId: 'gate-four' };
+  ui.attachment = { ...context, workflowId: ui.workflowId };
+  ui.state().pending = [{ id: 'quota-review', kind: 'review', label: '审核海报', context,
+    revision: { used: 6, limit: null, remaining: null, exhausted: false, targetNodeId: 'trim', strategy: 'revise', canRevise: true, reason: '' } }];
+  ui.renderPending(conversationTurnGroups([]));
+  const all = pendingDOMDescendants(ui.pendingHost), revise = all.find(item => item.textContent === '填写修改意见');
+  assert.ok(all.some(item => item.textContent === '已修改 6 次')); assert.equal(all.some(item => /剩余|修改.*上限|null/.test(item.textContent || '')), false);
+  assert.equal(revise.disabled, false); assert.equal(all.find(item => item.textContent === '通过并继续').disabled, false);
+  assert.equal(all.find(item => item.textContent === '停止此审核分支').disabled, false);
+  const turn = { id: 'many-revisions', status: 'awaiting_action', actions: [{ id: 'more', kind: 'review-revise', label: '继续修改', context, feedback: '标题放大' }] }, turnNodes = pendingDOMDescendants(ui.turnView(turn));
+  assert.equal(turnNodes.find(item => item.textContent === '继续修改').disabled, false); assert.ok(turnNodes.some(item => item.textContent === '已修改 6 次')); assert.equal(turnNodes.some(item => /剩余|修改.*上限|null/.test(item.textContent || '')), false);
+});
+
 test('global application chat displays the focused issue with a concise composer', t => {
   pendingDOM(t); const { ui } = harness(); Object.setPrototypeOf(ui, ApplicationConversationUI.prototype);
   ui.workflowId = 'global-application'; ui.editor.doc = { id: 'global-application', title: '当前应用', nodes: [], edges: [] };

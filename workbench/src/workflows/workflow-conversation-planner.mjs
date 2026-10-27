@@ -32,6 +32,7 @@ function graphContext(document) {
     nodes: document.nodes.map(node => {
       const config = {};
       for (const [key, value] of Object.entries(node.config)) {
+        if (key === 'maxRevisions') continue;
         if (node.type === 'evaluation' && !['comparison', 'valuePath'].includes(key)) continue;
         if (node.type === 'improvement' && !['scope', 'targetSkillNodeIds'].includes(key)) continue;
         if (key === 'document') { if (value) config.embeddedWorkflow = { id: value.id, nodeCount: value.nodes.length }; continue; }
@@ -245,9 +246,9 @@ SYSTEM_RULES:
 - Skill 只能使用 SKILL_CATALOG 中的 ref 和 revision，或当前工作流已有 ref/version。目录只有名称而没有 revision 时，新建或明确更换 Skill 的操作保留 version 为空或省略，工作台会在返回提案前读取真实内容指纹；不要编造版本。保留已有固定版本，不因咨询、改名或其它节点修改而更新它。未知/未连接的 Skill 保持空引用并明确提示用户选择；不能编造已学习好、已运行或已验证的结论。
 - input 默认输出 fileRef；文本流程显式设 config.outputType="text"，工具与代码/transform 默认 object；请显式配置需要的类型。output stage=final 或 intermediate。validation rules 每项为 {valuePath:"",check:"required"|"nonempty"|"type"|"equals",expectedType:"text"|"number"|"boolean"|"object"|"array",expected:JSON值,message:"提示"}；只填与 check 有关的字段。
 - 固定任务与本次输入分开：用户希望配置一次后直接运行时，把完整且明确的固定需求保存到 input.config.defaultValue（文本任务配 outputType="text"），运行时无临时输入会使用它。不能把固定需求只写入 config.value，也不要为了默认需求添加代码/transform 节点。已有 input.config.value 中的固定需求应保留并迁入 defaultValue，不要求用户重复填写。不要猜测缺失的本次文件或资料，只有真实缺少的资料才追问。
-- config 必须严格使用 CONFIG_CATALOG 对应类型的 allowedConfigKeys，不能自创字段。人工审核 human 的修改目标字段只能叫 reviewTargetNodeId（不是 modificationTargetNodeId/targetNodeId）；值为该审核节点上游生产能力的 ID 或已添加的本批 ref。human 常用配置为 {inputType:"text",outputType:"text",prompt:"请检查清理结果，通过后继续",reviewTargetNodeId:"trim",maxRevisions:3}。文本链中的 human 输入输出均设 text。output 的 inputType 固定 any，不能设置 outputType；用 stage 指定 final/intermediate，用 fileName 指定文件名。文本非空校验用 validation config={inputType:"text",outputType:"text",rules:[{valuePath:"",check:"nonempty"}]}。
-- 不编造文件路径或已知答案，不把历史运行、验证集样例/输入/输出和审核凭据填进 Skill 或工作流。对参考 Excel 等文件，不宣称存在直接上传即自动学习的入口；可先确认应学习的数据结构、格式与规则。反馈、图片修改和 Skill 优化继续在当前对话处理，不把用户转去独立反馈框；operations=[]，不要用改代码替代正式反馈。用户明确要求先准备改进配置时，可提出业务产物 → evaluation → improvement 的可审阅配置，只声明用户指定的 Skill，不改写旧运行或承诺学习完成。对于请求审核通过/要求修改，operations=[]，说明需在当前对话确认绑定到确切运行和版本的审核卡。
-- 用户只是讨论、提问、反馈或要求运行时 operations=[]。只有用户明确搭建或更改工作流时才提出编辑操作。保持其余节点和连线不变，避免无关改名、删除或重建。
+- config 必须严格使用 CONFIG_CATALOG 对应类型的 allowedConfigKeys，不能自创字段。人工审核 human 的修改目标字段只能叫 reviewTargetNodeId（不是 modificationTargetNodeId/targetNodeId）；值为该审核节点上游生产能力的 ID 或已添加的本批 ref。human 常用配置为 {inputType:"text",outputType:"text",prompt:"请检查清理结果，通过后继续",reviewTargetNodeId:"trim"}。人工修改不限次数。文本链中的 human 输入输出均设 text。output 的 inputType 固定 any，不能设置 outputType；用 stage 指定 final/intermediate，用 fileName 指定文件名。文本非空校验用 validation config={inputType:"text",outputType:"text",rules:[{valuePath:"",check:"nonempty"}]}。
+- 不编造文件路径或已知答案，不把历史运行、验证集样例/输入/输出和审核凭据填进 Skill 或工作流。对参考 Excel 等文件，不宣称存在直接上传即自动学习的入口。用户仅保存反馈、优化 Skill 或要求通过/停止审核时 operations=[]，沿当前对话的绑定入口处理。用户明确要求修改工具产物并生成代码候选时，须重新生成该工具节点的核心业务代码（executionMode=code），按完整意见实际改变代码，保留端口、输入输出合约与人工审核；已注册工具可转为业务代码模式，不能只改标题、注释或超时，也不能原样重跑。只生成草稿候选，不改应用源码、内置工具、旧运行或原产物；应用和新运行分别由用户明确操作。无法实现时明确说明。用户明确准备 Skill 改进配置时，可提出业务产物 → evaluation → improvement 的候选，只声明指定 Skill，不改旧运行或承诺学习完成。
+- 用户只是讨论、提问、保存反馈或要求运行时 operations=[]。用户明确搭建、更改工作流或请求工具核心代码修改候选时才提出编辑操作；由审核卡提交的完整修改意见属于此类请求。保持其余节点和连线不变，避免无关改名、删除或重建。
 FOUNDATION_CATALOG=${JSON.stringify(NODE_TYPES.filter(row => catalogs.types.has(row.type)).map(row => ({ type: row.type, label: row.label, description: row.description })))}
 CONFIG_CATALOG=${JSON.stringify(configCatalog(document.schemaVersion, catalogs.types))}
 TOOL_CATALOG=${JSON.stringify(catalogs.tools.map(row => ({ id: row.id, label: row.label, inputType: row.inputType, outputType: row.outputType, reviewRequired: !!row.reviewRequired, ...(row.ports ? { ports: row.ports } : {}) })))}

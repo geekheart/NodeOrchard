@@ -8,6 +8,7 @@ import { getPorts } from '../../shared/workflow/workflow-model.mjs';
 import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
 import { WORKFLOW_TOOLS } from '../../shared/workflow/workflow-tools.mjs';
 import { validateNodeValue } from '../../shared/workflow/workflow-validation.mjs';
+import { reviewRevisionPolicy, rerunRevisionFeedback } from '../../shared/workflow/workflow-review-revision.mjs';
 import { redact } from '../hermes-adapter.mjs';
 import { stageSubflowArtifacts } from './workflow-subflow-artifacts.mjs';
 
@@ -594,6 +595,17 @@ export class WorkflowDAGRuns {
     if (expected) assertExpectedNodeSnapshot(state.run, expected);
     if (action !== 'stop') this.app.workflowLibrary?.assertRunnable?.(state.run.workflowId);
     if (!['approve', 'revise', 'stop'].includes(action) || typeof feedback !== 'string' || feedback.length > 8000) throw fail('审核操作或反馈无效。');
+    let revision;
+    if (action === 'revise') {
+      if (!feedback.trim()) throw fail('请填写本次修改要求。');
+      const target = targetNodeId || node.config.reviewTargetNodeId;
+      if (!target || (node.config.reviewTargetNodeId && target !== node.config.reviewTargetNodeId)) throw fail('请选择审核节点声明的修改目标。');
+      const ancestors = this.ancestors(state, nodeId);
+      if (!ancestors.has(target) || !['skill', 'tool', 'transform', 'subflow'].includes(state.plan.byId.get(target)?.type)) throw fail('只能修改此审核节点的上游生产能力。');
+      const policy = reviewRevisionPolicy(state.run, nodeId, target);
+      if (!policy.canRevise) throw Object.assign(fail(policy.reason, 409), { code: policy.reasonCode });
+      revision = { target, policy };
+    }
     if (action !== 'stop') {
       if (state.run.learningId) await this.app.learning?.prepareReviewResume?.(state.run.learningId);
       await this.verifyArtifacts(record.artifacts);
@@ -604,15 +616,12 @@ export class WorkflowDAGRuns {
     if (action === 'approve') { Object.assign(record, { status: 'complete', output: clone(record.input), outputText: JSON.stringify(record.input), completedAt: now() }); record.review = { ...record.review, decision: 'approved', feedback, reviewedAt: now(), artifactHashes: record.artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) }; }
     else if (action === 'stop') { Object.assign(record, { status: 'error', error: feedback || '用户停止了此审核分支。', completedAt: now() }); record.review = { ...record.review, decision: 'stopped', feedback, reviewedAt: now() }; }
     else {
-      if (!feedback.trim()) throw fail('请填写本次修改要求。');
-      const target = targetNodeId || node.config.reviewTargetNodeId;
-      if (!target || (node.config.reviewTargetNodeId && target !== node.config.reviewTargetNodeId)) throw fail('请选择审核节点声明的修改目标。');
-      const ancestors = this.ancestors(state, nodeId);
-      if (!ancestors.has(target) || !['skill', 'tool', 'transform', 'subflow'].includes(state.plan.byId.get(target)?.type)) throw fail('只能修改此审核节点的上游生产能力。');
-      if ((record.review?.revisionCount || 0) >= (node.config.maxRevisions || 3)) throw fail('已达到人工修改次数上限。', 409);
-      const review = { ...record.review, revisionCount: (record.review?.revisionCount || 0) + 1, decision: 'revision_requested', feedback, reviewedAt: now() };
-      this.reset(state, new Set([target, ...this.descendants(state, target)]));
-      state.run.nodes[nodeId].review = review; state.run.nodes[target].reviewFeedback = feedback;
+      const { target, policy } = revision;
+      const review = { ...record.review, revisionCount: policy.used + 1, decision: 'revision_requested', feedback, reviewedAt: now() };
+      const requests = rerunRevisionFeedback(state.run.document, [target], { feedback, previousNodes: state.run.nodes });
+      this.reset(state, new Set(requests.affectedNodeIds));
+      state.run.nodes[nodeId].review = review;
+      for (const [id, request] of Object.entries(requests.feedbackByNode)) state.run.nodes[id].reviewFeedback = request;
     }
     // Human waits release run admission slots. Continuing joins the same queue
     // as new work instead of jumping ahead or exceeding the active-run limit.
@@ -672,11 +681,9 @@ export class WorkflowDAGRuns {
     const needsAdmission = !wasActive || ['queued', 'waiting_review'].includes(run.status);
     // Selected producers receive the request too (e.g. an image tool adapter).
     // Omitted feedback retains existing requests; no Skill or code is rewritten.
-    const requestTargets = new Set(nodeIds.filter(nodeId => ['skill', 'tool', 'transform', 'subflow'].includes(state.plan.byId.get(nodeId)?.type)));
-    const skillFeedback = new Map([...ids].filter(nodeId => requestTargets.has(nodeId) || state.plan.byId.get(nodeId)?.type === 'skill')
-      .map(nodeId => [nodeId, feedback ?? state.run.nodes[nodeId].reviewFeedback ?? '']));
+    const requests = rerunRevisionFeedback(state.run.document, nodeIds, { feedback, previousNodes: state.run.nodes });
     this.reset(state, ids);
-    for (const [nodeId, request] of skillFeedback) state.run.nodes[nodeId].reviewFeedback = request;
+    for (const [nodeId, request] of Object.entries(requests.feedbackByNode)) state.run.nodes[nodeId].reviewFeedback = request;
     this.active.set(id, state); this.owner.locks.set(run.workflowId, 'dag'); this.resume(state, needsAdmission); return this.get(id);
     } finally { this.mutations.delete(id); }
   }
