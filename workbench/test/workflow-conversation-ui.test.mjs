@@ -145,3 +145,19 @@ test('the default discussion composer explains direct approval and revision for 
   const { ui, run } = harness(); ui.editor.doc.nodes[0].type = 'human'; run.document.nodes[0].type = 'human'; run.nodes.trim.status = 'waiting_review'; ui.help = {}; ui.state().intent = 'discuss'; ui.renderComposerHelp(); assert.match(ui.help.textContent, /回复“通过”/); assert.match(ui.input.placeholder, /要求修改/);
   run.nodes.trim.status = 'complete'; ui.renderComposerHelp(); assert.match(ui.help.textContent, /咨询和讨论/);
 });
+
+test('the composer defaults to automatic routing and a direct run message uses the existing runtime once', async () => {
+  const { ui } = harness(); let started = 0, posts = 0;
+  assert.equal(ui.state().intent, 'auto');
+  ui.runtime.start = async () => { started++; }; ui.runtime.setExpanded = () => {};
+  ui.api = async () => { posts++; throw Error('Run commands must use runtime preflight'); };
+  ui.state().draft = '开始运行'; await ui.send();
+  assert.equal(started, 1); assert.equal(posts, 0); assert.equal(ui.state().draft, '');
+});
+
+test('automatic composer does not turn a question about running into a command', async () => {
+  const { ui, document } = harness(); let started = 0, body;
+  ui.runtime.start = async () => { started++; }; ui.state().draft = '我可以现在运行吗？';
+  ui.api = async (_path, options) => { body = options.body; return snapshot(document.id, 1); };
+  await ui.send(); assert.equal(started, 0); assert.equal(body.intent, 'auto');
+});

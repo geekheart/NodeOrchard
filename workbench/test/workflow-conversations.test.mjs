@@ -68,6 +68,24 @@ test('conversation feedback persists without a model or Skill and never changes 
   assert.deepEqual(f.adapter.calls, []);
 });
 
+test('chat can configure an existing fixed task, confirm its receipt and run without entering the same input again', async t => {
+  const f = await fixture(t), document = graph();
+  f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  f.app.conversations.planner = async () => ({ text: '保存这份固定任务需求。', baseFingerprint: documentFingerprint(document),
+    operations: [{ op: 'update-node', nodeId: 'input', config: { defaultValue: '  固定热榜需求  ' } }] });
+  const response = await f.app.conversations.message(document.id, message(document, '把任务改为固定需求，运行时无需输入', { intent: 'auto' }));
+  const proposal = await until(() => f.app.conversations.get(document.id).conversation.turns.find(turn => turn.id === response.turn.id && turn.status === 'proposed'));
+  const applied = applyWorkflowOperations(document, proposal.assistant.operations).document;
+  const receipt = await f.app.conversations.action(document.id, proposal.id, { action: 'mark-applied', actionId: proposal.actions[0].id,
+    document: applied, planFingerprint: proposal.assistant.baseFingerprint });
+  assert.equal(receipt.turn.outcome.status, 'complete');
+  assert.equal(f.app.workflows.list().length, 0, 'applying a configuration never starts the task');
+  const started = await f.app.workflows.start({ document: applied });
+  const run = await until(() => { const current = f.app.workflows.get(started.id); return current.status === 'complete' && current; });
+  assert.equal(run.output, '固定热榜需求');
+  assert.deepEqual(f.adapter.calls, []);
+});
+
 test('exact human review reply executes once; an unbound reply lists candidates without approval', async t => {
   const f = await fixture(t), document = graph(true);
   f.app.workflowLibrary.save({ document, expectedRevision: 0 });
@@ -328,4 +346,109 @@ test('ambiguous artifact ancestry asks for one Skill instead of broadening feedb
   const rejected = await f.app.conversations.action(document.id, reply.turn.id, { action: 'learn-feedback', actionId: reply.turn.actions[0].id });
   assert.equal(rejected.turn.outcome.status, 'rejected'); assert.match(rejected.turn.assistant.text, /多个.*Skill.*选择/);
   assert.equal(f.app.feedback.current(run.id), null); assert.deepEqual(f.app.learning.list(), []);
+});
+
+test('automatic conversation treats learning questions as discussion rather than an executable learning request', async t => {
+  const f = await fixture(t), document = graph(); let requests = 0;
+  f.app.conversations.planner = async () => { requests++; return { text: '可以先讨论参考材料与期望。', operations: [] }; };
+  const response = await f.app.conversations.message(document.id, message(document, '我可以给已知的 Excel 作为学习对比吗？', { intent: 'auto' }));
+  const turn = await until(() => f.app.conversations.get(document.id).conversation.turns.find(item => item.id === response.turn.id && item.status === 'complete'));
+  assert.equal(turn.user.intent, 'discuss'); assert.equal(requests, 1); assert.deepEqual(turn.actions, []);
+  assert.deepEqual(f.app.learning.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('automatic feedback binds the only completed run and asks inside chat when several runs are available', async t => {
+  const f = await fixture(t), document = graph();
+  const first = await f.app.workflows.start({ document, input: ' first ' });
+  await until(() => f.app.workflows.get(first.id).status === 'complete');
+  const reply = await f.app.conversations.message(document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
+  assert.equal(reply.turn.user.context.runId, first.id); assert.equal(reply.turn.actions[0].kind, 'record-feedback');
+  const second = await f.app.workflows.start({ document, input: ' second ' });
+  await until(() => f.app.workflows.get(second.id).status === 'complete');
+  const ambiguous = await f.app.conversations.message(document.id, message(document, '反馈：输出标题需要更清晰', { intent: 'auto' }));
+  assert.equal(ambiguous.turn.status, 'awaiting_action'); assert.equal(ambiguous.turn.actions.length, 2);
+  assert.ok(ambiguous.turn.actions.every(action => action.kind === 'select-run'));
+  const action = ambiguous.turn.actions.find(action => action.context.runId === second.id);
+  const selected = await f.app.conversations.action(document.id, ambiguous.turn.id, { action: action.kind, actionId: action.id });
+  assert.equal(selected.turn.actions[0].kind, 'record-feedback'); assert.equal(selected.turn.actions[0].context.runId, second.id);
+  assert.equal(selected.turn.outcome, undefined); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('a request for reusable rules prepares a reviewable scope without changing the workflow or requiring node configuration', async t => {
+  const f = await fixture(t), source = multiSkillRun();
+  const document = copy(source.document);
+  document.nodes = document.nodes.filter(node => !['evaluation', 'improvement'].includes(node.type));
+  const ids = new Set(document.nodes.map(node => node.id)); document.edges = document.edges.filter(edge => ids.has(edge.sourceNode) && ids.has(edge.targetNode));
+  const before = copy(document);
+  const response = await f.app.conversations.message(document.id, message(document, '以后都按这个格式，只改进 fixture-2 的 Skill', { intent: 'auto', context: { nodeId: 'skill-2' } }));
+  assert.equal(response.turn.status, 'proposed'); assert.equal(response.turn.actions[0].kind, 'mark-applied');
+  const proposal = applyWorkflowOperations(document, response.turn.assistant.operations).document;
+  const improvement = proposal.nodes.find(node => node.type === 'improvement');
+  assert.deepEqual(improvement.config.targetSkillNodeIds, ['skill-2']);
+  assert.deepEqual(document, before); assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.app.learning.list(), []);
+  assert.deepEqual(f.adapter.calls, []);
+});
+
+test('explicit Skill learning without a completed run gives a chat next step instead of a doomed learning action', async t => {
+  const f = await fixture(t), document = graph();
+  const reply = await f.app.conversations.message(document.id, message(document, '以后按这个格式', { intent: 'skill', context: { nodeId: 'output' } }));
+  assert.equal(reply.turn.status, 'complete'); assert.deepEqual(reply.turn.actions, []);
+  assert.match(reply.turn.assistant.text, /运行当前流程|真实 Skill/);
+  assert.deepEqual(f.app.learning.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('ordinary result edits offer a version-bound rerun in chat and do not change permanent rules', async t => {
+  const f = await fixture(t), run = multiSkillRun(), document = run.document;
+  f.app.workflows.write.run(run.id, JSON.stringify(run));
+  const reply = await f.app.conversations.message(document.id, message(document, '把结果表头改成中文', { intent: 'auto', context: { runId: run.id, nodeId: 'skill-2' } }));
+  assert.equal(reply.turn.user.intent, 'feedback');
+  const action = reply.turn.actions.find(action => action.kind === 'rerun'); assert.ok(action);
+  assert.equal(action.context.nodeId, 'skill-2'); assert.equal(action.context.attemptId, run.nodes['skill-2'].attemptId);
+  assert.deepEqual(f.app.learning.list(), []); assert.equal(f.app.workflows.get(run.id).nodes['skill-2'].attempt, 1);
+  assert.deepEqual(f.adapter.calls, []);
+});
+
+test('feedback never promises that fixed tools will interpret a natural-language revision', async t => {
+  const f = await fixture(t), document = graph(), started = await f.app.workflows.start({ document, input: ' abc ' });
+  const run = await until(() => { const value = f.app.workflows.get(started.id); return value.status === 'complete' && value; });
+  const reply = await f.app.conversations.message(document.id, message(document, '这次结果需要改成大写', { intent: 'auto', context: { runId: run.id } }));
+  assert.deepEqual(reply.turn.actions.map(action => action.kind), ['record-feedback']);
+  assert.deepEqual(f.adapter.calls, []);
+});
+
+test('automatic long-term feedback narrows a run-level reply to the unique upstream Skill', async t => {
+  const f = await fixture(t), run = multiSkillRun(); f.app.workflows.write.run(run.id, JSON.stringify(run));
+  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后都按这个格式', { intent: 'auto', context: { runId: run.id } }));
+  assert.equal(reply.turn.actions.length, 1); assert.equal(reply.turn.actions[0].kind, 'learn-feedback');
+  assert.equal(reply.turn.actions[0].context.nodeId, 'skill-2');
+  assert.equal(reply.turn.actions[0].context.attemptId, run.nodes['skill-2'].attemptId);
+  assert.deepEqual(f.app.learning.list(), []); assert.equal(f.app.feedback.current(run.id), null);
+});
+
+test('adding permission for an explicit learning target is a reviewable draft change and cannot rewrite an old run', async t => {
+  const f = await fixture(t), run = multiSkillRun();
+  run.document.nodes.find(node => node.type === 'improvement').config.targetSkillNodeIds = ['skill-1'];
+  f.app.workflows.write.run(run.id, JSON.stringify(run)); const before = copy(f.app.workflows.get(run.id));
+  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后只改进 fixture-2 的 Skill', { intent: 'auto', context: context(run, 'skill-2') }));
+  assert.equal(reply.turn.status, 'proposed');
+  const changed = applyWorkflowOperations(run.document, reply.turn.assistant.operations).document;
+  assert.deepEqual(changed.nodes.find(node => node.type === 'improvement').config.targetSkillNodeIds, ['skill-2']);
+  assert.deepEqual(f.app.workflows.get(run.id), before); assert.deepEqual(f.app.learning.list(), []);
+});
+
+test('an automatic named Skill request freezes and learns only that actual executed Skill', async t => {
+  const f = await fixture(t), run = multiSkillRun(); f.app.workflows.write.run(run.id, JSON.stringify(run));
+  let targetIds;
+  f.app.learning.startFeedback = async request => {
+    const record = f.app.feedback.learningRequest(request.runId, { feedbackRevision: request.feedbackRevision });
+    targetIds = record.targets.map(target => target.nodeId);
+    return { id: 'named-skill-learning', config: { trainableNodeIds: targetIds } };
+  };
+  const reply = await f.app.conversations.message(run.workflowId, message(run.document, '以后改进 fixture-1 Skill 的表格格式', { intent: 'auto' }));
+  const action = reply.turn.actions[0];
+  assert.equal(action.context.nodeId, 'skill-1'); assert.equal(action.context.attemptId, run.nodes['skill-1'].attemptId);
+  const learned = await f.app.conversations.action(run.workflowId, reply.turn.id, { action: action.kind, actionId: action.id });
+  assert.equal(learned.turn.outcome.status, 'complete'); assert.deepEqual(targetIds, ['skill-1']);
+  assert.deepEqual(f.app.feedback.current(run.id).targets.map(target => target.nodeId), ['skill-1']);
+  assert.deepEqual(f.adapter.calls, []);
 });

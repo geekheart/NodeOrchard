@@ -80,7 +80,7 @@ export class WorkflowEditor {
     this.clipboard = null; this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
     this.unsaved = false; this.storageValue = null; this.storageConflict = false; this.corruptDraft = null;
     this.libraryLifecycle = 'active'; this.lifecycleDisabled = new WeakMap();
-    this.settings = { snap: true, reduceMotion: false, libraryClosed: innerWidth <= 780, propertiesClosed: true };
+    this.settings = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: true, propertiesClosed: true };
     this.doc = createDocument({ schemaVersion: 2 }); this.doc.viewport = { x: 48, y: 90, zoom: 1 };
     this.restore(); this.mount();
     this.studio = new WorkflowStudioUI(this);
@@ -158,6 +158,8 @@ export class WorkflowEditor {
     for (const [label, action, glyph] of [['重做 ⌘/Ctrl+Shift+Z', 'redo', 'redo'], ['撤销 ⌘/Ctrl+Z', 'undo', 'undo']]) header.prepend(control(label, action, glyph, { compact: true }));
     header.append(control('新建', 'new', 'plus'), control('导入', 'import', 'upload'), control('导出', 'export', 'download'), control('保存', 'save', 'save'), control('定时任务', 'schedules', 'clock'));
     const run = control('执行工作流', 'run', 'play'); run.disabled = true; header.append(run);
+    header.append(control('隐藏画布', 'toggle-canvas'));
+    const libraryToggle = control('节点库', 'toggle-library'); libraryToggle.classList.add('wf-library-toggle'); header.append(libraryToggle);
     const toolbar = find('.wf-canvas-toolbar');
     toolbar.append(control('切换节点库', 'toggle-library', 'library', { compact: true }), control('适应画布', 'fit', 'fit', { compact: true }), control('网格吸附', 'snap', 'grid', { compact: true }), el('span', 'wf-toolbar-divider'), control('减少动效', 'motion', 'motion', { compact: true }), control('节点属性', 'toggle-properties', 'panel', { compact: true }), control('快捷键与说明', 'help', 'help', { compact: true }));
     find('.wf-library-head .wf-panel-heading').append(control('收起节点库', 'toggle-library', 'close', { compact: true }));
@@ -280,17 +282,38 @@ export class WorkflowEditor {
     this.versioning?.syncHeader();
   }
 
+  panelSettings() {
+    // Running and inspecting a flow should not rewrite the editing layout.
+    if (this.studio?.view === 'run') return this.studio.runPanelSettings ||= { libraryClosed: true, propertiesClosed: true };
+    return this.settings;
+  }
+  setPanelClosed(panel, closed) {
+    this.panelSettings()[panel + 'Closed'] = closed;
+    this.applySettings();
+  }
+  setCanvasClosed(closed) {
+    this.cancelGesture(); this.cancelConnection(); this.settings.canvasClosed = closed;
+    this.applySettings(); this.scheduleSave();
+    if (!closed) requestAnimationFrame(() => this.onCanvasResize());
+  }
   applySettings() {
-    if (innerWidth <= 780 && !this.settings.libraryClosed && !this.settings.propertiesClosed) {
-      if (this.selection.size || this.selectedEdge) this.settings.libraryClosed = true;
-      else this.settings.propertiesClosed = true;
+    const canvasClosed = this.settings.canvasClosed === true, panels = this.panelSettings();
+    let libraryClosed = canvasClosed || panels.libraryClosed === true, propertiesClosed = canvasClosed || panels.propertiesClosed === true;
+    if (innerWidth <= 780 && !libraryClosed && !propertiesClosed) {
+      if (this.selection.size || this.selectedEdge) libraryClosed = true;
+      else propertiesClosed = true;
     }
-    this.root.classList.toggle('library-closed', this.settings.libraryClosed);
-    this.root.classList.toggle('properties-closed', this.settings.propertiesClosed);
+    this.root.classList.toggle('canvas-closed', canvasClosed);
+    this.root.classList.toggle('library-closed', libraryClosed);
+    this.root.classList.toggle('properties-closed', propertiesClosed);
     this.root.classList.toggle('reduce-motion', this.settings.reduceMotion);
-    for (const [action, pressed] of [['toggle-library', !this.settings.libraryClosed], ['toggle-properties', !this.settings.propertiesClosed], ['snap', this.settings.snap], ['motion', this.settings.reduceMotion]]) {
+    for (const [action, pressed] of [['toggle-library', !libraryClosed], ['toggle-properties', !propertiesClosed], ['snap', this.settings.snap], ['motion', this.settings.reduceMotion]]) {
       for (const button of this.root.querySelectorAll(`[data-action="${action}"]`)) button.setAttribute('aria-pressed', String(pressed));
     }
+    for (const button of this.root.querySelectorAll('[data-action="toggle-canvas"]')) {
+      const label = canvasClosed ? '显示画布' : '隐藏画布'; button.textContent = label; button.title = label; button.setAttribute('aria-label', label); button.setAttribute('aria-expanded', String(!canvasClosed));
+    }
+    for (const button of this.root.querySelectorAll('.wf-library-toggle')) { const label = this.studio?.view === 'run' ? '输入资料' : '节点库'; button.textContent = label; button.title = label; button.setAttribute('aria-label', label); }
     this.requestGeometry();
   }
 
@@ -492,13 +515,13 @@ export class WorkflowEditor {
     this.selectedEdge = null;
     if (additive && this.selection.has(id)) this.selection.delete(id);
     else { if (!additive) this.selection.clear(); this.selection.add(id); }
-    this.settings.propertiesClosed = false; if (innerWidth <= 780) this.settings.libraryClosed = true;
+    if (!this.settings.canvasClosed) { const panels = this.panelSettings(); panels.propertiesClosed = false; if (innerWidth <= 780) panels.libraryClosed = true; }
     this.applySettings(); this.renderSelection(); this.renderProperties();
     this.runtime?.onSelectionChange?.(this.selection.size === 1 ? [...this.selection][0] : null);
     this.conversation?.render();
     requestAnimationFrame(() => this.ensureVisible(id));
   }
-  selectEdge(id) { this.selection.clear(); this.selectedEdge = id; this.settings.propertiesClosed = false; if (innerWidth <= 780) this.settings.libraryClosed = true; this.applySettings(); this.renderSelection(); this.renderProperties(); }
+  selectEdge(id) { this.selection.clear(); this.selectedEdge = id; if (!this.settings.canvasClosed) { const panels = this.panelSettings(); panels.propertiesClosed = false; if (innerWidth <= 780) panels.libraryClosed = true; } this.applySettings(); this.renderSelection(); this.renderProperties(); }
   ensureVisible(id) {
     if (this.gesture || !this.active || this.studio?.view === 'run' || this.canvas.offsetParent === null) return;
     const node = this.doc.nodes.find(n => n.id === id); if (!node) return;
@@ -860,8 +883,9 @@ export class WorkflowEditor {
       case 'board': this.onReturnToBoard?.(); break;
       case 'fit': this.fit(); break;
       case 'zoom-in': this.zoomAt(this.doc.viewport.zoom * 1.2); break; case 'zoom-out': this.zoomAt(this.doc.viewport.zoom / 1.2); break; case 'reset-zoom': this.zoomAt(1); break;
-      case 'toggle-library': this.settings.libraryClosed = !this.settings.libraryClosed; if (innerWidth <= 780 && !this.settings.libraryClosed) this.settings.propertiesClosed = true; this.applySettings(); this.scheduleSave(); break;
-      case 'toggle-properties': this.settings.propertiesClosed = !this.settings.propertiesClosed; if (innerWidth <= 780 && !this.settings.propertiesClosed) this.settings.libraryClosed = true; this.applySettings(); this.scheduleSave(); break;
+      case 'toggle-canvas': this.setCanvasClosed(!this.settings.canvasClosed); break;
+      case 'toggle-library': { const panels = this.panelSettings(); panels.libraryClosed = !panels.libraryClosed; if (innerWidth <= 780 && !panels.libraryClosed) panels.propertiesClosed = true; if (this.studio?.view === 'run') this.studio.setTab('inputs'); this.applySettings(); if (this.studio?.view !== 'run') this.scheduleSave(); break; }
+      case 'toggle-properties': { const panels = this.panelSettings(); panels.propertiesClosed = !panels.propertiesClosed; if (innerWidth <= 780 && !panels.propertiesClosed) panels.libraryClosed = true; this.applySettings(); if (this.studio?.view !== 'run') this.scheduleSave(); break; }
       case 'snap': this.settings.snap = !this.settings.snap; this.applySettings(); this.scheduleSave(); break;
       case 'motion': this.settings.reduceMotion = !this.settings.reduceMotion; this.applySettings(); this.clearPulses(); this.scheduleSave(); this.toast(this.settings.reduceMotion ? '已减少动效。只影响视觉反馈。' : '已启用接线确认动效。'); break;
       case 'help': this.openHelp(); break;

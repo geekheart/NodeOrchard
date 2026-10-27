@@ -97,6 +97,17 @@ body.workflow-active .main-content { overflow: hidden; }
 .wf-center { position: relative; grid-column: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .wf-properties { grid-column: 3; min-width: 0; min-height: 0; overflow: auto; padding: 16px; background: var(--wf-panel); border-left: 1px solid var(--wf-border); scrollbar-width: thin; scrollbar-color: var(--wf-border-strong) transparent; }
 .wf-editor.properties-closed .wf-properties { display: none; }
+/* Collapsing the canvas is temporary visibility, not a change to either panel preference. */
+.wf-editor.canvas-closed .wf-library,
+.wf-editor.canvas-closed .wf-center,
+.wf-editor.canvas-closed .wf-properties,
+.wf-editor.canvas-closed .wf-statusbar,
+.wf-editor.canvas-closed .wf-view-switch,
+.wf-editor.canvas-closed [data-action="toggle-library"] { display: none; }
+.wf-editor.canvas-closed.wf-chat-enabled .wf-body,
+.wf-editor.canvas-closed.wf-chat-enabled.wf-chat-open .wf-body { grid-template-columns: minmax(0, 1fr); }
+.wf-editor.canvas-closed .wf-conversation { position: relative; inset: auto; grid-column: 1; width: auto; border-left: 0; }
+.wf-editor.canvas-closed .wf-conversation-resize { display: none; }
 
 .wf-versioning-dialog .wf-versioning-option { display: flex; flex-direction: row; align-items: center; gap: 9px; }
 .wf-versioning-dialog .wf-versioning-option input[type="checkbox"] { width: 14px; height: 14px; flex: 0 0 14px; padding: 0; }

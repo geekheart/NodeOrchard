@@ -140,3 +140,13 @@ test('fixed defaults flow through preflight, execution and a frozen schedule sna
     if (count === 2) assert.equal(fromForm.input.source1.limit, 20);
   }
 });
+
+test('feedback from an executed result opens the same conversation with the exact selected attempt', () => {
+  const run = { id: 'run-fixed', status: 'complete', nodes: { export: { attempt: 2, attemptId: 'attempt-fixed', artifacts: [{ id: 'excel', sha256: 'a'.repeat(64) }] } } };
+  let focused, panelOpened = false;
+  const runtime = { currentRun: () => run, selectedNodeId: 'export', editor: { conversation: { focusContext: (context, options) => { focused = { context, options }; } } },
+    feedback: { canOpen: () => true, open: () => { panelOpened = true; } } };
+  WorkflowRuntimeUI.prototype.openFeedback.call(runtime);
+  assert.equal(panelOpened, false);
+  assert.deepEqual(focused, { context: { runId: run.id, nodeId: 'export', attempt: 2, attemptId: 'attempt-fixed', artifactIds: ['excel'], artifactHashes: [{ id: 'excel', sha256: 'a'.repeat(64) }] }, options: { intent: 'auto' } });
+});

@@ -8,12 +8,11 @@ const clone = value => structuredClone(value);
 const truncate = (value, size = 70) => { const text = clean(value); return text.length > size ? text.slice(0, size) + '…' : text; };
 const valueText = value => typeof value === 'string' ? clean(value) : value === undefined ? '' : clean(JSON.stringify(value, null, 2));
 const shortId = value => String(value || '').slice(0, 8);
-const INTENTS = [['discuss', '对话与咨询'], ['workflow', '搭建 / 修改流程'], ['redo', '重做本次产物'], ['feedback', '记录产物反馈'], ['skill', '改进 Skill']];
+const INTENTS = [['auto', '自动理解'], ['discuss', '对话与咨询'], ['workflow', '搭建 / 修改流程'], ['redo', '重做本次产物'], ['feedback', '记录产物反馈'], ['skill', '改进 Skill']];
 const TURN_STATUS = { thinking: '正在思考', queued: '正在准备', proposed: '待应用修改', awaiting_action: '待选择操作', complete: '已记录', error: '处理失败', applied: '已应用', interrupted: '已中断', dismissed: '已结束事项' };
 const unresolved = turn => ['thinking', 'queued', 'proposed', 'awaiting_action', 'error', 'interrupted'].includes(turn.status) && !turn.outcome?.applied;
 const image = item => /^image\//.test(item.mimeType || '') || /\.(png|jpe?g|webp|gif|svg)$/i.test(item.name || item.path || '');
 const safeArtifactURL = value => typeof value === 'string' && /^\/api\/workflow-v2\/artifacts\/[A-Za-z0-9_-]+(?:\?download=1)?$/.test(value) ? value : null;
-
 // Scope is captured when sending a turn, never read again from the selection
 // when an asynchronous answer arrives. Artifact identity is bound to an attempt.
 export function conversationContext(document, run, nodeId, attachment = {}) {
@@ -35,6 +34,7 @@ export function conversationTurnGroups(turns = []) {
   return { latest: turns.at(-1) || null, history: turns.slice(0, -1), unresolved: turns.filter(unresolved) };
 }
 export const canDismissConversationTurn = turn => ['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn?.status) && !turn.actions?.some(action => action.kind?.startsWith('review-'));
+export const isConversationRunCommand = value => /^(?:(?:请|帮我)\s*)?(?:运行|开始运行|立即运行|直接运行|运行一次|执行|开始执行|直接执行|运行当前流程|运行流程|执行当前流程)[。！!\s]*$/.test(value.trim());
 
 export class WorkflowConversationUI {
   constructor(editor, { api, getBackend = () => null }) {
@@ -42,12 +42,12 @@ export class WorkflowConversationUI {
     this.mount(); this.syncWorkflow();
   }
   currentDocument() { return this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
-  state(id = this.workflowId) { if (!this.states.has(id)) this.states.set(id, { conversation: { workflowId: id, revision: 0, turns: [] }, pending: [], draft: '', intent: 'discuss', loading: false, loaded: false, sending: false, request: 0, error: '', retry: null, expanded: new Set(), messageEdit: 0 }); return this.states.get(id); }
+  state(id = this.workflowId) { if (!this.states.has(id)) this.states.set(id, { conversation: { workflowId: id, revision: 0, turns: [] }, pending: [], draft: '', intent: 'auto', loading: false, loaded: false, sending: false, request: 0, error: '', retry: null, expanded: new Set(), messageEdit: 0 }); return this.states.get(id); }
   mount() {
     const panel = element('aside', 'wf-conversation'); panel.setAttribute('aria-label', '工作流 AI 对话');
     this.resizeHandle = element('div', 'wf-conversation-resize'); this.resizeHandle.tabIndex = 0; this.resizeHandle.setAttribute('role', 'separator'); this.resizeHandle.setAttribute('aria-label', '调整工作流对话宽度'); this.resizeHandle.setAttribute('aria-orientation', 'vertical'); this.resizeHandle.setAttribute('aria-valuemin', '280'); this.resizeHandle.setAttribute('aria-valuemax', '560'); this.resizeHandle.setAttribute('aria-valuenow', '360');
     this.resizeHandle.addEventListener('pointerdown', event => this.beginResize(event)); this.resizeHandle.addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const width = this.panel.getBoundingClientRect().width; this.setWidth(event.key === 'Home' ? 280 : event.key === 'End' ? 560 : width + (event.key === 'ArrowLeft' ? 20 : -20)); });
-    const heading = element('div', 'wf-conversation-heading'), title = element('div'); title.append(element('h2', '', '工作流对话')); this.subtitle = element('p', '', '搭建、审核与改进'); title.append(this.subtitle);
+    const heading = element('div', 'wf-conversation-heading'), title = element('div'); title.append(element('h2', '', '对话')); this.subtitle = element('p', '', '搭建、运行与问题处理'); title.append(this.subtitle);
     this.refreshButton = button('刷新对话', () => void this.load(true), 'wf-conversation-icon'); this.refreshButton.title = '刷新已保存的对话';
     this.closeButton = button('收起对话', () => this.toggle(false), 'wf-conversation-icon'); heading.append(title, this.refreshButton, this.closeButton);
     this.notice = element('div', 'wf-conversation-notice'); this.notice.setAttribute('role', 'status'); this.notice.setAttribute('aria-live', 'polite');
@@ -55,11 +55,13 @@ export class WorkflowConversationUI {
     this.messages = element('div', 'wf-conversation-messages'); this.messages.setAttribute('aria-label', '工作流对话记录');
     this.resultHost = element('div', 'wf-conversation-result-host');
     const composer = element('form', 'wf-conversation-composer'); this.contextHost = element('div', 'wf-conversation-context'); this.contextHost.setAttribute('aria-label', '本条消息回复对象');
-    const options = element('div', 'wf-conversation-composer-options'); this.intentSelect = element('select'); this.intentSelect.setAttribute('aria-label', '本次对话的修改范围');
+    const options = element('div', 'wf-conversation-composer-options'), advanced = element('details', 'wf-conversation-advanced');
+    advanced.hidden = true;
+    advanced.append(element('summary', '', '高级：指定处理方式')); this.intentSelect = element('select'); this.intentSelect.setAttribute('aria-label', '本次对话的修改范围');
     for (const [id, label] of INTENTS) { const option = element('option', '', label); option.value = id; this.intentSelect.append(option); }
     this.intentSelect.addEventListener('change', () => { this.state().intent = this.intentSelect.value; this.renderComposerHelp(); });
-    this.followSelection = button('使用画布选择', () => { this.attachment = null; this.renderContext(); }, 'wf-conversation-link'); options.append(this.intentSelect, this.followSelection);
-    this.input = element('textarea'); this.input.rows = 3; this.input.maxLength = 8000; this.input.placeholder = '描述流程，或选中节点 / 产物后提出修改意见…'; this.input.setAttribute('aria-label', '给工作流 AI 的消息');
+    advanced.append(this.intentSelect); this.followSelection = button('使用当前结果', () => { this.attachment = null; this.renderContext(); }, 'wf-conversation-link'); options.append(advanced, this.followSelection);
+    this.input = element('textarea'); this.input.rows = 3; this.input.maxLength = 8000; this.input.placeholder = '描述任务、回复结果，或直接说“运行”…'; this.input.setAttribute('aria-label', '给工作流 AI 的消息');
     this.input.addEventListener('input', () => { const state = this.state(); state.draft = this.input.value; state.messageEdit++; this.updateSendButton(); });
     this.input.addEventListener('keydown', event => { event.stopPropagation(); if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void this.send(); } });
     this.help = element('p', 'wf-conversation-help');
@@ -163,12 +165,12 @@ export class WorkflowConversationUI {
     this.followSelection.hidden = !this.attachment;
   }
   renderComposerHelp() {
-    const hints = { discuss: '咨询和讨论；不会自动运行流程或修改 Skill。', workflow: 'AI 提出节点操作，在画布应用后可撤销；运行需要单独发起。', redo: '只重跑指定节点及受影响部分；补充要求仅用于本次，不修改 Skill。', feedback: '反馈绑定当前工作流、运行、节点或产物；审核请明确回复“通过”或“要求修改：…”。', skill: '先记录改进目标，再明确启动学习；候选验证后才应用，不自动覆盖 Skill。' };
+    const hints = { auto: '直接描述任务或结果问题；说“运行”开始执行，说“以后都按这个规则”准备可复用改进。修改先预览，应用后可撤销。', discuss: '咨询和讨论；不会自动运行流程或修改 Skill。', workflow: 'AI 提出任务配置，应用后可撤销；随后可直接说“运行”。', redo: '只重跑指定节点及受影响部分；补充要求仅用于本次，不修改 Skill。', feedback: '反馈绑定当前工作流、运行、节点或产物；审核请明确回复“通过”或“要求修改：…”。', skill: '准备以后沿用的规则候选，验证并采用前保留原版本。' };
     const context = this.getContext(), run = this.runtime?.runs?.get(context.runId), record = run?.nodes?.[context.nodeId], node = run?.document?.nodes?.find(item => item.id === context.nodeId);
     const review = node?.type === 'human' && record?.status === 'waiting_review' && (context.attempt === undefined || context.attempt === record.attempt)
       || this.state().pending.some(item => item.kind === 'review' && item.context?.runId === context.runId && item.context?.nodeId === context.nodeId && item.context?.attempt === context.attempt);
     this.help.textContent = review ? '当前对象正在等待审核。回复“通过”继续，或“要求修改：具体意见”退回对应节点。' : hints[this.state().intent] || hints.discuss;
-    this.input.placeholder = review ? '回复“通过”，或“要求修改：具体意见”…' : '描述流程，或选中节点 / 产物后提出修改意见…';
+    this.input.placeholder = review ? '回复“通过”，或“要求修改：具体意见”…' : '描述任务、回复结果，或直接说“运行”…';
   }
   updateSendButton() { const state = this.state(), thinking = state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status)); this.sendButton.disabled = !state.loaded || state.sending || !this.input.value.trim() || thinking || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); this.sendButton.textContent = state.sending ? '发送中…' : thinking ? 'AI 正在回复…' : '发送'; }
   renderNotice() {
@@ -182,7 +184,7 @@ export class WorkflowConversationUI {
     const state = this.state(), groups = conversationTurnGroups(state.conversation.turns); this.subtitle.textContent = this.editor.nodeLibrary?.nested ? '内部编辑中 · 请先返回主流程' : this.editor.libraryReadOnly ? '工作流只读 · 历史对话可查看' : this.getBackend()?.state === 'ready' ? 'Hermes 已连接 · 对话自动保存' : '对话自动保存 · AI 需要连接 Hermes';
     this.renderNotice(); this.renderPending(groups); this.messages.replaceChildren();
     if (!groups.latest) {
-      const empty = element('div', 'wf-conversation-empty'); empty.append(element('span', 'wf-conversation-empty-mark', '↗'), element('h3', '', '从一句描述开始'), element('p', '', '描述要做什么，在画布确认节点；运行后直接回复结果，或选中节点提出改进。'));
+      const empty = element('div', 'wf-conversation-empty'); empty.append(element('span', 'wf-conversation-empty-mark', '↗'), element('h3', '', '从一句描述开始'), element('p', '', '在这里描述任务、确认修改、运行和反馈。固定任务配置一次，之后直接运行；需要时再打开画布查看过程。'));
       empty.append(button('帮我搭建一个文本清理流程', () => { state.intent = 'workflow'; state.draft = '创建一个文本输入 → 去除首尾空白 → 非空文本校验 → 产物输出的工作流。先搭建，不运行。'; this.render(); this.input.focus(); }, 'wf-conversation-suggestion')); this.messages.append(empty);
     } else {
       if (groups.history.length) {
@@ -207,7 +209,7 @@ export class WorkflowConversationUI {
     if (turn.assistant?.operations?.length) assistant.append(this.proposalView(turn));
     if (Array.isArray(turn.actions) && turn.actions.length && !turn.outcome && !['complete', 'applied', 'dismissed'].includes(turn.status)) { const actions = element('div', 'wf-conversation-actions'); for (const action of turn.actions.filter(item => item.kind !== 'mark-applied')) { const item = button(action.label || action.kind, () => void this.performAction(turn, action), 'wf-button' + (action.kind === 'review-approve' ? ' primary' : '')); item.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:${action.id}`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(item); if (action.context?.nodeId || action.context?.runId) actions.append(element('p', 'wf-conversation-message-scope', this.describeContext(action.context).join(' / '))); } if (actions.children.length) assistant.append(actions); }
     if (turn.outcome) { const uncertain = ['rejected', 'unknown', 'started'].includes(turn.outcome.status), outcome = element('p', uncertain ? 'wf-conversation-error' : 'wf-conversation-outcome', uncertain ? turn.outcome.error || '操作结果尚未确认，请核对当前运行状态。系统不会自动重复操作。' : turn.outcome.label || turn.outcome.message || (turn.outcome.action === 'mark-applied' || turn.outcome.applied ? '节点修改已应用，可使用画布撤销。' : '操作已记录。')); assistant.append(outcome); }
-    if (['error', 'interrupted'].includes(turn.status)) assistant.append(button('载入消息重试', () => { const state = this.state(); state.draft = turn.user?.text || ''; state.intent = turn.user?.intent || 'discuss'; this.focusContext(turn.user?.context || {}); this.render(); this.input.focus(); }, 'wf-button'));
+    if (['error', 'interrupted'].includes(turn.status)) assistant.append(button('载入消息重试', () => { const state = this.state(); state.draft = turn.user?.text || ''; state.intent = 'auto'; this.focusContext(turn.user?.context || {}); this.render(); this.input.focus(); }, 'wf-button'));
     if (canDismissConversationTurn(turn)) { const dismiss = button('结束此事项', () => void this.dismissTurn(turn), 'wf-conversation-link'); dismiss.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:dismiss`) || this.editor.libraryReadOnly; assistant.append(dismiss); }
     section.append(assistant); return section;
   }
@@ -229,15 +231,15 @@ export class WorkflowConversationUI {
     const failedRun = this.runtime?.currentRun?.(), failure = failedRun?.workflowId === this.currentDocument()?.id && ['error', 'interrupted', 'unknown'].includes(failedRun.status) ? failedRun : null;
     this.pendingHost.hidden = !pending.length && !other.length && !failure; if (this.pendingHost.hidden) return;
     const title = element('h3', '', `待处理 · ${pending.length + other.length + Number(Boolean(failure))}`); this.pendingHost.append(title);
-    if (failure) this.pendingHost.append(button(`运行${STUDIO_STATUS[failure.status] || '异常'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'feedback'; this.render(); }, 'wf-conversation-pending-target'));
+    if (failure) this.pendingHost.append(button(`运行${STUDIO_STATUS[failure.status] || '异常'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'));
     for (const item of pending) {
       const row = element('div', 'wf-conversation-pending-item'), selected = this.attachment?.runId === item.context?.runId && this.attachment?.nodeId === item.context?.nodeId && this.attachment?.attempt === item.context?.attempt;
-      row.classList.toggle('is-selected', selected); const target = button(item.label || '待审核产物', () => { this.focusContext(item.context); this.activeReview = item.id; this.state().intent = 'feedback'; this.render(); }, 'wf-conversation-pending-target'); target.title = this.describeContext(item.context).join(' / '); row.append(target);
+      row.classList.toggle('is-selected', selected); const target = button(item.label || '待审核产物', () => { this.focusContext(item.context); this.activeReview = item.id; this.state().intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'); target.title = this.describeContext(item.context).join(' / '); row.append(target);
       row.append(element('p', 'wf-conversation-message-scope', this.describeContext(item.context).slice(1).join(' / ')));
       if (selected || this.activeReview === item.id) {
         if (item.artifacts?.length) row.append(this.artifactGallery(item.artifacts, item.context));
         const actions = element('div', 'wf-conversation-actions');
-        const approve = button('通过并继续', () => void this.sendReview(item, 'approve'), 'wf-button primary'), revise = button('填写修改意见', () => { this.focusContext(item.context); state.intent = 'feedback'; state.draft = '要求修改：'; this.render(); this.input.focus(); }), stop = button('停止此审核分支', () => void this.sendReview(item, 'stop'));
+        const approve = button('通过并继续', () => void this.sendReview(item, 'approve'), 'wf-button primary'), revise = button('填写修改意见', () => { this.focusContext(item.context); state.intent = 'auto'; state.draft = '要求修改：'; this.render(); this.input.focus(); }), stop = button('停止此审核分支', () => void this.sendReview(item, 'stop'));
         for (const control of [approve, revise, stop]) control.disabled = state.sending || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested);
         actions.append(approve, revise, stop); row.append(actions);
       }
@@ -252,7 +254,7 @@ export class WorkflowConversationUI {
       if (image(item) && url) { const link = element('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener'; const picture = element('img'); picture.src = url; picture.alt = clean(item.label || item.name || '本次产物'); picture.loading = 'lazy'; link.append(picture); card.append(link); }
       card.append(element('figcaption', '', item.label || item.name || item.path?.split('/').at(-1) || '产物'));
       const footer = element('div', 'wf-conversation-artifact-footer'); if (url || download) { const link = element('a', 'wf-conversation-link', image(item) ? '查看原图' : '打开文件'); link.href = url || download; link.target = '_blank'; link.rel = 'noopener'; footer.append(link); }
-      if (id) footer.append(button('回复此产物', () => { const runId = context.nodeId ? context.runId : item.runId || context.runId, run = this.runtime?.runs?.get(runId), record = run?.nodes?.[context.nodeId || item.nodeId], target = { ...context, runId, nodeId: context.nodeId || item.nodeId, ...(record?.attempt !== undefined ? { attempt: record.attempt } : Number.isInteger(item.attempt) ? { attempt: item.attempt } : {}), ...(record?.attemptId ? { attemptId: record.attemptId } : {}) }; this.focusContext({ ...target, artifactIds: [id], ...(item.sha256 ? { artifactHashes: [{ id, sha256: item.sha256 }] } : {}) }); this.state().intent = 'feedback'; this.render(); }, 'wf-conversation-link'));
+      if (id) footer.append(button('回复此产物', () => { const runId = context.nodeId ? context.runId : item.runId || context.runId, run = this.runtime?.runs?.get(runId), record = run?.nodes?.[context.nodeId || item.nodeId], target = { ...context, runId, nodeId: context.nodeId || item.nodeId, ...(record?.attempt !== undefined ? { attempt: record.attempt } : Number.isInteger(item.attempt) ? { attempt: item.attempt } : {}), ...(record?.attemptId ? { attemptId: record.attemptId } : {}) }; this.focusContext({ ...target, artifactIds: [id], ...(item.sha256 ? { artifactHashes: [{ id, sha256: item.sha256 }] } : {}) }); this.state().intent = 'auto'; this.render(); }, 'wf-conversation-link'));
       card.append(footer); gallery.append(card);
     }
     return gallery;
@@ -272,20 +274,28 @@ export class WorkflowConversationUI {
     }
     if (run.output !== undefined && run.output !== null) box.append(element('pre', 'wf-conversation-result-text', truncate(valueText(run.output), 5000))); if (run.error) box.append(element('p', 'wf-conversation-error', valueText(run.error)));
     if (artifacts.length) box.append(this.artifactGallery(artifacts.slice(-12), context));
-    const actions = element('div', 'wf-conversation-actions'); actions.append(button('回复本次运行', () => { this.focusContext(context); this.state().intent = 'feedback'; this.render(); }, 'wf-conversation-link'));
+    const actions = element('div', 'wf-conversation-actions'); actions.append(button('回复本次运行', () => { this.focusContext(context); this.state().intent = 'auto'; this.render(); }, 'wf-conversation-link'));
     actions.append(button('查看运行记录与日志', () => this.runtime?.setExpanded(true), 'wf-conversation-link')); box.append(actions);
   }
   async startRun() {
-    if (!this.runtime || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return; const id = this.workflowId; await this.runtime.start(); if (this.workflowId !== id) return;
-    if (this.runtime.notice && !this.runtime.notice.hidden && this.runtime.notice.classList.contains('error')) this.state(id).error = this.runtime.notice.textContent;
+    if (!this.runtime || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return false; const id = this.workflowId; await this.runtime.start(); if (this.workflowId !== id) return false;
+    const rejected = this.runtime.notice && !this.runtime.notice.hidden && this.runtime.notice.classList.contains('error');
+    if (rejected) this.state(id).error = this.runtime.notice.textContent;
     else { const run = this.runtime.currentRun?.(); if (run?.workflowId === id) { this.runtime.setExpanded(false); this.resultOpen = run.id; this.state(id).error = ''; } }
-    this.render();
+    this.render(); return !rejected;
   }
   async sendReview(item, action) { const text = action === 'approve' ? '通过' : '停止本次运行'; await this.send({ text, intent: 'feedback', context: clone(item.context), clientMessageId: crypto.randomUUID() }); }
   async send(retry) {
     const id = this.workflowId, state = this.state(id); if (state.sending || this.editor.libraryReadOnly || this.editor.nodeLibrary?.nested) return;
     const text = (retry?.text ?? state.draft).trim(); if (!text || !state.loaded) return;
     if (state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) { state.error = 'AI 正在回复上一条消息，请完成后继续。'; this.renderNotice(); return; }
+    if (!retry && isConversationRunCommand(text)) {
+      state.sending = true; const messageEdit = state.messageEdit; this.render();
+      try { if (await this.startRun() && state.messageEdit === messageEdit && state.draft.trim() === text) state.draft = ''; }
+      catch (error) { state.error = `运行未完成：${error.message}`; }
+      finally { state.sending = false; if (this.workflowId === id) this.render(); }
+      return;
+    }
     const request = retry || { text, intent: state.intent, context: clone(this.getContext()), clientMessageId: crypto.randomUUID() }, messageEdit = state.messageEdit; if (!request.document) request.document = clone(this.currentDocument()); state.sending = true; state.error = ''; state.retry = null; this.render();
     try {
       const document = request.document; if (document.id !== id || this.currentDocument().id !== id) throw new Error('工作流已切换，请在对应工作流中发送。');

@@ -21,6 +21,19 @@ function run(document = chain(), overrides = {}) {
       'skill-1': { status: 'running', input: 0, partialText: 'second partial', sessionId: 'second-session' }, exit: { status: 'pending' } }, ...overrides };
 }
 
+test('result feedback opens the same conversation with automatic intent and the exact artifact version', () => {
+  const value = run();
+  value.nodes['skill-0'] = { status: 'complete', attempt: 2, attemptId: 'attempt-two', artifacts: [{ id: 'report-file', sha256: 'a'.repeat(64) }] };
+  let target;
+  const runtime = Object.create(WorkflowRuntimeUI.prototype);
+  Object.assign(runtime, { currentRun: () => value, selectedNodeId: 'skill-0', editor: { conversation: {
+    focusContext(context, options) { target = { context, options }; },
+  } }, feedback: { canOpen() { throw Error('The separate feedback form must not be used.'); } } });
+  runtime.openFeedback();
+  assert.deepEqual(target, { context: { runId: value.id, nodeId: 'skill-0', attempt: 2, attemptId: 'attempt-two',
+    artifactIds: ['report-file'], artifactHashes: [{ id: 'report-file', sha256: 'a'.repeat(64) }] }, options: { intent: 'auto' } });
+});
+
 test('historical order follows snapshot edges rather than node storage order', () => {
   const value = run(); delete value.nodeOrder; value.document.nodes.reverse();
   assert.deepEqual(runtimeNodeOrder(value), ['entry', 'skill-0', 'skill-1', 'exit']);
@@ -310,7 +323,7 @@ test('result toolbar feedback entry only opens an eligible review and never subm
   fakeDOM(t); const center = new FakeElement('div'), root = new FakeElement('div'), instance = Object.create(WorkflowRuntimeUI.prototype); root.querySelector = () => center; instance.editor = { root };
   instance.mount(); const calls = []; instance.input.value = 'next input stays'; instance.api = () => { throw new Error('opening feedback must not submit'); };
   instance.feedback = { canOpen: () => false, open: () => calls.push('open') }; instance.setExpanded = () => calls.push('expanded');
-  assert.equal(instance.feedbackButton.textContent, '反馈与改进'); assert.equal(instance.feedbackButton.disabled, true);
+  assert.equal(instance.feedbackButton.textContent, '在对话中反馈'); assert.equal(instance.feedbackButton.disabled, true);
   instance.feedbackButton.listeners.get('click')(); assert.deepEqual(calls, []);
   instance.feedback.canOpen = () => true; instance.feedbackButton.disabled = false; instance.feedbackButton.listeners.get('click')();
   assert.deepEqual(calls, ['expanded', 'open']); assert.equal(instance.input.value, 'next input stays');

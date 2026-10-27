@@ -1,13 +1,13 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { validateDocument } from '../../shared/workflow/workflow-model.mjs';
-import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
+import { validateDocument, getPorts } from '../../shared/workflow/workflow-model.mjs';
+import { planWorkflow, learningBranch } from '../../shared/workflow/workflow-plan.mjs';
 import { planWorkflowConversation } from './workflow-conversation-planner.mjs';
 import { documentFingerprint, applyWorkflowOperations } from '../../shared/workflow/workflow-conversation-commands.mjs';
 import { redact } from '../hermes-adapter.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
-const ACTIONS = new Set(['review-approve', 'review-revise', 'review-stop', 'rerun', 'record-feedback', 'learn-feedback', 'mark-applied', 'dismiss-turn']);
+const ACTIONS = new Set(['review-approve', 'review-revise', 'review-stop', 'rerun', 'record-feedback', 'learn-feedback', 'mark-applied', 'dismiss-turn', 'select-run', 'select-learning-target']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const clone = value => JSON.parse(JSON.stringify(value));
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
@@ -63,6 +63,22 @@ function directIntent(value, intent) {
     return { action: 'rerun', feedback: input.replace(/^(?:重做|重跑|重新运行)(?:此节点|这个节点|当前节点|该节点)?[：:,，\s]*/, '').trim() };
   }
   return null;
+}
+// Automatic routing handles only explicit requests locally. Open questions and
+// ambiguous prose stay with the planner; mentioning learning is not permission
+// to start a learning batch.
+function conversationIntent(value, requested, context = {}) {
+  if (requested && requested !== 'auto') return requested;
+  const input = value.trim();
+  if (/[?？]\s*$|(?:可以|能否|能不能|可不可以|是否|如何|怎么|为什么|为何)/.test(input)
+    && !/^(?:请|帮我|把|将)/.test(input)) return 'discuss';
+  if (/(?:固定任务|默认输入|默认需求|一键运行|不(?:需要|用).{0,12}输入|无需.{0,12}输入|补全.{0,10}配置)/.test(input)) return 'workflow';
+  if (/(?:以后|今后|下次|后续|永久).{0,20}(?:都|按|采用|使用|保持|格式|规则)|(?:改进|优化|训练|学习|修改).{0,20}(?:Skill|技能)|(?:Skill|技能).{0,12}(?:改进|优化|训练|学习)/i.test(input)) return 'skill';
+  if (context.runId && !/(?:工作流|流程|节点|连线|默认配置)/.test(input)
+    && /(?:结果|产物|表格|Excel|文件|表头|列名|列顺序|字体|颜色|图片)/i.test(input)
+    && /(?:改|调整|不对|错误|缺|遗漏|需要|希望)/.test(input)) return 'feedback';
+  if (/^(?:反馈|记录反馈|保存反馈|产物反馈)[：:,，\s]|(?:这次|本次|这份|这个).{0,12}(?:结果|产物|表格|Excel|文件).{0,20}(?:不对|问题|需要|希望|改|调整)/i.test(input)) return 'feedback';
+  return /^(?:请|帮我|把|将|添加|删除|修改|设置|创建|搭建|调整|改成|改为|配置)/.test(input) ? 'workflow' : 'discuss';
 }
 const artifactView = artifact => Object.fromEntries(['id', 'name', 'label', 'mimeType', 'sha256', 'size', 'kind', 'nodeId', 'attempt'].filter(key => artifact[key] !== undefined).map(key => [key, artifact[key]]));
 
@@ -210,25 +226,155 @@ export class WorkflowConversations {
     return { context: { ...context, attempt: record.attempt || 0, attemptId: record.attemptId || null,
       artifactIds: [...(context.artifactIds || [])], artifactHashes: artifacts.map(item => ({ id: item.id, sha256: item.sha256 })) }, run, node, record };
   }
+  feedbackRuns(workflowId, context) {
+    return this.app.workflows.list(workflowId).filter(run => TERMINAL.has(run.status) && !run.learningId && !run.memoryScopeId
+      && run.document?.mode === 'execute' && (!context.nodeId || run.document.nodes.some(node => node.id === context.nodeId)));
+  }
+  learningTargets(document, context, requestText) {
+    const skills = document.nodes.filter(node => node.type === 'skill');
+    const selected = document.nodes.find(node => node.id === context.nodeId);
+    if (selected?.type === 'skill') return [selected];
+    const namedRefs = skills.filter(node => node.config.skillRef && requestText.toLowerCase().includes(node.config.skillRef.toLowerCase()));
+    if (namedRefs.length) return namedRefs;
+    const namedTitles = skills.filter(node => !/^(?:Skill|AI\s*\/\s*Skill|技能)$/i.test(node.title) && requestText.includes(node.title));
+    if (namedTitles.length) return namedTitles;
+    const outputs = document.nodes.filter(node => node.type === 'output' && node.config.stage !== 'intermediate');
+    const source = selected || (outputs.length === 1 ? outputs[0] : null);
+    if (!source) return skills;
+    const found = new Map(), seen = new Set(), pending = [source.id];
+    while (pending.length) {
+      const id = pending.pop(); if (seen.has(id)) continue; seen.add(id);
+      const node = document.nodes.find(item => item.id === id);
+      if (node?.type === 'skill') { found.set(id, node); continue; }
+      for (const edge of document.edges.filter(edge => edge.targetNode === id)) pending.push(edge.sourceNode);
+    }
+    return [...found.values()];
+  }
+  prepareLearningScope(turn, document, context) {
+    const targets = this.learningTargets(document, context, turn.user.text);
+    if (!targets.length) {
+      turn.status = 'complete'; turn.actions = [];
+      turn.assistant = { text: '这个流程还没有可改进的真实 Skill。请直接在这里描述需要的能力，我会先提出流程配置；应用后点击“运行当前流程”，拿到结果再告诉我具体差异。' }; return;
+    }
+    if (targets.length !== 1) {
+      turn.status = 'awaiting_action'; turn.assistant = { text: '这条流程包含多个能力。请在这里选择希望以后沿用改进规则的能力，其他能力保持原样。' };
+      turn.actions = targets.map(node => ({ id: 'action-' + randomUUID(), kind: 'select-learning-target', label: node.title,
+        context: { nodeId: node.id } })); return;
+    }
+    const target = targets[0]; let branch;
+    try { branch = learningBranch(document); } catch { branch = null; }
+    if (branch && !branch.improvementNode.config.targetSkillNodeIds.includes(target.id)) {
+      const operations = [{ op: 'update-node', nodeId: branch.improvementNode.id, config: { targetSkillNodeIds: [target.id] } }];
+      const proposal = applyWorkflowOperations(document, operations);
+      turn.status = 'proposed'; turn.assistant = { text: `我会将后续改进范围限定为「${target.title}」。应用后重新运行一次，再在这里回复结果；已有运行快照保持原样。`,
+        operations, summary: proposal.summary, baseFingerprint: documentFingerprint(document) };
+      turn.actions = [{ id: 'action-' + randomUUID(), kind: 'mark-applied', label: '应用任务配置', context }]; return;
+    }
+    if (branch || document.nodes.some(node => ['evaluation', 'improvement'].includes(node.type))) {
+      turn.status = 'complete'; turn.actions = [];
+      turn.assistant = { text: '改进配置已保留。请先在这里点击“运行当前流程”获得一份结果，再直接回复具体差异和以后要沿用的规则。已有结果的执行快照不会被新配置改写。' }; return;
+    }
+    const outputs = document.nodes.filter(node => node.type === 'output' && node.config.stage !== 'intermediate');
+    const source = outputs.length === 1 ? outputs[0] : target;
+    const ports = getPorts(source).outputs;
+    const sourcePort = ports.find(port => port.id === 'learning') || ports.find(port => port.id === 'out') || ports[0];
+    if (!sourcePort) {
+      turn.status = 'complete'; turn.actions = []; turn.assistant = { text: '当前能力还没有可对比的输出。请在这里描述需要交付的成果，我会先提出输出配置。' }; return;
+    }
+    const operations = [
+      { op: 'add-node', ref: 'feedback-comparison', type: 'evaluation', title: '对比本次结果', config: { comparison: 'model' }, x: source.x + 330, y: source.y + 240 },
+      { op: 'add-node', ref: 'feedback-improvement', type: 'improvement', title: '生成改进候选', config: { targetSkillNodeIds: [target.id] }, x: source.x + 660, y: source.y + 240 },
+      { op: 'connect', sourceNode: source.id, sourcePort: sourcePort.id, targetNode: 'feedback-comparison', targetPort: 'in' },
+      { op: 'connect', sourceNode: 'feedback-comparison', sourcePort: 'out', targetNode: 'feedback-improvement', targetPort: 'in' },
+    ];
+    const proposal = applyWorkflowOperations(document, operations);
+    turn.status = 'proposed'; turn.assistant = { text: `我会仅为「${target.title}」准备可复用的改进范围。应用下面的配置后，直接在这里运行一次，再回复具体差异；原 Skill 与已有结果保留，新候选需验证后采用。`, operations,
+      summary: proposal.summary, baseFingerprint: documentFingerprint(document) };
+    turn.actions = [{ id: 'action-' + randomUUID(), kind: 'mark-applied', label: '应用任务配置', context }];
+  }
+  prepareFeedback(turn, document, bound, intent, automatic = false) {
+    if (!bound.run || !TERMINAL.has(bound.run.status)) {
+      if (intent === 'skill') this.prepareLearningScope(turn, document, bound.context);
+      else { turn.status = 'complete'; turn.actions = []; turn.assistant = { text: '当前还没有可关联的已结束结果。请先在这里点击“运行当前流程”；结果出现后，直接回复这段对话即可提出反馈。' }; }
+      return;
+    }
+    if (intent === 'skill' && automatic) {
+      if (!bound.node) {
+        const targets = this.learningTargets(bound.run.document, bound.context, turn.user.text);
+        if (targets.length !== 1) {
+          turn.status = 'awaiting_action'; turn.assistant = { text: '请选择这份结果中需要以后沿用改进规则的能力，其余能力保持原样。' };
+          turn.actions = targets.map(node => ({ id: 'action-' + randomUUID(), kind: 'select-run', label: node.title,
+            context: { ...bound.context, nodeId: node.id } })); return;
+        }
+        bound = this.bindContext(turn.workflowId, { ...bound.context, nodeId: targets[0].id }, document);
+      }
+      let branch;
+      try { branch = learningBranch(bound.run.document); } catch { branch = null; }
+      if (!branch) { this.prepareLearningScope(turn, document, bound.context); return; }
+      const eligibility = this.app.feedback.get(bound.run.id);
+      if (!eligibility.canReview) { turn.status = 'complete'; turn.actions = []; turn.assistant = { text: eligibility.reason + ' 可以继续在这里描述要调整的任务配置。' }; return; }
+      try { this.selectedLearningTargets(bound); }
+      catch { this.prepareLearningScope(turn, document, bound.context); return; }
+    }
+    turn.status = 'awaiting_action';
+    turn.assistant = { text: intent === 'skill' ? '已关联这份结果与对应能力。确认后将生成以后可沿用的规则候选，验证并采用前保持原版本。' : '已关联这份结果。反馈只会记录本次问题；如希望以后沿用，请继续说明“以后都按这个规则”。' };
+    turn.actions = [{ id: 'action-' + randomUUID(), kind: intent === 'skill' ? 'learn-feedback' : 'record-feedback',
+      label: intent === 'skill' ? '生成可复用规则候选' : '保存这份结果的反馈', context: bound.context, feedback: turn.user.text }];
+    if (intent === 'feedback' && automatic) {
+      const context = this.resultProducerContext(bound);
+      if (context) {
+        const node = bound.run.document.nodes.find(node => node.id === context.nodeId);
+        turn.actions.push({ id: 'action-' + randomUUID(), kind: 'rerun', label: `按反馈重做「${node.title}」`, context, feedback: turn.user.text });
+        turn.assistant.text += ' 也可以选择按反馈重做这次结果，原能力版本保持固定。';
+      }
+    }
+  }
+  resultProducerContext(bound) {
+    const run = bound.run, document = run.document;
+    const outputs = document.nodes.filter(node => node.type === 'output' && node.config.stage !== 'intermediate');
+    const source = bound.node || (outputs.length === 1 ? outputs[0] : null);
+    if (!source) return null;
+    const producers = new Set(['skill', 'tool', 'transform', 'subflow', 'foreach', 'loop']), found = new Set(), seen = new Set(), pending = [source.id];
+    while (pending.length) {
+      const id = pending.pop(); if (seen.has(id)) continue; seen.add(id);
+      const node = document.nodes.find(node => node.id === id);
+      if (producers.has(node?.type)) { found.add(id); continue; }
+      for (const edge of document.edges.filter(edge => edge.targetNode === id)) pending.push(edge.sourceNode);
+    }
+    if (found.size !== 1) return null;
+    const nodeId = [...found][0], record = run.nodes[nodeId];
+    // Fixed tools and code do not consume a prose revision. Keep their explicit
+    // rerun command available without claiming it will implement new rules.
+    if (document.nodes.find(node => node.id === nodeId)?.type !== 'skill') return null;
+    if (!record || !Number.isSafeInteger(record.attempt) || record.attempt < 1 || !record.attemptId) return null;
+    try {
+      return this.bindContext(run.workflowId, { runId: run.id, nodeId, attempt: record.attempt, attemptId: record.attemptId,
+        artifactHashes: (record.artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) }, document).context;
+    } catch { return null; }
+  }
   async message(workflowId, input) {
     this.assertOpen(workflowId, true);
     object(input, ['clientMessageId', 'text', 'context', 'document', 'intent'], '对话请求');
     identifier(input.clientMessageId, '消息幂等 ID'); text(input.text, '消息');
-    if (input.intent !== undefined && !['workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
+    if (input.intent !== undefined && !['auto', 'workflow', 'redo', 'skill', 'discuss', 'feedback'].includes(input.intent)) fail('对话意图无效。');
     const document = safeDocument(input.document, workflowId), requestDigest = digest(input);
     const existing = this.db.prepare('SELECT id,private_value FROM workflow_conversation_turns WHERE workflow_id=? AND client_message_id=?').get(workflowId, input.clientMessageId);
     if (existing) {
       if (JSON.parse(existing.private_value).requestDigest !== requestDigest) fail('相同消息 ID 不能对应不同内容。', 409);
       return { ...this.get(workflowId), turn: this.readTurn(workflowId, existing.id).turn };
     }
-    const bound = this.bindContext(workflowId, input.context, document);
+    const requestedContext = contextInput(input.context);
+    const intent = conversationIntent(input.text, input.intent, requestedContext), automatic = !input.intent || input.intent === 'auto';
+    const candidates = ['feedback', 'skill'].includes(intent) && !requestedContext.runId ? this.feedbackRuns(workflowId, requestedContext) : [];
+    const selectedContext = candidates.length === 1 ? { ...requestedContext, runId: candidates[0].id } : requestedContext;
+    const bound = this.bindContext(workflowId, selectedContext, document);
     const createdAt = now(), turn = { id: 'turn-' + randomUUID(), workflowId, clientMessageId: input.clientMessageId,
-      user: { text: input.text, context: bound.context, intent: input.intent || 'discuss' },
+      user: { text: input.text, context: bound.context, intent },
       assistant: { text: '正在整理你的要求…' }, actions: [], status: 'thinking', createdAt, updatedAt: createdAt };
     this.db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
-      .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document }));
+      .run(turn.id, workflowId, input.clientMessageId, createdAt, JSON.stringify(turn), JSON.stringify({ requestDigest, document, automatic }));
     this.update(turn);
-    const direct = directIntent(input.text, input.intent);
+    const direct = directIntent(input.text, intent);
     if (direct) {
       const candidates = direct.action.startsWith('review-') ? this.pending(workflowId) : [];
       const exact = !!bound.node && Number.isSafeInteger(input.context?.attempt) && input.context.attempt > 0
@@ -245,11 +391,17 @@ export class WorkflowConversations {
       this.update(turn); this.emit(workflowId);
       return { ...this.get(workflowId), turn };
     }
-    if (input.intent === 'feedback' || input.intent === 'skill') {
-      turn.status = 'awaiting_action';
-      turn.assistant.text = input.intent === 'skill' ? '已保留对应运行与节点版本。改进 Skill 会生成待验证候选，请明确启动反馈学习。' : '这条反馈会关联当前工作流、运行、节点和产物版本，供后续修改参考。';
-      turn.actions = [{ id: 'action-' + randomUUID(), kind: input.intent === 'skill' ? 'learn-feedback' : 'record-feedback',
-        label: input.intent === 'skill' ? '根据反馈改进 Skill' : '保存反馈', context: bound.context, feedback: input.text }];
+    if (intent === 'feedback' || intent === 'skill') {
+      if (candidates.length > 1) {
+        turn.status = 'awaiting_action'; turn.assistant = { text: '有多份已结束结果，请在这里选择本条反馈对应的那一份。' };
+        turn.actions = candidates.map(run => ({ id: 'action-' + randomUUID(), kind: 'select-run', label: `${run.document.title || '本次结果'} · ${run.startedAt || run.id.slice(0, 8)} · ${run.status}`,
+          context: { ...requestedContext, runId: run.id } }));
+      } else if (intent === 'feedback' && !automatic && !bound.run) {
+        // Existing explicit feedback callers may intentionally record a general
+        // workflow note. Automatic result feedback asks for a real result.
+        turn.status = 'awaiting_action'; turn.assistant = { text: '这条反馈会关联当前工作流，供后续修改参考。' };
+        turn.actions = [{ id: 'action-' + randomUUID(), kind: 'record-feedback', label: '保存反馈', context: bound.context, feedback: input.text }];
+      } else this.prepareFeedback(turn, document, bound, intent, automatic);
       this.update(turn); this.emit(workflowId);
     } else {
       this.emit(workflowId);
@@ -333,6 +485,13 @@ export class WorkflowConversations {
     const document = privateValue.document;
     const checkedContext = input.action === 'mark-applied' ? Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'documentRevision')) : context;
     const bound = input.action === 'mark-applied' ? { context } : this.bindContext(workflowId, checkedContext, document, { exact: input.action.startsWith('review-') || input.action === 'rerun', review: input.action.startsWith('review-') });
+    if (input.action === 'select-run' || input.action === 'select-learning-target') {
+      turn.selection = { context: bound.context, selectedAt: now() };
+      if (input.action === 'select-learning-target') this.prepareLearningScope(turn, document, bound.context);
+      else this.prepareFeedback(turn, document, bound, turn.user.intent, privateValue.automatic);
+      turn.updatedAt = now(); this.update(turn); this.emit(workflowId);
+      return { ...this.get(workflowId), turn };
+    }
     if (input.action === 'review-revise' && !feedback.trim()) fail('请填写具体修改要求。');
     if (input.action === 'mark-applied') {
       if (!Array.isArray(turn.assistant.operations) || !turn.assistant.operations.length) fail('此轮没有可应用的流程修改。', 409);
@@ -390,7 +549,8 @@ export class WorkflowConversations {
       controller.abort();
       const row = this.db.prepare('SELECT workflow_id FROM workflow_conversation_turns WHERE id=?').get(id);
       if (!row) continue;
-      const { turn } = this.readTurn(row.workflow_id, id); turn.status = 'interrupted'; turn.assistant.text = '对话生成已停止；系统不会自动重放。'; turn.updatedAt = now(); this.update(turn);
+      const { turn } = this.readTurn(row.workflow_id, id); turn.status = 'interrupted'; turn.assistant.text = '对话生成已停止；系统不会自动重放。';
+      turn.updatedAt = now(); this.update(turn);
     }
     this.active.clear();
   }

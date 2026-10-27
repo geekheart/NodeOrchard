@@ -492,8 +492,10 @@ test('delegated subflow waits open the actual child review and never approve the
   let box = studio.reviewControls(parent, 'subflow'); assert.equal(box.children.filter(item => item.tag === 'button').length, 1); assert.equal(box.children.at(-1).textContent, '查看子流程审核'); assert.equal(box.children.some(item => item.tag === 'textarea'), false); await box.children.at(-1).listeners.click(); assert.equal(route, '/api/workflow-runs/child'); box = studio.reviewControls(parent, 'subflow'); const nested = box.children.at(-1); assert.match(nested.children[0].textContent, /审核正面/); assert.equal(nested.children.at(-1).children[0].textContent, '通过并继续');
 });
 
-test('entering run view closes an otherwise empty inspector until the user selects a node', () => {
-  const studio = Object.create(WorkflowStudioUI.prototype); studio.view = 'edit'; studio.viewSwitch = { children: [new FakeElement('button'), new FakeElement('button')] }; studio.editor = { root: { dataset: {} }, settings: { propertiesClosed: false }, applySettings() {} }; studio.runSurface = {}; studio.setTab = () => {}; studio.renderRuntime = () => {}; studio.setView('run'); assert.equal(studio.editor.settings.propertiesClosed, true); assert.equal(studio.runSurface.hidden, false);
+test('entering run view closes editing panels without changing the editing layout preferences', () => {
+  const studio = Object.create(WorkflowStudioUI.prototype); studio.view = 'edit'; studio.viewSwitch = { children: [new FakeElement('button'), new FakeElement('button')] }; studio.editor = { root: { dataset: {} }, settings: { libraryClosed: false, propertiesClosed: false }, applySettings() {} }; studio.runSurface = {}; studio.setTab = () => {}; studio.renderRuntime = () => {}; studio.setView('run');
+  assert.deepEqual(studio.panelSettings(), { libraryClosed: true, propertiesClosed: true }); assert.equal(studio.runSurface.hidden, false); assert.deepEqual(studio.editor.settings, { libraryClosed: false, propertiesClosed: false });
+  studio.panelSettings().libraryClosed = false; studio.setView('edit'); assert.equal(studio.panelSettings(), studio.editor.settings); studio.setView('run'); assert.equal(studio.panelSettings().libraryClosed, false);
 });
 
 test('fixed raw inputs ignore empty browser drafts, preserve explicit overrides and stay isolated between workflows', t => {

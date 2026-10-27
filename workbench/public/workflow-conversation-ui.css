@@ -81,6 +81,9 @@
 .wf-conversation-context { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; max-height: 62px; overflow-y: auto; }
 .wf-conversation-chip { display: inline-block; max-width: 100%; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--secondary); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wf-conversation-composer-options { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.wf-conversation-advanced { min-width: 0; color: var(--muted); font-size: 10px; }
+.wf-conversation-advanced > summary { cursor: pointer; padding: 3px 0; }
+.wf-conversation-advanced[open] select { display: block; margin-top: 5px; max-width: 100%; }
 .wf-conversation-composer select { flex: 1; max-width: 190px; background: var(--surface); padding: 5px 7px; font-size: 11px; }
 .wf-conversation-composer textarea { display: block; width: 100%; min-height: 78px; max-height: 170px; padding: 9px 10px; background: var(--bg); color: var(--text); border-color: var(--strong-line); font-size: 12px; line-height: 1.75; resize: vertical; }
 .wf-conversation-help { color: var(--muted); font-size: 10px; line-height: 1.65; margin-top: 7px; overflow-wrap: anywhere; }

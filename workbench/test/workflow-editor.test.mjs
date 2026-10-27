@@ -73,6 +73,32 @@ function editor(doc = documentWith()) {
 
 function titleField(instance) { instance.titleInput = new FakeElement('input'); instance.titleInput.value = instance.doc.title; instance.bindTitleInput(); return instance.titleInput; }
 
+test('collapsing the canvas hides editing panels and restoring it keeps the saved layout', t => {
+  globalValue(t, 'innerWidth', 1400); globalValue(t, 'requestAnimationFrame', callback => callback());
+  const instance = editor(), classes = new Set(), toggle = new FakeElement('button'), preference = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: false, propertiesClosed: false };
+  instance.settings = { ...preference }; instance.root.classList = { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); } };
+  instance.root.querySelectorAll = selector => selector === '[data-action="toggle-canvas"]' ? [toggle] : [];
+  instance.requestGeometry = () => {}; instance.onCanvasResize = () => {}; instance.cancelGesture = () => {}; instance.renderSelection = () => {};
+  instance.setCanvasClosed(true); assert.equal(toggle.attributes['aria-label'], '显示画布');
+  for (const name of ['canvas-closed', 'library-closed', 'properties-closed']) assert.ok(classes.has(name));
+  assert.deepEqual(instance.settings, { ...preference, canvasClosed: true });
+  instance.selectNode('node-a'); assert.equal(instance.settings.propertiesClosed, false);
+  instance.setCanvasClosed(false); assert.equal(toggle.attributes['aria-label'], '隐藏画布');
+  assert.equal(classes.has('canvas-closed'), false); assert.equal(classes.has('library-closed'), false); assert.equal(classes.has('properties-closed'), false);
+  assert.deepEqual(instance.settings, preference);
+});
+
+test('run-view panel choices do not overwrite editing preferences or hidden-canvas restoration', t => {
+  globalValue(t, 'innerWidth', 1400);
+  const instance = editor(); instance.settings = { libraryClosed: false, propertiesClosed: false, canvasClosed: false }; instance.studio = { view: 'run' };
+  instance.root.classList = { toggle() {} }; instance.root.querySelectorAll = () => []; instance.requestGeometry = () => {};
+  instance.applySettings(); assert.deepEqual(instance.panelSettings(), { libraryClosed: true, propertiesClosed: true });
+  instance.setPanelClosed('library', false); assert.equal(instance.panelSettings().libraryClosed, false);
+  assert.deepEqual(instance.settings, { libraryClosed: false, propertiesClosed: false, canvasClosed: false });
+  instance.studio.view = 'edit'; assert.equal(instance.panelSettings(), instance.settings);
+  instance.studio.view = 'run'; assert.equal(instance.panelSettings().libraryClosed, false, 'explicitly opened run inputs remain open on return');
+});
+
 test('fixed input property edits parse JSON values and clearing them removes the legacy fallback', () => {
   const doc = createDocument({ schemaVersion: 2 }), node = createNode('input', {}, { config: { outputType: 'object', value: '旧版固定输入' } });
   doc.nodes = [node]; const instance = editor(doc);

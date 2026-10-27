@@ -177,7 +177,8 @@ export class WorkflowStudioUI {
     this.view = view; this.editor.root.dataset.studioView = view;
     [...this.viewSwitch.children].forEach((item, index) => item.setAttribute('aria-pressed', String(index === (view === 'edit' ? 0 : 1))));
     this.runSurface.hidden = view !== 'run';
-    if (view === 'run' && changed) { this.editor.settings.libraryClosed = false; this.editor.settings.propertiesClosed = true; this.setTab('inputs'); this.editor.applySettings(); this.renderRuntime(); }
+    if (view === 'run' && changed) { this.panelSettings(); this.setTab('inputs'); this.renderRuntime(); }
+    if (changed) this.editor.applySettings();
     // Inspector-only DOM from run view must not survive an edit-view switch.
     // Unchanged view syncs leave a focused property form and its draft intact.
     if (changed) this.editor.renderProperties?.();
@@ -188,6 +189,9 @@ export class WorkflowStudioUI {
     const library = this.editor.root.querySelector('.wf-library'); library.dataset.tab = tab; this.inputs.hidden = tab !== 'inputs'; this.queue.hidden = tab !== 'queue';
     for (const part of library.querySelectorAll('.wf-library-head,.wf-library-items')) part.hidden = tab !== 'nodes';
     if (tab === 'queue') void this.renderQueue();
+  }
+  panelSettings() {
+    return this.view === 'run' ? this.runPanelSettings ||= { libraryClosed: true, propertiesClosed: true } : this.editor.settings;
   }
   upgradeDocument() {
     try { const doc = validateDocument({ ...this.editor.doc, schemaVersion: 2, settings: { maxConcurrency: 4, outputDirectory: '' } }); this.editor.commit(doc, '升级为并行工作流'); this.editor.toast('已升级。旧节点和连线已保留，可添加具名端口与输入字段。'); }
@@ -261,7 +265,7 @@ export class WorkflowStudioUI {
       const fields = inputEntries(document).length, sourceCount = manifestSourceCount(result.manifest); this.showInputNotice(result.ok ? `资料检查通过${fields ? ` · ${fields} 项输入` : ''}${sourceCount ? ` · ${sourceCount} 项来源文件` : ''}。可以运行。` : '资料未准备好，请按下方提示补齐。', !result.ok);
       for (const old of this.inputs.querySelectorAll('.wf-studio-input-error')) old.remove();
       for (const error of result.errors || []) { const line = element('p', 'wf-studio-input-error', `${error.label || error.key || ''}：${error.message}`); const target = [...this.inputs.querySelectorAll('[data-input-key]')].find(item => item.dataset.inputKey === error.key && item.dataset.nodeId === error.nodeId); (target?.closest('.wf-studio-input-row') || this.inputs).append(line); }
-      if (!quiet || !result.ok) { this.editor.settings.libraryClosed = false; this.editor.applySettings(); this.setTab('inputs'); }
+      if (!quiet || !result.ok) { this.panelSettings().libraryClosed = false; this.editor.applySettings(); this.setTab('inputs'); }
       return result;
     } catch (error) { if (current()) this.showInputNotice(`资料检查失败：${error.message}`, true); return { ok: false, errors: [{ message: error.message }] }; }
     finally { if (ticket === this.preflightRequest) this.check.disabled = false; }
@@ -311,7 +315,7 @@ export class WorkflowStudioUI {
           if (isPath) { const choose = button('选择', () => void this.pickPath(field, control.value, path => { control.value = path; control.dispatchEvent(new Event('change')); }), 'wf-studio-node-action'); choose.setAttribute('aria-label', `${node.title} · 选择${field.label}`); row.append(choose); }
           label.append(row); content.append(label);
         }
-        if (remaining) content.append(button(`准备全部 ${total} 项资料 · 另 ${remaining} 项参数`, () => { this.editor.settings.libraryClosed = false; this.editor.applySettings(); this.setTab('inputs'); }, 'wf-studio-node-action'));
+        if (remaining) content.append(button(`准备全部 ${total} 项资料 · 另 ${remaining} 项参数`, () => { this.panelSettings().libraryClosed = false; this.editor.applySettings(); this.setTab('inputs'); }, 'wf-studio-node-action'));
       }
       if (node.type === 'skill') { const meta = card.querySelector('.wf-node-meta'); if (meta) { const found = this.runtime?.skills?.skills?.find(item => item.name === node.config.skillRef || item.ref === node.config.skillRef); meta.textContent = [found?.displayName || found?.name || node.config.skillRef || '选择 Skill', shortVersion(node.config.version)].filter(Boolean).join(' · '); } }
       if (node.type === 'tool') content.append(button('配置代码 / 工具', () => this.editor.selectNode(node.id), 'wf-studio-node-action'));
@@ -351,7 +355,7 @@ export class WorkflowStudioUI {
     for (const preset of INPUT_FIELD_PRESETS) section.append(button(preset.label, () => {
       const current = this.editor.doc.nodes.find(item => item.id === node.id); if (!current) return;
       if (!this.updateConfig(node.id, { outputType: 'object', fields: mergeInputFields(current.config.fields, preset.fields) })) return;
-      this.setTab('inputs'); this.editor.settings.libraryClosed = false; this.editor.applySettings();
+      this.setTab('inputs'); this.panelSettings().libraryClosed = false; this.editor.applySettings();
     }, 'wf-button'));
     section.append(element('p', 'wf-field-help', '预设只补齐缺少的字段，保留已有配置和自定义字段。请提前准备与当前工程匹配的已核验配置文件、实拍照片和资料目录。'));
     for (const [index, field] of (node.config.fields || []).entries()) { const row = element('div', 'wf-studio-schema-row'); row.append(element('strong', '', field.label), element('small', '', `${field.key} · ${FIELD_KINDS.find(kind => kind[0] === field.kind)?.[1] || field.kind}${field.required ? ' · 必填' : ''}`), button('删除', () => this.updateConfig(node.id, { fields: node.config.fields.filter((_, i) => i !== index) }), 'wf-button wf-studio-small')); section.append(row); }
@@ -517,7 +521,7 @@ export class WorkflowStudioUI {
     if (this.editor?.conversation) box.append(button('在对话中回复此审核', () => this.editor.conversation.focusContext({
       runId: run.id, nodeId: id, attempt: state.attempt, attemptId: state.attemptId,
       artifactIds: (state.artifacts || []).map(item => item.id || item.artifactId),
-    }, { intent: 'feedback' })));
+    }, { intent: 'auto' })));
     if (state.review?.feedback && state.review.revisionCount) box.append(element('p', 'wf-studio-review-revision', `第 ${state.review.revisionCount} 次修改要求：${state.review.feedback}`));
     const targets = reviewTargetArtifacts(run, id);
     if (targets.length) {
@@ -568,7 +572,7 @@ export class WorkflowStudioUI {
   artifactCards(items, { run, showOrigin = false } = {}) {
     const list = element('div', 'wf-studio-artifacts');
     for (const item of items) { const card = element('article', 'wf-studio-artifact'); const preview = item.previewUrl; if (preview && /^image\//.test(item.mimeType || '')) { const link = element('a'); link.href = preview; link.target = '_blank'; link.rel = 'noopener'; const img = element('img'); img.src = preview; img.alt = item.label || item.name || '产物预览'; img.loading = 'lazy'; link.append(img); card.append(link); }
-      card.append(element('strong', '', item.label || item.name || '产物'), element('small', '', [item.mimeType, Number.isFinite(item.size) ? `${Math.max(1, Math.round(item.size / 1024))} KB` : ''].filter(Boolean).join(' · '))); if (showOrigin) { const producer = run?.document?.nodes?.find(node => node.id === item.nodeId); card.append(element('small', '', `来源：${producer?.title || item.nodeId || '未记录节点'} · 第 ${item.attempt || 1} 次尝试`)); } const actions = element('div', 'wf-studio-inline-actions'); if (preview) { const link = element('a', 'wf-button', '预览'); link.href = preview; link.target = '_blank'; link.rel = 'noopener'; actions.append(link); } if (item.downloadUrl) { const link = element('a', 'wf-button', '下载'); link.href = item.downloadUrl; link.download = item.name || ''; actions.append(link); } if (run && this.editor?.conversation) actions.append(button('反馈此产物', () => this.editor.conversation.focusContext({ runId: run.id, nodeId: item.nodeId, attempt: item.attempt, attemptId: run.nodes?.[item.nodeId]?.attemptId, artifactIds: [item.id || item.artifactId] }, { intent: 'feedback' }))); card.append(actions); list.append(card); }
+      card.append(element('strong', '', item.label || item.name || '产物'), element('small', '', [item.mimeType, Number.isFinite(item.size) ? `${Math.max(1, Math.round(item.size / 1024))} KB` : ''].filter(Boolean).join(' · '))); if (showOrigin) { const producer = run?.document?.nodes?.find(node => node.id === item.nodeId); card.append(element('small', '', `来源：${producer?.title || item.nodeId || '未记录节点'} · 第 ${item.attempt || 1} 次尝试`)); } const actions = element('div', 'wf-studio-inline-actions'); if (preview) { const link = element('a', 'wf-button', '预览'); link.href = preview; link.target = '_blank'; link.rel = 'noopener'; actions.append(link); } if (item.downloadUrl) { const link = element('a', 'wf-button', '下载'); link.href = item.downloadUrl; link.download = item.name || ''; actions.append(link); } if (run && this.editor?.conversation) actions.append(button('反馈此产物', () => this.editor.conversation.focusContext({ runId: run.id, nodeId: item.nodeId, attempt: item.attempt, attemptId: run.nodes?.[item.nodeId]?.attemptId, artifactIds: [item.id || item.artifactId] }, { intent: 'auto' }))); card.append(actions); list.append(card); }
     return list;
   }
   renderDeliveries(run) {
@@ -614,7 +618,7 @@ export class WorkflowStudioUI {
     const focused = document.activeElement;
     if (focused?.matches?.('.wf-studio-review textarea,.wf-studio-rerun textarea') && this.editor.root.contains(focused)) { if (!this.runtimeRenderDeferred) { this.runtimeRenderDeferred = true; focused.addEventListener('blur', event => { this.runtimeRenderDeferred = false; if (!event.relatedTarget?.closest('.wf-studio-review,.wf-studio-rerun')) this.renderRuntime(); }, { once: true }); } return; }
     const run = this.runtime.currentRun(); this.runSurface.replaceChildren();
-    const heading = element('div', 'wf-studio-run-heading'); heading.append(element('h2', '', run ? STUDIO_STATUS[run.status] || run.status : '准备运行')); const actions = element('div', 'wf-studio-inline-actions'); actions.append(button('查看节点画布', () => this.setView('edit'))); if (run && active(run.status)) actions.append(button(run.status === 'queued' ? '取消排队' : '停止本次运行', () => void this.runtime.interrupt())); if (run?.status === 'complete') actions.append(button('反馈与改进', () => this.editor.conversation ? this.editor.conversation.focusContext({ runId: run.id }, { intent: 'feedback' }) : this.runtime.openFeedback())); heading.append(actions); this.runSurface.append(heading);
+    const heading = element('div', 'wf-studio-run-heading'); heading.append(element('h2', '', run ? STUDIO_STATUS[run.status] || run.status : '准备运行')); const actions = element('div', 'wf-studio-inline-actions'); actions.append(button('查看节点画布', () => this.setView('edit'))); if (run && active(run.status)) actions.append(button(run.status === 'queued' ? '取消排队' : '停止本次运行', () => void this.runtime.interrupt())); if (run?.status === 'complete') actions.append(button('在对话中反馈', () => this.editor.conversation ? this.editor.conversation.focusContext({ runId: run.id }, { intent: 'auto' }) : this.runtime.openFeedback())); heading.append(actions); this.runSurface.append(heading);
     if (!run) this.runSurface.append(element('p', 'wf-field-help', '在左侧选择输入资料，检查通过后点击运行。'));
     else { this.runSurface.append(this.renderRunLocations(run)); const states = orderedNodeStates(run), { completed, total, running, skippedLearning } = runProgress(run); this.runSurface.append(element('p', 'wf-field-help', `${completed} / ${total} ${run.document?.mode === 'learn' ? '节点' : '业务节点'}完成 · ${running} 项同时运行${skippedLearning ? ` · ${skippedLearning} 个学习节点已跳过` : ''}${run.queuePosition ? ` · 队列位置 ${run.queuePosition}` : ''}`)); const progress = element('progress'); progress.max = Math.max(1, total); progress.value = completed; this.runSurface.append(progress);
       const steps = element('div', 'wf-studio-run-steps'); for (const [id, state] of states) { const item = button(`${run.document.nodes.find(node => node.id === id)?.title || id} · ${STUDIO_STATUS[state.status] || state.status}`, () => { this.editor.selectNode(id); this.renderInspectorData(id); }, 'wf-studio-run-step'); item.dataset.status = state.status; steps.append(item); } this.runSurface.append(steps);
@@ -622,7 +626,7 @@ export class WorkflowStudioUI {
       for (const [id, state] of states) if (state.status === 'waiting_review') this.runSurface.append(this.reviewControls(run, id)); const artifacts = runArtifacts(run); if (artifacts.length) { this.runSurface.append(element('h3', '', '全部产物'), this.artifactGallery(artifacts, { run, showOrigin: true }), button('打开本次输出目录', async () => { try { await this.api('/api/workflow-v2/open-directory', { method: 'POST', body: { runId: run.id } }); } catch (error) { this.editor.toast(error.message, true); } })); }
       if (run.error) this.runSurface.append(element('p', 'wf-studio-input-error', display(run.error)));
     }
-    const selected = [...this.editor.selection].find(id => run?.nodes?.[id]); if (selected) this.renderInspectorData(selected); else if (this.view === 'run' && !this.editor.settings.propertiesClosed) { this.editor.settings.propertiesClosed = true; this.editor.applySettings(); } if (this.tab === 'queue') void this.renderQueue(); this.renderGraph();
+    const selected = [...this.editor.selection].find(id => run?.nodes?.[id]); if (selected) this.renderInspectorData(selected); else if (this.view === 'run' && !this.panelSettings().propertiesClosed) { this.panelSettings().propertiesClosed = true; this.editor.applySettings(); } if (this.tab === 'queue') void this.renderQueue(); this.renderGraph();
   }
   async renderQueue() {
     if (!this.runtime || this.queueLoading) return; this.queueLoading = true;

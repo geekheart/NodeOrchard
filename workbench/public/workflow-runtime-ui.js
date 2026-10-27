@@ -177,7 +177,7 @@ export class WorkflowRuntimeUI {
     this.outputLabel = node('strong', '', '运行结果'); const outputActions = node('div', 'wf-runtime-output-actions');
     this.copyButton = button('复制', () => void this.copyOutput(), 'wf-button wf-runtime-small');
     this.downloadButton = button('下载', () => this.downloadOutput(), 'wf-button wf-runtime-small');
-    this.feedbackButton = button('反馈与改进', () => this.openFeedback(), 'wf-button wf-runtime-small'); this.feedbackButton.disabled = true;
+    this.feedbackButton = button('在对话中反馈', () => this.openFeedback(), 'wf-button wf-runtime-small'); this.feedbackButton.disabled = true;
     outputActions.append(this.feedbackButton, this.copyButton, this.downloadButton); outputHeading.append(this.outputLabel, outputActions);
     this.runInfo = node('p', 'wf-runtime-run-info');
     this.error = node('p', 'wf-runtime-error'); this.error.setAttribute('role', 'status');
@@ -208,7 +208,19 @@ export class WorkflowRuntimeUI {
   }
 
   setExpanded(expanded = true) { this.panel.classList.toggle('is-collapsed', !expanded); this.toggle.setAttribute('aria-expanded', String(expanded)); }
-  openFeedback() { if (!this.feedback?.canOpen()) return; this.setExpanded(); this.feedback.open(); }
+  openFeedback() {
+    if (this.editor.conversation?.focusContext) {
+      const run = this.currentRun();
+      if (!run) return;
+      const nodeId = this.selectedNodeId, record = run.nodes?.[nodeId];
+      const context = { runId: run.id, ...(record ? { nodeId, attempt: record.attempt || 0, attemptId: record.attemptId || null,
+        artifactIds: (record.artifacts || []).map(item => item.id), artifactHashes: (record.artifacts || []).map(item => ({ id: item.id, sha256: item.sha256 })) } : {}) };
+      this.editor.conversation.focusContext(context, { intent: 'auto' });
+      return;
+    }
+    if (!this.feedback?.canOpen()) return;
+    this.setExpanded(); this.feedback.open();
+  }
   showNotice(message = '', error = false) { this.notice.textContent = text(message); this.notice.hidden = !message; this.notice.classList.toggle('error', error); }
   currentRun() { return this.runs.get(this.currentRunId) || null; }
   currentDocument() { return this.editor.nodeLibrary?.rootDocument || this.editor.doc; }
@@ -421,7 +433,11 @@ export class WorkflowRuntimeUI {
     const interruptRun = this.activeRun();
     this.stopButton.hidden = !interruptRun; this.stopButton.disabled = this.stopping.has(interruptRun?.id) || this.stopRequested.has(interruptRun?.id); this.stopButton.textContent = this.stopping.has(interruptRun?.id) ? '停止请求中…' : this.stopRequested.has(interruptRun?.id) ? '等待停止确认…' : '停止当前运行';
     this.inputSnapshotDetails.hidden = !run; this.inputSnapshot.textContent = run ? display(run.input) : '';
-    this.input.disabled = this.starting; this.renderApproval(); this.updateRunButton(); this.renderTrace(); this.feedback?.render(run); this.editor.studio?.renderRuntime(); this.editor.conversation?.render();
+    this.input.disabled = this.starting; this.renderApproval(); this.updateRunButton(); this.renderTrace();
+    if (!this.editor.conversation) this.feedback?.render(run);
+    else if (this.feedbackButton) this.feedbackButton.disabled = !run;
+    if (this.feedbackHost) this.feedbackHost.hidden = Boolean(this.editor.conversation);
+    this.editor.studio?.renderRuntime(); this.editor.conversation?.render();
   }
   renderApproval() {
     const run = this.currentRun(); const current = runtimeNodeDetails(run, run?.currentNodeId);
