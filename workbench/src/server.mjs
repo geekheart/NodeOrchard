@@ -326,6 +326,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/diagnostic-events.js': ['diagnostic-events.js', 'text/javascript'],
         '/style.css': ['style.css', 'text/css'],
         '/workflow-editor.js': ['workflow-editor.js', 'text/javascript'],
+        '/workflow-toolbar-controls.js': ['workflow-toolbar-controls.js', 'text/javascript'],
         '/workflow-studio-ui.js': ['workflow-studio-ui.js', 'text/javascript'],
         '/workflow-studio-ui.css': ['workflow-studio-ui.css', 'text/css'],
         '/workflow-versioning-ui.js': ['workflow-versioning-ui.js', 'text/javascript'],

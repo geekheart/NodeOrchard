@@ -1,5 +1,6 @@
 import { planWorkflow, learningBranch } from '../shared/workflow/workflow-plan.mjs';
 import { parseWorkflowDataset, normalizeWorkflowDataset, summarizeRoundCases } from '../shared/workflow/workflow-dataset.mjs';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 
 const ACTIVE = new Set(['running', 'waiting']);
 const TERMINAL = new Set(['complete', 'exhausted', 'interrupted', 'unknown', 'error']);
@@ -284,7 +285,14 @@ export class WorkflowLearningUI {
     if (!setupError && this.editor.propertyDrafts?.size) setupError = '请先应用节点属性，再开始学习。';
     const active = this.activeJob(), blocked = this.starting || this.loading || this.applying || this.uncertain || Boolean(active) || this.runtime.skillPending?.size > 0 || Boolean(setupError);
     const label = this.starting ? '正在提交学习…' : this.loading ? '正在同步学习记录…' : this.uncertain ? '请先刷新学习记录' : active ? `${feedbackJob(active) ? feedbackPhaseLabel(active) : PHASE[active.phase] || STATUS[active.status]}…` : '开始学习';
-    for (const control of [this.startButton, this.editor.doc?.mode === 'learn' ? this.editor.root.querySelector('[data-action="run"]') : null].filter(Boolean)) { control.textContent = clean(label); control.setAttribute('aria-label', clean(label)); control.disabled = blocked; control.title = setupError || '使用画布学习支路评估产物，并改进明确选择的 Skill'; }
+    for (const control of [this.startButton, this.editor.doc?.mode === 'learn' ? this.editor.root.querySelector('[data-action="run"]') : null].filter(Boolean)) {
+      if (control === this.startButton) { control.textContent = clean(label); control.setAttribute('aria-label', clean(label)); control.title = setupError || '使用画布学习支路评估产物，并改进明确选择的 Skill'; }
+      else {
+        const toolbarLabel = label === '开始学习' ? label : `开始学习 · ${clean(label)}`;
+        setToolbarControl(control, { label: setupError ? `${toolbarLabel} · ${clean(setupError)}` : toolbarLabel, icon: 'play', busy: Boolean(this.starting || this.loading || this.applying || active) });
+      }
+      control.disabled = blocked;
+    }
     this.headerStop.hidden = !active; this.headerStop.disabled = this.stopping.has(active?.id) || this.stopRequested.has(active?.id); this.headerStop.textContent = this.headerStop.disabled ? '等待停止确认…' : '停止学习';
     for (const control of this.formControls) control.disabled = this.starting;
     for (const control of [this.saveCaseButton, this.cancelCaseButton, this.previewImportButton, this.importFile, this.restoreButton].filter(Boolean)) control.disabled = this.starting;

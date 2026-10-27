@@ -17,6 +17,7 @@ class FakeElement {
   }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
+  querySelector(selector) { return this.children.find(child => child.tag === selector) || this.children.map(child => child.querySelector?.(selector)).find(Boolean) || null; }
   get childElementCount() { return this.children.length; }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, listener) { this.listeners.set(name, listener); }
@@ -75,15 +76,18 @@ function titleField(instance) { instance.titleInput = new FakeElement('input'); 
 
 test('collapsing the canvas hides editing panels and restoring it keeps the saved layout', t => {
   globalValue(t, 'innerWidth', 1400); globalValue(t, 'requestAnimationFrame', callback => callback());
+  globalValue(t, 'document', { createElementNS: (_namespace, tag) => new FakeElement(tag) });
   const instance = editor(), classes = new Set(), toggle = new FakeElement('button'), preference = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: false, propertiesClosed: false };
   instance.settings = { ...preference }; instance.root.classList = { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); } };
   instance.root.querySelectorAll = selector => selector === '[data-action="toggle-canvas"]' ? [toggle] : [];
   instance.requestGeometry = () => {}; instance.onCanvasResize = () => {}; instance.cancelGesture = () => {}; instance.renderSelection = () => {};
   instance.setCanvasClosed(true); assert.equal(toggle.attributes['aria-label'], '显示画布');
+  assert.equal(toggle.querySelector('svg').dataset.workflowIcon, 'canvas-off'); assert.equal(toggle.dataset.tooltip, '显示画布');
   for (const name of ['canvas-closed', 'library-closed', 'properties-closed']) assert.ok(classes.has(name));
   assert.deepEqual(instance.settings, { ...preference, canvasClosed: true });
   instance.selectNode('node-a'); assert.equal(instance.settings.propertiesClosed, false);
   instance.setCanvasClosed(false); assert.equal(toggle.attributes['aria-label'], '隐藏画布');
+  assert.equal(toggle.querySelector('svg').dataset.workflowIcon, 'canvas'); assert.equal(toggle.dataset.tooltip, '隐藏画布');
   assert.equal(classes.has('canvas-closed'), false); assert.equal(classes.has('library-closed'), false); assert.equal(classes.has('properties-closed'), false);
   assert.deepEqual(instance.settings, preference);
 });

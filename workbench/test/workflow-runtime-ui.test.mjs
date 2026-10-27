@@ -94,17 +94,18 @@ test('draft-change indicator ignores viewport/position but detects execution or 
 });
 
 class FakeElement {
-  constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {}; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.listeners = new Map(); this.classList = { toggle() {} }; }
+  constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {}; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.listeners = new Map(); this.className = ''; this.classList = { toggle() {}, add: (...names) => { this.className = [...new Set([...this.className.split(' ').filter(Boolean), ...names])].join(' '); } }; }
   append(...items) { this.children.push(...items); }
-  replaceChildren(...items) { if (this.children.includes(globalThis.document?.activeElement)) globalThis.document.activeElement = null; this.children = [...items]; }
+  replaceChildren(...items) { if (this.children.includes(globalThis.document?.activeElement)) globalThis.document.activeElement = null; this.children = [...items]; this.textContent = ''; }
   setAttribute(key, value) { this.attributes[key] = value; if (key === 'href') this.href = value; }
   getAttribute(key) { return this.attributes[key] ?? null; }
+  querySelector(selector) { return this.children.find(child => child?.tagName === selector) || this.children.map(child => child?.querySelector?.(selector)).find(Boolean) || null; }
   focus() { if (globalThis.document) globalThis.document.activeElement = this; }
   addEventListener(name, handler) { this.listeners.set(name, handler); }
 }
 function fakeDOM(t) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
-  const document = { createElement: tag => new FakeElement(tag), activeElement: null };
+  const document = { createElement: tag => new FakeElement(tag), createElementNS: (_namespace, tag) => new FakeElement(tag), activeElement: null };
   Object.defineProperty(globalThis, 'document', { value: document, configurable: true });
   t.after(() => { if (descriptor) Object.defineProperty(globalThis, 'document', descriptor); else delete globalThis.document; }); return document;
 }
@@ -236,11 +237,18 @@ test('scheduled history cannot open a different workflow or overwrite newer stre
   await instance.openScheduledRun(value.id); assert.equal(instance.currentRun().status, 'complete'); assert.equal(instance.currentRun().output, 'newest');
 });
 
-test('run control distinguishes preparing, running and waiting on the same node', () => {
-  const value = run(), instance = headless(value);
+test('run control preserves toolbar icons while panel labels distinguish active states', t => {
+  fakeDOM(t); const value = run(), instance = headless(value), toolbar = new FakeElement('button');
+  instance.editor.root.querySelector = selector => selector === '[data-action="run"]' ? toolbar : null;
   for (const [status, label] of [['preparing', '准备第 2/2 项'], ['running', '正在执行第 2/2 项'], ['waiting', '第 2/2 项待处理']]) {
     instance.runs.set(value.id, { ...value, status }); instance.updateRunButton(); assert.equal(instance.startButton.textContent, label); assert.equal(instance.startButton.disabled, true);
+    assert.equal(toolbar.textContent, ''); assert.equal(toolbar.children[0].dataset.workflowIcon, 'play'); assert.equal(toolbar.children[0].tagName, 'svg');
+    assert.equal(toolbar.attributes['aria-label'], `运行当前流程 · ${label}`); assert.equal(toolbar.disabled, true);
   }
+  instance.editor.libraryLifecycle = 'archived'; instance.updateRunButton();
+  assert.equal(toolbar.textContent, ''); assert.match(toolbar.attributes['aria-label'], /运行当前流程.*只读/); assert.equal(toolbar.disabled, true);
+  instance.editor.nodeLibrary = { nested: {} }; instance.updateRunButton();
+  assert.equal(toolbar.textContent, ''); assert.match(toolbar.attributes['aria-label'], /运行当前流程.*内部编辑中/); assert.equal(toolbar.children[0].tagName, 'svg');
 });
 
 test('late history response cannot overwrite newer per-node SSE data', async t => {

@@ -377,8 +377,6 @@ body.workflow-active .main-content { overflow: hidden; }
   .wf-heading input { width: calc(100% - 100px); max-width: none; }
   .wf-save-status { width: auto; max-width: 100px; padding: 0; }
   .wf-header-actions { width: 100%; justify-content: flex-start; gap: 5px; }
-  /* File actions retain their names/tooltips while leaving room for the mode and run action. */
-  .wf-header-actions .wf-button:is([data-action="new"], [data-action="import"], [data-action="export"], [data-action="save"], [data-action="schedules"]) { width: 30px; min-width: 30px; padding-inline: 6px; gap: 0; font-size: 0; }
   .wf-mode { margin-left: 0; }
   .wf-mode button { padding-inline: 7px; }
   .wf-zoom-controls { bottom: 11px; right: 10px; }
@@ -393,6 +391,36 @@ body.workflow-active .main-content { overflow: hidden; }
   .wf-dialog-actions { flex-wrap: wrap; }
   .wf-context-menu { width: 216px; }
 }
+
+/* Compact command strip: names are exposed on hover and keyboard focus. */
+.wf-header { position: relative; overflow: visible; }
+.wf-header .wf-header-actions { gap: 4px; }
+.wf-toolbar-button,
+.wf-header .wf-toolbar-button,
+.wf-header .wf-mode > .wf-toolbar-button {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 30px; width: 30px; min-width: 30px; height: 30px; min-height: 30px;
+  padding: 5px; gap: 0; border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--wf-text, var(--text)); cursor: pointer;
+}
+.wf-toolbar-button > svg { display: block; flex-shrink: 0; width: 18px; height: 18px; }
+.wf-toolbar-button:hover:not(:disabled) { background: var(--wf-hover, var(--hover)); border-color: var(--wf-border-strong, var(--strong-line)); }
+.wf-toolbar-button.primary { color: var(--green, #277c57); }
+.wf-toolbar-button[aria-pressed="true"] { background: var(--wf-active, var(--hover)); border-color: var(--wf-accent, var(--accent)); }
+.wf-toolbar-button:focus-visible { outline: 2px solid var(--wf-accent, var(--accent)); outline-offset: 2px; }
+.wf-toolbar-button:disabled, .wf-header .wf-toolbar-button:disabled { opacity: 1; cursor: not-allowed; }
+.wf-toolbar-button:disabled > svg { opacity: .4; }
+.wf-toolbar-button[aria-busy="true"]::before { content: ''; position: absolute; right: 2px; top: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--wf-accent, var(--accent)); }
+.wf-toolbar-button[data-tooltip-ready="true"]:is(:hover, :focus-visible)::after {
+  content: attr(data-tooltip); position: fixed; left: var(--wf-toolbar-tip-x); top: var(--wf-toolbar-tip-y); z-index: 1001;
+  width: max-content; max-width: min(260px, calc(100vw - 24px)); padding: 7px 10px;
+  border: 1px solid var(--wf-border-strong, var(--strong-line)); border-radius: 5px;
+  background: var(--wf-panel, var(--surface)); color: var(--wf-text, var(--text));
+  box-shadow: 0 4px 14px #0003; font-size: 12px; font-weight: 500; line-height: 1.5;
+  white-space: normal; overflow-wrap: anywhere; text-align: left; pointer-events: none; transform: translateX(-50%);
+}
+.wf-toolbar-button[data-tooltip-align="start"]::after { transform: none; }
+.wf-toolbar-button[data-tooltip-align="end"]::after { transform: translateX(-100%); }
 @media (prefers-reduced-motion: reduce) {
   .wf-edge-pulse .wf-edge-line, .wf-edge-line.wf-edge-pulse { animation: none; stroke-dasharray: none; }
   .wf-editor *, .wf-dialog { scroll-behavior: auto !important; transition-duration: 0s !important; }

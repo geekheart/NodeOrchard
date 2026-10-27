@@ -1,6 +1,7 @@
 import { validateDocument } from '../shared/workflow/workflow-model.mjs';
 import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { prepareWorkflowVersion } from '../shared/workflow/workflow-versioning.mjs';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 
 const copy = value => structuredClone(value);
 const unwrap = value => value?.workflow || value;
@@ -46,6 +47,7 @@ export class WorkflowVersioningUI {
   }
   mount() {
     this.openButton = button('另存为新版', () => void this.open()); this.openButton.dataset.action = 'save-version';
+    setToolbarControl(this.openButton, { label: '另存为新版', icon: 'copy' });
     this.editor.root.querySelector('.wf-header-actions').append(this.openButton);
     this.dialog = el('dialog', 'wf-dialog wf-versioning-dialog'); this.dialog.setAttribute('aria-label', '另存为新版工作流');
     this.dialog.addEventListener('cancel', event => { event.preventDefault(); this.close(); });
@@ -56,7 +58,8 @@ export class WorkflowVersioningUI {
     const id = this.editor.doc?.id;
     if (id !== this.lastDocumentId) { this.lastDocumentId = id; this.scopeGeneration++; }
     let reason = ''; try { assertWorkflowVersionSource(this.editor); } catch (error) { reason = error.message; }
-    if (this.openButton) { this.openButton.disabled = Boolean(this.session?.busy || reason); this.openButton.title = reason || '另存为新版'; }
+    if (this.openButton) { this.openButton.disabled = Boolean(this.session?.busy || reason);
+      setToolbarControl(this.openButton, { label: reason ? `另存为新版 · ${reason}` : '另存为新版', icon: 'copy', busy: Boolean(this.session?.busy) }); }
     if (this.session && this.dialog?.open && !this.current(this.session)) {
       this.session.stale = true;
       if (!this.session.busy) this.showStatus(this.session, '当前工作流或编辑内容已变化。请关闭此窗口，保存后重新另存。', true);

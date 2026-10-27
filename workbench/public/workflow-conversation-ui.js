@@ -1,6 +1,7 @@
 import { documentFingerprint, applyWorkflowOperations } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { runArtifacts, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
 import { conversationTurnGroups, canRetryConversationTurn, parseConversationIssueResolution } from '../shared/workflow/workflow-conversation-issues.mjs';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 
 export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -137,7 +138,9 @@ export class WorkflowConversationUI {
     composer.addEventListener('submit', event => { event.preventDefault(); void this.send(); }); composer.addEventListener('keydown', event => event.stopPropagation()); composer.append(this.contextHost, options, this.input, actions);
     panel.append(this.resizeHandle, heading, this.notice, this.pendingHost, this.messages, this.resultHost, composer); this.panel = panel; this.editor.root.querySelector('.wf-body').append(panel);
     this.editor.root.classList.add('wf-chat-enabled');
-    this.openButton = button('打开工作流对话', () => this.toggle(true), 'wf-button wf-conversation-open'); this.editor.root.querySelector('.wf-header-actions')?.append(this.openButton);
+    this.openButton = button('打开工作流对话', () => this.toggle(true), 'wf-button wf-conversation-open');
+    if (this.editor.root.querySelector('.wf-header')) setToolbarControl(this.openButton, { label: '打开工作流对话', icon: 'chat' });
+    this.editor.root.querySelector('.wf-header-actions')?.append(this.openButton);
     panel.addEventListener('pointerdown', event => event.stopPropagation()); panel.addEventListener('keydown', event => event.stopPropagation());
     this.toggle(true);
   }

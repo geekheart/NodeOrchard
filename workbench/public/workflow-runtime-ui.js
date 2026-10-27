@@ -5,6 +5,7 @@ import { WorkflowSchedulesUI } from './workflow-schedules-ui.js';
 import { WorkflowFeedbackUI } from './workflow-feedback-ui.js';
 import { STUDIO_STATUS, isV2, inputEntries } from '../shared/workflow/workflow-studio-utils.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 
 const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
@@ -246,13 +247,18 @@ export class WorkflowRuntimeUI {
   }
   updateRunButton() {
     if (this.editor.nodeLibrary?.nested) {
-      for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) { control.textContent = '内部编辑中'; control.disabled = true; control.setAttribute('aria-label', '内部编辑中'); control.title = '请先应用或取消内部修改，再从主流程运行。'; }
+      for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) {
+        if (control === this.startButton) { control.textContent = '内部编辑中'; control.setAttribute('aria-label', '内部编辑中'); control.title = '请先应用或取消内部修改，再从主流程运行。'; }
+        else setToolbarControl(control, { label: '运行当前流程 · 内部编辑中', icon: 'play' });
+        control.disabled = true;
+      }
       return;
     }
     if (this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active') {
       for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) {
-        control.textContent = '只读工作流'; control.disabled = true; control.setAttribute('aria-label', '只读工作流');
-        control.title = '请先在看板恢复工作流，再运行或学习。';
+        if (control === this.startButton) { control.textContent = '只读工作流'; control.setAttribute('aria-label', '只读工作流'); control.title = '请先在看板恢复工作流，再运行或学习。'; }
+        else setToolbarControl(control, { label: '运行当前流程 · 只读工作流', icon: 'play' });
+        control.disabled = true;
       }
       return;
     }
@@ -268,8 +274,11 @@ export class WorkflowRuntimeUI {
     const busy = this.starting || this.loading || this.submissionUncertain || !v2 && Boolean(this.activeRun()) || Boolean(activeLearning) || pendingSkill;
     const label = learning ? '请打开学习面板' : this.starting ? '正在提交…' : this.loading ? '正在同步运行记录…' : this.submissionUncertain ? '请先刷新运行记录' : activeLearning ? '学习进行中 · 切换学习查看' : this.activeRun() ? v2 ? '加入运行队列' : stepLabel(this.activeRun()) : pendingSkill ? '正在读取 Skill…' : '运行当前流程';
     for (const control of [this.startButton, this.editor.root.querySelector('[data-action="run"]')].filter(Boolean)) {
-      control.textContent = label; control.disabled = learning || busy; control.setAttribute('aria-label', label);
-      control.title = learning ? '学习模式' : this.getBackend()?.state === 'ready' || !workflowNeedsHermes(this.currentDocument()) ? '运行当前流程' : '未连接 Hermes';
+      if (control === this.startButton) { control.textContent = label; control.setAttribute('aria-label', label);
+        control.title = learning ? '学习模式' : this.getBackend()?.state === 'ready' || !workflowNeedsHermes(this.currentDocument()) ? '运行当前流程' : '未连接 Hermes'; }
+      else setToolbarControl(control, { label: label === '运行当前流程' ? label : `运行当前流程 · ${label}`, icon: 'play',
+        busy: Boolean(this.starting || this.loading || activeLearning || pendingSkill || !v2 && this.activeRun()) });
+      control.disabled = learning || busy;
     }
     const entry = this.currentDocument()?.nodes?.find(item => item.type === 'input');
     this.inputLabel.textContent = text(entry?.config?.fieldName ? `下次运行输入 · ${entry.config.fieldName}` : '下次运行输入');

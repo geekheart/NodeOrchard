@@ -6,10 +6,11 @@ import { createDocument, createNode, connectNodes } from '../shared/workflow/wor
 const deferred = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 const clone = value => structuredClone(value);
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.listeners = new Map(); this.dataset = {}; this.value = ''; this.open = false; this.disabled = false; this.className = ''; this.classList = { toggle() {} }; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.listeners = new Map(); this.dataset = {}; this.value = ''; this.open = false; this.disabled = false; this.className = ''; this.classList = { toggle() {}, add: (...names) => { this.className = [...new Set([...this.className.split(' ').filter(Boolean), ...names])].join(' '); } }; }
   append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
+  replaceChildren(...children) { this.children = children; this.textContent = ''; }
   setAttribute(key, value) { this.attributes[key] = value; }
+  querySelector(selector) { return this.children.find(child => child?.tag === selector) || this.children.map(child => child?.querySelector?.(selector)).find(Boolean) || null; }
   addEventListener(type, callback) { this.listeners.set(type, callback); }
   showModal() { this.open = true; }
   close() { this.open = false; this.listeners.get('close')?.({}); }
@@ -26,7 +27,7 @@ function sourceDocument(id = 'workflow-original') {
 }
 const recordFor = (document, revision = 7) => ({ id: document.id, document: clone(document), revision, lifecycle: 'active', origin: 'saved' });
 function harness(t) {
-  const previous = globalThis.document; globalThis.document = { createElement: tag => new Element(tag) };
+  const previous = globalThis.document; globalThis.document = { createElement: tag => new Element(tag), createElementNS: (_namespace, tag) => new Element(tag) };
   t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
   const document = sourceDocument(), header = new Element('header'), root = new Element('div'), messages = [], created = [], requests = [];
   root.querySelector = selector => { assert.equal(selector, '.wf-header-actions'); return header; };
@@ -43,7 +44,8 @@ const posts = requests => requests.filter(([, options]) => options?.method === '
 
 test('toolbar opens a saved-source preview with opt-in actions and a separate new workflow identity', async t => {
   const { ui, document, header, requests } = harness(t), before = clone(document);
-  assert.equal(header.children[0].textContent, '另存为新版'); assert.equal(ui.dialog.attributes['aria-label'], '另存为新版工作流');
+  assert.equal(header.children[0].textContent, ''); assert.equal(header.children[0].attributes['aria-label'], '另存为新版');
+  assert.equal(header.children[0].children[0].dataset.workflowIcon, 'copy'); assert.equal(ui.dialog.attributes['aria-label'], '另存为新版工作流');
   assert.equal(await ui.open(), true); const preview = ui.session.preview;
   assert.notEqual(preview.document.id, document.id); assert.equal(preview.report.toolPresets, 1); assert.equal(preview.report.validationNodes, 1); assert.equal(preview.report.stageOutputs, 1);
   assert.ok(Object.values(ui.options).every(input => input.checked)); assert.equal(ui.submitButton.textContent, '创建新版');

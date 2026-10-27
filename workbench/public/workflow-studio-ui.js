@@ -1,4 +1,5 @@
 import { createNode, getPorts, connectNodes, validateDocument, updateNode, NODE_TYPES } from '../shared/workflow/workflow-model.mjs';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutPositions, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
@@ -133,10 +134,10 @@ export class WorkflowStudioUI {
   mount() {
     const editor = this.editor;
     this.viewSwitch = element('div', 'wf-mode wf-view-switch'); this.viewSwitch.setAttribute('aria-label', '编辑或运行视图');
-    this.viewSwitch.append(button('编辑', () => this.setView('edit')), button('运行', () => this.setView('run')));
+    this.viewSwitch.append(setToolbarControl(button('编辑', () => this.setView('edit')), { label: '编辑视图', icon: 'edit' }), setToolbarControl(button('运行', () => this.setView('run')), { label: '运行视图', icon: 'activity' }));
     editor.root.querySelector('.wf-header-actions').prepend(this.viewSwitch);
-    this.check = button('检查输入', () => void this.preflight()); editor.root.querySelector('.wf-header-actions').append(this.check);
-    this.upgrade = button('升级为并行工作流', () => this.upgradeDocument()); editor.root.querySelector('.wf-header-actions').append(this.upgrade);
+    this.check = setToolbarControl(button('检查输入', () => void this.preflight()), { label: '检查输入', icon: 'check' }); editor.root.querySelector('.wf-header-actions').append(this.check);
+    this.upgrade = setToolbarControl(button('升级为并行工作流', () => this.upgradeDocument()), { label: '升级为并行工作流', icon: 'layers' }); editor.root.querySelector('.wf-header-actions').append(this.upgrade);
     const toolbar = editor.root.querySelector('.wf-canvas-toolbar'); toolbar.append(button('自动布局', () => this.autoLayout(), 'wf-button wf-studio-small'));
     this.tabs = element('div', 'wf-studio-tabs');
     for (const [id, label] of [['nodes', '节点库'], ['inputs', '输入资料'], ['queue', '任务队列']]) { const item = button(label, () => this.setTab(id)); item.dataset.studioTab = id; this.tabs.append(item); }

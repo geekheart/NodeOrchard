@@ -1,3 +1,4 @@
+import { createWorkflowIcon as icon, setToolbarControl } from './workflow-toolbar-controls.js';
 import {
   NODE_GROUPS, NODE_TYPES, createDocument, createNode, getPorts,
   validateConnection, connectNodes, updateNode, removeNodes, removeEdge,
@@ -24,46 +25,17 @@ const COPY = {
   transform: '数据整理', condition: '条件判断', foreach: '逐项处理', loop: '条件循环',
   human: '人工审核 / 补充', merge: '汇总', output: '产物输出', evaluation: '产物对比', improvement: 'Skill 改进',
 };
-const PATHS = {
-  workflow: 'M4 4h6v6H4zM14 14h6v6h-6zM7 10v7h7M14 4h6v6h-6zM10 7h4',
-  'file-input': 'M14 3H5v18h14V8zM14 3v5h5M9 12h7m-3-3 3 3-3 3',
-  'file-output': 'M14 3H5v18h14V8zM14 3v5h5M9 13h7m-4-3-3 3 3 3',
-  book: 'M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1zM12 5v15',
-  code: 'm8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18',
-  layers: 'm12 2 10 5-10 5L2 7zM2 12l10 5 10-5M2 17l10 5 10-5',
-  sliders: 'M4 6h16M4 12h16M4 18h16M8 3v6m8 0v6m-6 0v6',
-  diamond: 'm12 2 10 10-10 10L2 12z',
-  list: 'M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01',
-  repeat: 'M20 7H7a4 4 0 0 0-4 4m17-4-4-4m4 4-4 4M4 17h13a4 4 0 0 0 4-4M4 17l4 4m-4-4 4-4',
-  user: 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2z',
-  undo: 'M9 4 3 10l6 6M3 10h11a7 7 0 0 1 7 7v3',
-  redo: 'm15 4 6 6-6 6M21 10H10a7 7 0 0 0-7 7v3',
-  plus: 'M12 5v14M5 12h14', minus: 'M5 12h14',
-  fit: 'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8v8H8z',
-  library: 'M3 4h6v16H3zM12 4h4v16h-4zM18 5l3-1 3 15-3 1z',
-  panel: 'M3 4h18v16H3zM14 4v16', close: 'm6 6 12 12M6 18 18 6',
-  save: 'M4 3h13l4 4v14H3V3zM7 3v6h10V3M7 21v-8h10v8',
-  download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
-  upload: 'M12 16V4m-5 5 5-5 5 5M4 16v5h16v-5',
-  trash: 'M3 6h18M8 6V3h8v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
-  copy: 'M8 8h13v13H8zM16 8V3H3v13h5',
-  help: 'M9 8a3 3 0 0 1 6 0c0 2-3 2-3 5m0 4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
-  grid: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
-  motion: 'M3 7h6M2 12h5M3 17h6m6-13 7 8-7 8M10 5l6 7-6 7',
-  play: 'm8 4 13 8-13 8z', cursor: 'm4 3 6 18 3-7 7-3z',
-  clock: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0M12 6v6l4 2',
-  check: 'M9 12l2 2 5-5M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
-};
-function icon(name) {
-  const svg = svgElement('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' });
-  svg.append(svgElement('path', { d: PATHS[name] || PATHS.workflow })); return svg;
-}
 function svgElement(tag, attrs = {}) { const node = document.createElementNS(NS, tag); for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value); return node; }
 function el(tag, className = '', text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 function control(label, action, iconName, { compact = false, primary = false } = {}) {
   const node = el('button', compact ? 'wf-icon-button' : 'wf-button' + (primary ? ' primary' : ''));
   node.type = 'button'; node.dataset.action = action; node.setAttribute('aria-label', label); node.title = label;
   if (iconName) node.append(icon(iconName)); if (!compact) node.append(document.createTextNode(label)); return node;
+}
+function toolbarControl(label, action, glyph, { primary = false } = {}) {
+  const button = control(label, action, glyph, { compact: true });
+  if (primary) button.classList.add('primary');
+  return setToolbarControl(button, { label, icon: glyph });
 }
 const clone = value => structuredClone(value);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -122,7 +94,7 @@ export class WorkflowEditor {
     root.innerHTML = `
       <header class="wf-header">
         <div class="wf-heading"><input class="wf-document-title" aria-label="工作流名称" maxlength="120" required /><span class="wf-save-status" role="status"></span></div>
-        <div class="wf-header-actions">
+        <div class="wf-header-actions" role="group" aria-label="工作流操作">
           <div class="wf-mode" role="group" aria-label="工作流模式"><button type="button" data-mode="execute">执行</button><button type="button" data-mode="learn">学习</button></div>
         </div>
       </header>
@@ -154,12 +126,13 @@ export class WorkflowEditor {
     this.contextMenu = find('.wf-context-menu'); this.dialog = find('.wf-dialog');
     find('.wf-empty-mark').append(icon('workflow'));
     const header = find('.wf-header-actions');
-    header.append(control('返回看板', 'board', 'workflow'));
-    for (const [label, action, glyph] of [['重做 ⌘/Ctrl+Shift+Z', 'redo', 'redo'], ['撤销 ⌘/Ctrl+Z', 'undo', 'undo']]) header.prepend(control(label, action, glyph, { compact: true }));
-    header.append(control('新建', 'new', 'plus'), control('导入', 'import', 'upload'), control('导出', 'export', 'download'), control('保存', 'save', 'save'), control('定时任务', 'schedules', 'clock'));
-    const run = control('执行工作流', 'run', 'play'); run.disabled = true; header.append(run);
-    header.append(control('隐藏画布', 'toggle-canvas'));
-    const libraryToggle = control('节点库', 'toggle-library'); libraryToggle.classList.add('wf-library-toggle'); header.append(libraryToggle);
+    header.append(toolbarControl('返回工作流看板', 'board', 'board'));
+    for (const [label, action, glyph] of [['重做 ⌘/Ctrl+Shift+Z', 'redo', 'redo'], ['撤销 ⌘/Ctrl+Z', 'undo', 'undo']]) header.prepend(toolbarControl(label, action, glyph));
+    for (const button of header.querySelectorAll('[data-mode]')) setToolbarControl(button, { label: button.dataset.mode === 'learn' ? '学习模式' : '执行模式', icon: button.dataset.mode === 'learn' ? 'book' : 'workflow' });
+    header.append(toolbarControl('新建工作流', 'new', 'plus'), toolbarControl('导入工作流', 'import', 'upload'), toolbarControl('导出工作流', 'export', 'download'), toolbarControl('保存工作流', 'save', 'save'), toolbarControl('定时任务', 'schedules', 'clock'));
+    const run = toolbarControl('运行当前流程', 'run', 'play', { primary: true }); run.disabled = true; header.append(run);
+    header.append(toolbarControl('隐藏画布', 'toggle-canvas', 'canvas'));
+    const libraryToggle = toolbarControl('打开节点库', 'toggle-library', 'library'); libraryToggle.classList.add('wf-library-toggle'); header.append(libraryToggle);
     const toolbar = find('.wf-canvas-toolbar');
     toolbar.append(control('切换节点库', 'toggle-library', 'library', { compact: true }), control('适应画布', 'fit', 'fit', { compact: true }), control('网格吸附', 'snap', 'grid', { compact: true }), el('span', 'wf-toolbar-divider'), control('减少动效', 'motion', 'motion', { compact: true }), control('节点属性', 'toggle-properties', 'panel', { compact: true }), control('快捷键与说明', 'help', 'help', { compact: true }));
     find('.wf-library-head .wf-panel-heading').append(control('收起节点库', 'toggle-library', 'close', { compact: true }));
@@ -311,9 +284,9 @@ export class WorkflowEditor {
       for (const button of this.root.querySelectorAll(`[data-action="${action}"]`)) button.setAttribute('aria-pressed', String(pressed));
     }
     for (const button of this.root.querySelectorAll('[data-action="toggle-canvas"]')) {
-      const label = canvasClosed ? '显示画布' : '隐藏画布'; button.textContent = label; button.title = label; button.setAttribute('aria-label', label); button.setAttribute('aria-expanded', String(!canvasClosed));
+      const label = canvasClosed ? '显示画布' : '隐藏画布'; setToolbarControl(button, { label, icon: canvasClosed ? 'canvas-off' : 'canvas' }); button.setAttribute('aria-expanded', String(!canvasClosed));
     }
-    for (const button of this.root.querySelectorAll('.wf-library-toggle')) { const label = this.studio?.view === 'run' ? '输入资料' : '节点库'; button.textContent = label; button.title = label; button.setAttribute('aria-label', label); }
+    for (const button of this.root.querySelectorAll('.wf-library-toggle')) { const label = this.studio?.view === 'run' ? '输入资料' : '节点库'; setToolbarControl(button, { label, icon: 'library' }); }
     this.requestGeometry();
   }
 

@@ -1,4 +1,5 @@
 import { WorkflowEditor } from './workflow-editor.js';
+import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { WorkflowRuntimeUI, skillDisplayName, skillVersionLabel } from './workflow-runtime-ui.js';
 import { WorkflowBoard } from './workflow-board.js';
 import { WorkflowLibraryClient } from './workflow-library-client.js';
@@ -158,7 +159,8 @@ function renderShell() {
   $('inspector').hidden = route.page !== 'task' || !route.panel;
   $('new-task-button').disabled = !state.csrfToken;
   $('new-task-button').hidden = ['board', 'conversations'].includes(route.page);
-  $('new-task-button').replaceChildren(icon('plus'), document.createTextNode(route.page === 'workflows' ? '新建工作流' : '新建任务'));
+  if (route.page === 'workflows') setToolbarControl($('new-task-button'), { label: '新建工作流', icon: 'plus' });
+  else { $('new-task-button').classList.remove('wf-toolbar-button'); delete $('new-task-button').dataset.tooltip; $('new-task-button').removeAttribute('aria-busy'); $('new-task-button').setAttribute('aria-label', '新建任务'); $('new-task-button').title = '新建任务'; $('new-task-button').replaceChildren(icon('plus'), document.createTextNode('新建任务')); }
   $('nav-pending-count').hidden = !state.requests.size; $('nav-pending-count').textContent = String(state.requests.size);
   $('nav-conversation-count').textContent = conversationHub?.data ? String(conversationHub.data.workflows.length + conversationHub.data.supervisors.length) : '';
   document.title = `${route.page === 'task' ? selectedSession()?.title || '任务' : pageLabels[route.page]} · 个人工作台`;
