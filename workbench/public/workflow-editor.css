@@ -186,7 +186,6 @@ body.workflow-active .main-content { overflow: hidden; }
   cursor: default;
 }
 .wf-canvas:focus { outline: none; }
-.wf-canvas:focus-visible { outline: 2px solid var(--wf-accent); outline-offset: -3px; }
 .wf-canvas.panning, .wf-canvas.is-panning { cursor: grabbing; }
 .wf-canvas.pan-ready { cursor: grab; }
 .wf-canvas.drop-ready { box-shadow: inset 0 0 0 2px var(--wf-edge-active); }
