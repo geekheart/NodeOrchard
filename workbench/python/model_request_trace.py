@@ -37,7 +37,10 @@ _UUID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12
 _REQUEST_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
 _SECRET_REQUEST_ID = re.compile(r'(?:sk-|gh[pousr]_|github_pat_|eyJ|bearer)', re.IGNORECASE)
 _FACTORIES = ('_create_openai_client', '_build_direct_anthropic_client', '_build_anthropic_client_for_key')
-_TRANSPORT_PHASES = {'connection.connect_tcp': 'connectMs', 'connection.start_tls': 'tlsMs'}
+_TRANSPORT_PHASES = {'connection.connect_tcp': 'connectMs', 'connection.start_tls': 'tlsMs', 'proxy.start_tls': 'tlsMs'}
+# Bound only the added observer's work. The SDK still owns decompression and the
+# original chunks; this observer never allocates a second decompressed body.
+MAX_SSE_OBSERVED_BYTES = 8 * 1024 * 1024
 
 
 def _iso():
@@ -127,6 +130,8 @@ class _Request:
         self.http = {'status': None, 'requestId': None, 'requestIdHeader': None, 'retryAfterSeconds': None}
         self.error = {'source': None, 'type': None}
         self.counter, self.sse, self.phases = SSECounter(), False, {}
+        self.decoded_started, self.decoded_active, self.final_pending = False, False, False
+        self.sse_bytes, self.sse_exhausted = 0, False
         self.emissions, self.last_emit = 0, 0.0
         self.lock = threading.RLock()
 
@@ -172,9 +177,7 @@ class _Request:
             value = response.headers.get('retry-after')
             if isinstance(value, str) and re.fullmatch(r'[0-9]{1,9}', value):
                 self.http['retryAfterSeconds'] = int(value)
-            self.sse = (response.headers.get('content-type', '').split(';', 1)[0].strip().lower() == 'text/event-stream'
-                        and response.headers.get('content-encoding', 'identity').strip().lower() == 'identity')
-            if self.sse: self.observable['sse'] = 'observed'
+            self.sse = response.headers.get('content-type', '').split(';', 1)[0].strip().lower() == 'text/event-stream'
             if status is not None and status >= 400: self.error = {'source': 'http', 'type': 'HTTPStatusError'}
         self.emit()
 
@@ -184,9 +187,53 @@ class _Request:
             at = self.elapsed(); first = self.timings['firstBodyByteMs'] is None
             if first: self.timings['firstBodyByteMs'] = at
             self.timings['lastBodyByteMs'] = at
-            if self.sse: self.counter.feed(chunk)
             publish = first or time.monotonic() - self.last_emit >= 5
         if publish: self.emit()
+
+    def begin_decoded(self):
+        with self.lock:
+            # httpx caches completed content. A later iter_bytes/read must not
+            # count the same server frames again or reset the observation quota.
+            if self.decoded_started: return False
+            self.decoded_started, self.decoded_active = True, True
+            if self.sse: self.observable['sse'] = 'observed'
+            return True
+
+    def decoded_body(self, chunk):
+        with self.lock:
+            if not self.sse or self.sse_exhausted or self.done and not self.final_pending or not chunk: return
+            first = self.sse_bytes == 0
+            if len(chunk) > MAX_SSE_OBSERVED_BYTES - self.sse_bytes:
+                # Do not scan, copy, buffer or decompress an oversized chunk.
+                # Empty counters plus unavailable/truncated mean unknown, not zero.
+                self.invalidate_sse()
+                publish = True
+            else:
+                self.sse_bytes += len(chunk)
+                self.counter.feed(chunk)
+                publish = first or time.monotonic() - self.last_emit >= 5
+            publish = publish and not self.final_pending
+        if publish: self.emit()
+
+    def invalidate_sse(self):
+        with self.lock:
+            self.sse_exhausted = True
+            self.counter = SSECounter(); self.counter.truncated = True
+            self.observable['sse'] = 'unavailable'
+
+    def end_decoded(self, error=None):
+        with self.lock:
+            self.decoded_active = False
+            if error is not None and (not self.done or self.final_pending):
+                # Raw EOF can precede the SDK decoder's flush. Preserve its real
+                # EOF fact while recording only a fixed decoder/SDK error type.
+                if not self.done: self.body_complete = False
+                kind = _error_type(error, sdk=True)
+                self.error = {'source': 'cancelled' if kind == 'CancelledError' else 'sdk', 'type': kind}
+                self.status = 'cancelled' if kind == 'CancelledError' else 'error'
+                self.done, self.final_pending = True, True
+            publish, self.final_pending = self.final_pending, False
+        if publish: self.emit(final=True)
 
     def finish(self, error=None, *, complete=False):
         with self.lock:
@@ -198,7 +245,11 @@ class _Request:
                 self.status = 'cancelled' if kind == 'CancelledError' else 'error'
             else:
                 self.status = 'error' if self.error['source'] == 'http' else 'complete'
-        self.emit(final=True)
+            # iter_bytes flushes its existing decoder after iter_raw reaches EOF.
+            # Defer that single terminal snapshot until the decoded tail is seen.
+            self.final_pending = bool(complete and self.decoded_active and self.sse)
+            publish = not self.final_pending
+        if publish: self.emit(final=True)
 
 
 class ModelRequestTracer:
@@ -292,6 +343,27 @@ class ModelRequestTracer:
                     record.headers(response)
                     if response.is_stream_consumed:
                         record.finish(complete=False); return
+                    original_iter_bytes = response.iter_bytes
+                    @functools.wraps(original_iter_bytes)
+                    def iter_bytes(*args, **kwargs):
+                        observing = record.begin_decoded()
+                        error = None
+                        try:
+                            for chunk in original_iter_bytes(*args, **kwargs):
+                                if observing:
+                                    try: record.decoded_body(chunk)
+                                    except Exception:
+                                        record.invalidate_sse()
+                                        self.unavailable('TRACE_HOOK_UNAVAILABLE')
+                                yield chunk
+                        except GeneratorExit:
+                            raise
+                        except BaseException as caught:
+                            error = caught
+                            raise
+                        finally:
+                            if observing: record.end_decoded(error)
+                    response.iter_bytes = iter_bytes
                     stream = response.stream
                     class TracedStream(httpx.SyncByteStream):
                         def __iter__(self):

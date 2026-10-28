@@ -41,3 +41,5 @@ Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: her
 请求级诊断的详细元数据保存在独立有界 `application_model_request_traces`，不保存任意请求／响应头。只允许上游请求关联ID、状态码、数字Retry-After、时序、固定流事件计数和错误分类；通用 `assistant.request.trace` 日志仅保存会话／控制请求身份、阶段、状态、耗时及HTTP状态。原始payload不发布到浏览器事件历史。链路读取见[请求级链路](application-diagnostics.md#请求级链路与近似实验)。
 
 模型实验 `assistant.experiment.started/completed/failed` 仅记录准入身份、目标总控轮次、调用数、字符规模和状态；合成prompt及模型正文不入日志。持久准入保存在 `assistant_model_experiments`，未知状态不重放，不修改工作流或原始历史。
+
+压缩SSE只在已受保护SDK实例解码后的字节流中统计类型；不另行解压或保存正文，缓存重读不重计。新增观察超过8MiB时明确计数不可观测并继续原业务流；代理隧道TLS计入观测TLS总时长。

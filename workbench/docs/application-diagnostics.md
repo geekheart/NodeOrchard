@@ -80,7 +80,7 @@
 
 新的受保护助手调用将控制 `requestId` 传入原生准备接口。原生仅对该助手实例的SDK客户端挂接HTTP元数据观察；不修改Hermes源码或全局HTTP客户端，不采集普通工作流、第三方请求或正文。`model.request.trace` 进入Node专用校验入口，不原样转发SSE／浏览器历史；按已登记控制会话与请求身份写入 `application_model_request_traces`，最多1000条、4MiB和14天。每次控制调用至多32个实际HTTP请求，阶段更新有界，原始流不逐块落库。
 
-观测含HTTP状态、白名单 `x-request-id`／`request-id` 值、数字Retry-After、连接与TLS阶段耗时、响应头及首末body字节相对时刻、固定SSE事件类型计数，以及固定错误分类。DNS无法独立观测；connect可能含DNS与代理。SDK复用连接、压缩流或不支持的客户端可能缺少阶段，明确返回 `unavailable`，不把缺失当零。原始流EOF只描述传输，SDK读到结束标记后可正常提前关闭；模型完整性仍按原生终态与完整结果核对。应用取消来源与传输错误分开，控制器abort不擅自细分为用户／系统原因。
+观测含HTTP状态、白名单 `x-request-id`／`request-id` 值、数字Retry-After、连接与TLS阶段耗时、响应头及首末body字节相对时刻、固定SSE事件类型计数，以及固定错误分类。DNS无法独立观测；connect可能含DNS与代理，tlsMs为观测到的普通连接及代理隧道TLS阶段总和，不拆分端点或声称仅目标服务器TLS。SDK复用连接或不支持的客户端可能缺少阶段，明确返回 `unavailable`，不把缺失当零。SSE在受保护SDK已有的iter_bytes解码后观察，支持该SDK可解码的压缩响应，缓存重读不重计；每请求新增观察最多8MiB解码字节，超额后清空计数并标为不可观测／截断，原数据继续交SDK。此额度限制新增观察开销，不限制SDK自身解压或请求输出。原始流EOF只描述传输，SDK读到结束标记后可正常提前关闭；模型完整性仍按原生终态与完整结果核对。应用取消来源与传输错误分开，控制器abort不擅自细分为用户／系统原因。
 
 `assistant.diagnose` 默认附紧凑请求摘要，完整细节通过 `assistant.trace({workflowId|conversationId,turnId,callIndex,afterRequestIndex?,limit?})` 逐页读取，limit为1至4。工具直接按真实调用编号核对持久归属（编号不受摘要12条限制），分页不重复读取原生历史元数据，不缓存活动请求快照；不接受任意session／文件路径；重启前未采集的历史请求不能补造。requestCount指当前保留的请求记录数，不是历史请求总数；coverage说明序号缺口、保留限制和采集上限。记录保留窗口或采集上限可能使详情不完整，仍按具体证据与缺口解释。
 

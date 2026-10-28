@@ -1,6 +1,7 @@
 """Bounded tracing tests. Synthetic traffic only; no model, auth or configuration."""
 import asyncio
 from contextlib import contextmanager
+import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -8,10 +9,12 @@ import sys
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 from model_request_trace import ModelRequestTracer, SSECounter
+import model_request_trace as trace_module
 
 try:
     import httpx
@@ -57,25 +60,27 @@ class SSECounterTests(unittest.TestCase):
 
 
 @contextmanager
-def synthetic_server(payload=None):
+def synthetic_server(payload=None, encoding=None):
     payload = payload if payload is not None else (b'event: response.created\r\ndata: PRIVATE_BODY\r\n\r\n'
                b'event: response.reasoning_text.delta\ndata: PRIVATE_THINKING\n\n'
                b'event: PRIVATE_EVENT\ndata: PRIVATE_SECRET\n\n'
                b'event: response.completed\ndata: PRIVATE_RESULT\n\n')
+    wire_payload = gzip.compress(payload) if encoding == 'gzip' else payload
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
         def do_POST(self):
             self.rfile.read(int(self.headers.get('content-length', '0')))
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
-            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Content-Length', str(len(wire_payload)))
+            if encoding: self.send_header('Content-Encoding', encoding)
             self.send_header('x-request-id', 'synthetic-request-123')
             self.send_header('Retry-After', '2')
             self.send_header('Set-Cookie', 'PRIVATE_COOKIE')
             self.send_header('x-private-header', 'PRIVATE_HEADER')
             self.end_headers()
-            for start in range(0, len(payload), 11):
-                self.wfile.write(payload[start:start + 11]); self.wfile.flush()
+            for start in range(0, len(wire_payload), 11):
+                self.wfile.write(wire_payload[start:start + 11]); self.wfile.flush()
         def log_message(self, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -252,21 +257,133 @@ class HttpTraceTests(unittest.TestCase):
             self.assertTrue(all(len(values) <= 17 for values in by_id.values()))
             self.assertEqual(len(other), 1)
 
-    def test_encoded_sse_and_unsupported_transport_remain_unknown(self):
+    def test_gzip_sse_is_counted_after_decoding_without_changing_bytes_or_recounting_cache(self):
         events = []; tracer = self.tracer(events)
         self.assertFalse(tracer.attach_http_client(object()))
         self.assertEqual(events[-1]['code'], 'TRACE_TRANSPORT_UNAVAILABLE')
-        import gzip
-        content = gzip.compress(b'event: response.completed\ndata: PRIVATE\n\n')
+        expected = b'event: response.completed\ndata: PRIVATE\n\n'
+        content = gzip.compress(expected)
         with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200,
                 headers={'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip'},
                 stream=httpx.ByteStream(content)))) as client:
             tracer.attach_http_client(client)
             with tracer.turn():
                 response = client.post('https://private.invalid/v1/responses')
-                self.assertIn(b'PRIVATE', response.content)
+                self.assertEqual(response.content, expected)
+                before = len(events)
+                self.assertEqual(b''.join(response.iter_bytes(chunk_size=2)), expected)
+                self.assertEqual(b''.join(response.iter_bytes()), expected)
+                self.assertEqual(len(events), before)
+        self.assertEqual(events[-1]['observability']['sse'], 'observed')
+        self.assertEqual(events[-1]['sse']['events'], {'response.completed': 1})
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_decoded_flush_tail_is_included_once_in_final_snapshot(self):
+        events = []; tracer = self.tracer(events)
+        first = b'event: response.created\ndata: PRIVATE_FIRST\n\n'
+        tail = b'event: response.completed\ndata: PRIVATE_TAIL\n\n'
+        def handler(request):
+            response = httpx.Response(200, headers={'Content-Type': 'text/event-stream'}, stream=httpx.ByteStream(b'PRIVATE_RAW'))
+            response._get_content_decoder = lambda: SimpleNamespace(decode=lambda chunk: first, flush=lambda: tail)
+            return response
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            tracer.attach_http_client(client)
+            with tracer.turn():
+                self.assertEqual(client.post('https://private.invalid/v1/responses').content, first + tail)
+        final = events[-1]
+        self.assertEqual(final['sse']['events'], {'response.created': 1, 'response.completed': 1})
+        self.assertTrue(final['bodyComplete'])
+        self.assertEqual(sum(value['status'] == 'complete' for value in events), 1)
+
+    def test_decoder_flush_failure_preserves_original_error_and_private_safe_terminal(self):
+        events = []; tracer = self.tracer(events)
+        error = httpx.DecodingError('PRIVATE_DECODER_MESSAGE')
+        def fail_flush(): raise error
+        def handler(request):
+            response = httpx.Response(200, headers={'Content-Type': 'text/event-stream'}, stream=httpx.ByteStream(b'PRIVATE_RAW'))
+            response._get_content_decoder = lambda: SimpleNamespace(
+                decode=lambda chunk: b'event: response.created\ndata: PRIVATE\n\n', flush=fail_flush)
+            return response
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            tracer.attach_http_client(client)
+            with self.assertRaises(httpx.DecodingError) as caught, tracer.turn():
+                client.post('https://private.invalid/v1/responses')
+            self.assertIs(caught.exception, error)
+        actual = [event for event in events if event['requestIndex'] == 1]
+        self.assertEqual(actual[-1]['status'], 'error')
+        self.assertTrue(actual[-1]['bodyComplete'])
+        self.assertEqual(actual[-1]['error'], {'source': 'sdk', 'type': 'SDKError'})
+        self.assertEqual(sum(event['status'] == 'error' for event in actual), 1)
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_observer_parser_failure_does_not_interrupt_original_decoded_stream(self):
+        events = []; tracer = self.tracer(events)
+        expected = b'event: response.completed\ndata: PRIVATE\n\n'
+        with patch.object(SSECounter, 'feed', side_effect=RuntimeError('PRIVATE_PARSER_FAILURE')), httpx.Client(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200,
+                    headers={'Content-Type': 'text/event-stream'}, stream=httpx.ByteStream(expected)))) as client:
+            tracer.attach_http_client(client)
+            with tracer.turn(): self.assertEqual(client.post('https://private.invalid/v1/responses').content, expected)
+        actual = [event for event in events if event['requestIndex'] == 1]
+        self.assertEqual(actual[-1]['status'], 'complete')
+        self.assertEqual(actual[-1]['observability']['sse'], 'unavailable')
+        self.assertEqual(actual[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True})
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_compressed_observation_quota_falls_back_unknown_without_interrupting_sdk_bytes(self):
+        events = []; tracer = self.tracer(events)
+        expected = b'event: response.output_text.delta\ndata: ' + b'PRIVATE' * 10000 + b'\n\n'
+        content = gzip.compress(expected)
+        with patch.object(trace_module, 'MAX_SSE_OBSERVED_BYTES', 128, create=True), httpx.Client(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200,
+                    headers={'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip'},
+                    stream=httpx.ByteStream(content)))) as client:
+            tracer.attach_http_client(client)
+            with tracer.turn():
+                self.assertEqual(client.post('https://private.invalid/v1/responses').content, expected)
         self.assertEqual(events[-1]['observability']['sse'], 'unavailable')
-        self.assertEqual(events[-1]['sse']['events'], {})
+        self.assertEqual(events[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True})
+        self.assertEqual(events[-1]['status'], 'complete')
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_proxy_and_connection_tls_stages_are_observed_without_private_trace_info(self):
+        events = []; tracer = self.tracer(events); now = [10.0]
+        def handler(request):
+            trace = request.extensions['trace']
+            for phase, duration in [('connection.connect_tcp', 0.01), ('connection.start_tls', 0.02), ('proxy.start_tls', 0.03)]:
+                trace(phase + '.started', {'PRIVATE_SERVER_HOST': 'PRIVATE_ADDRESS'})
+                now[0] += duration
+                trace(phase + '.complete', {'return_value': 'PRIVATE_STREAM'})
+            return httpx.Response(200, content=b'PRIVATE')
+        with patch.object(trace_module.time, 'monotonic', lambda: now[0]), httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            tracer.attach_http_client(client)
+            with tracer.turn(): client.post('https://private.invalid/v1/responses')
+        self.assertEqual(events[-1]['timings']['connectMs'], 10)
+        self.assertEqual(events[-1]['timings']['tlsMs'], 50)
+        self.assertEqual(events[-1]['observability']['tls'], 'observed')
+        self.assertEqual(events[-1]['observability']['dns'], 'unavailable')
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_installed_sdk_decodes_gzip_sse_with_unchanged_result_and_private_safe_trace(self):
+        try:
+            from openai import OpenAI
+        except ImportError:
+            self.skipTest('existing Hermes OpenAI SDK dependency is required')
+        payload = (b'event: response.reasoning_text.delta\ndata: {"type":"response.reasoning_text.delta","delta":"PRIVATE_THINK"}\n\n'
+                   b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"PRIVATE_RESULT"}\n\n'
+                   b'data: [DONE]\n\n')
+        events = []; tracer = self.tracer(events)
+        with synthetic_server(payload, encoding='gzip') as (url, _), httpx.Client(trust_env=False, timeout=3) as transport:
+            with OpenAI(api_key='synthetic-not-a-real-key', base_url=url.rsplit('/responses', 1)[0] + '/',
+                        http_client=transport, max_retries=0) as sdk:
+                tracer.attach_agent(SimpleNamespace(client=sdk))
+                with tracer.turn():
+                    response = list(sdk.responses.create(model='synthetic-model', input='PRIVATE_PROMPT', stream=True))
+                self.assertEqual([event.delta for event in response], ['PRIVATE_THINK', 'PRIVATE_RESULT'])
+        self.assertEqual(events[-1]['sse']['events'], {'response.reasoning_text.delta': 1, 'response.output_text.delta': 1, 'message': 1})
+        self.assertEqual(events[-1]['observability']['sse'], 'observed')
+        self.assertEqual(events[-1]['status'], 'complete')
+        self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_unrecognized_private_sdk_protocol_is_explicitly_unavailable_without_recording_path(self):
         events = []; tracer = self.tracer(events)
