@@ -758,7 +758,7 @@ class WorkflowGateway:
             raise WorkflowPolicyError("Workflow session is still running.")
         return session, None
 
-    def _guard_assistant_agent(self, session, sid):
+    def _guard_assistant_agent(self, session, sid, *, request_id=None, bind_request=False):
         """An application-owned conversation: no native tools or learning memory.
 
         The native gateway can rebuild an agent or refresh its model between
@@ -781,6 +781,23 @@ class WorkflowGateway:
             raise WorkflowPolicyError("A Skill execution session cannot become an assistant session.")
         identities = self._guard_memory_agent(session, sid, scope={"scope_id": None, "snapshot": None, "flags": (False, False)}, control=True)
         assistant = assistant if assistant is not None else {"identities": set(), "images": []}
+        if "request_tracer" not in assistant:
+            from model_request_trace import ModelRequestTracer
+            assistant["trace_session_id"] = sid
+            def emit_trace(snapshot):
+                emit = getattr(self.server, "_emit", None)
+                if callable(emit):
+                    emit("model.request.trace", assistant["trace_session_id"], {"trace": snapshot})
+            assistant["request_tracer"] = ModelRequestTracer(emit_trace, request_id=request_id)
+        elif bind_request:
+            assistant["request_tracer"].set_request_id(request_id)
+            assistant["trace_session_id"] = sid
+        # Only this protected agent's private SDK clients/factories are observed.
+        # No global transport, vendor source, tools or provider settings change.
+        try:
+            assistant["request_tracer"].attach_agent(agent)
+        except Exception:
+            assistant["request_tracer"].unavailable("TRACE_HOOK_UNAVAILABLE")
         assistant["identities"].update(identities)
         self.assistant_agents[agent] = assistant
         for identity in assistant["identities"]:
@@ -815,7 +832,8 @@ class WorkflowGateway:
                     parts.extend(copy.deepcopy(images))
                     bound.arguments["user_message"] = parts
                     bound.arguments["persist_user_message"] = parts
-                return run(*bound.args, **bound.kwargs)
+                with assistant["request_tracer"].turn():
+                    return run(*bound.args, **bound.kwargs)
 
             # Keep the public native signature for repeat prepares and rebuilds.
             assistant_turn.__signature__ = signature
@@ -823,14 +841,21 @@ class WorkflowGateway:
         return assistant
 
     def assistant_prepare(self, params, rid=None):
-        if not isinstance(params, dict) or set(params) != {"session_id"} or not isinstance(params["session_id"], str) or not params["session_id"]:
-            raise WorkflowPolicyError("Assistant preparation requires only a live session_id.")
+        if not isinstance(params, dict) or set(params) - {"session_id", "request_id"} or not isinstance(params.get("session_id"), str) or not params["session_id"]:
+            raise WorkflowPolicyError("Assistant preparation requires a live session_id and optional canonical request_id.")
+        request_id = params.get("request_id")
+        if "request_id" in params:
+            try:
+                if not isinstance(request_id, str) or str(uuid.UUID(request_id)) != request_id:
+                    raise ValueError()
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise WorkflowPolicyError("Assistant request_id must be a canonical UUID.") from exc
         with self.lock:
             session, error = self._session(params, rid)
             if error:
                 return error
             self._workspace(session)
-            self._guard_assistant_agent(session, params["session_id"])
+            self._guard_assistant_agent(session, params["session_id"], request_id=request_id, bind_request=True)
             return {"policy": {"toolsAllowed": False, "applicationTools": "broker-only", "sourceMutationBlocked": True,
                                "skillMutationBlocked": True, "memoryAllowed": False, "memoryWriteAllowed": False,
                                "externalMemoryAllowed": False}}

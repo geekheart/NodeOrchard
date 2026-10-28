@@ -1,3 +1,5 @@
+import { readModelRequestTraces } from './model-request-traces.mjs';
+
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_CALLS = 12;
 const MAX_BYTES = 16384;
@@ -71,6 +73,15 @@ function metadataView(value) {
     usage: Object.fromEntries(['input', 'output', 'total', 'context_used'].map(key => [key, number(own(own(value, 'usage'), key))])) };
 }
 
+function callIdentities(turn) {
+  const assistant = own(turn, 'assistant'), progress = own(assistant, 'progress');
+  const steps = array(own(own(assistant, 'checkpoint'), 'steps')).filter(step => STAGES.has(own(step, 'stage')));
+  const ids = [...new Set([...array(own(turn, 'modelSessionIds')), own(turn, 'modelSessionId')].filter(value => value !== undefined && value !== null))];
+  if (ids.some(value => !identifier(value)) || ids.length > 10000) fail('轮次模型会话身份无效。');
+  const total = Math.max(ids.length, number(own(progress, 'modelCalls')) || 0, ...steps.map(step => number(own(step, 'modelCall')) || 0));
+  return { ids, total };
+}
+
 // This reader never creates a table, changes business state or resumes a Hermes
 // session. The caller resolves authorization and supplies one server-owned turn;
 // the reader verifies its scope and model-session ownership a second time.
@@ -88,14 +99,21 @@ export class AssistantModelDiagnostics {
       })]));
     } catch { return null; } finally { clearTimeout(timer); }
   }
-  async inspect(input) {
+  sessionForCall(input, callIndex) {
+    const { turn } = target(input), { ids, total } = callIdentities(turn);
+    if (!Number.isSafeInteger(callIndex) || callIndex < 1 || callIndex > 10000) fail('模型调用编号无效。');
+    const sessionId = ids[callIndex - 1];
+    if (callIndex > total || !sessionId) fail('该轮没有对应的已登记模型调用。', 404);
+    if (!this.table('application_model_sessions') || !this.row('SELECT 1 FROM application_model_sessions WHERE id=?', sessionId)) fail('只能读取此轮已登记的模型控制会话。', 403);
+    return { index: callIndex, sessionId };
+  }
+  async inspect(input, { callIndex } = {}) {
     const { workflowId, conversationId, turn } = target(input), turnId = own(turn, 'id');
     const assistant = own(turn, 'assistant'), progress = own(assistant, 'progress'), checkpoint = own(assistant, 'checkpoint');
     const allSteps = array(own(checkpoint, 'steps')), steps = allSteps.filter(step => STAGES.has(own(step, 'stage')));
-    const ids = [...new Set([...array(own(turn, 'modelSessionIds')), own(turn, 'modelSessionId')].filter(value => value !== undefined && value !== null))];
-    if (ids.some(value => !identifier(value))) fail('轮次模型会话身份无效。');
-    const total = Math.max(ids.length, number(own(progress, 'modelCalls')) || 0, ...steps.map(step => number(own(step, 'modelCall')) || 0));
-    const selected = Array.from({ length: Math.min(total, MAX_CALLS) }, (_, offset) => total - Math.min(total, MAX_CALLS) + offset + 1);
+    const { ids, total } = callIdentities(turn);
+    if (callIndex !== undefined) this.sessionForCall(input, callIndex);
+    const selected = callIndex !== undefined ? [callIndex] : Array.from({ length: Math.min(total, MAX_CALLS) }, (_, offset) => total - Math.min(total, MAX_CALLS) + offset + 1);
     const selectedIds = selected.map(index => ids[index - 1]).filter(Boolean);
     const ownership = this.table('application_model_sessions');
     if (selectedIds.some(sessionId => !ownership || !this.row('SELECT 1 FROM application_model_sessions WHERE id=?', sessionId))) {
@@ -169,6 +187,8 @@ export class AssistantModelDiagnostics {
         timeoutPolicy: policyView(own(stored, 'timeoutPolicy')), promptCharacters: number(own(stored, 'promptCharacters')) ?? own(info, 'promptCharacters') ?? null,
         outputCharacters, outputCharactersComplete: complete && Boolean(stored),
         usage: usageView(usage, fallback, complete), runningSnapshot: persistedSnapshotStatus === 'running',
+        requestTrace: sessionId ? readModelRequestTraces(this.db, sessionId, { limit: 1 }) : { recorded: false, requests: [] },
+        applicationTermination: ({ MODEL_ABORTED: 'controller-abort', MODEL_CLOSED: 'application-shutdown', MODEL_DISCONNECTED: 'connection-lost', MODEL_TIMEOUT: 'local-deadline' })[errorCode] || null,
         evidenceSource: stored ? 'model-call-record' : currentSteps.length ? 'checkpoint' : currentLogs.length ? 'application-log' : 'unknown' };
     });
     const findings = [];
@@ -192,8 +212,15 @@ export class AssistantModelDiagnostics {
       toolDurationCoverage: { observedSteps: toolDurations.length, checkpointTruncated: number(own(progress, 'toolCalls')) > toolSteps.length },
       calls, findings, sources,
       logEvidence: { ids: logs.slice(-64).map(row => number(row.id)).filter(value => value !== null), truncated: logTruncated || logs.length > 64 },
-      missingEvidence: [...missing], truncated: total > MAX_CALLS };
+      missingEvidence: [...missing], truncated: callIndex === undefined && total > MAX_CALLS,
+      ...(callIndex !== undefined ? { selection: { callIndex } } : {}) };
     while (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_BYTES && result.logEvidence.ids.length) { result.logEvidence.ids.shift(); result.logEvidence.truncated = true; }
+    // Preserve the model-call chain first; detailed transport attempts have a
+    // separate paged reader and need not be duplicated in every summary.
+    for (const call of result.calls) {
+      if (Buffer.byteLength(JSON.stringify(result), 'utf8') <= MAX_BYTES) break;
+      if (call.requestTrace.requests?.length) { call.requestTrace.requests = []; call.requestTrace.hasMore = true; call.requestTrace.nextAfterRequestIndex = 0; }
+    }
     while (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_BYTES && result.calls.length) {
       result.calls.shift(); result.truncated = true; result.findings = result.findings.filter(row => result.calls.some(call => call.index === row.call));
     }

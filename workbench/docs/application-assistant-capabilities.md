@@ -192,3 +192,7 @@
 未来增加 MCP 时，适配器只负责协议封装、调用身份与上下文转换，实际能力继续进入同一 dispatcher、参数校验、作用范围、版本、幂等和结果投影。MCP 不能另起一套较宽权限，不能透传 Hermes 原生工具、认证或任意文件访问，也不能因为 Skill 描述了某项能力就自动授予调用权限。
 
 相关说明：[应用对话与诊断](application-diagnostics.md) · [整体架构](architecture.md) · [工作流对话](workflow-conversation.md) · [仓库规则](../../AGENTS.md)。
+
+## 总控诊断扩展
+
+请求链路由 `assistant.diagnose` 摘要和 `assistant.trace` 受控分页读取，复用日志与对象归属权限；历史缺失和不可观测阶段明确未知。`supervisor.sourceRead` 独立开放源码目录／读取，`sourceRepair` 继续单独控制补丁、测试、修复历史与回滚。`supervisor.modelExperiment` 及顶层 `modelExperimentLimits.maxInputCharacters` 仅人工设置；默认关闭，已授权总控可用 `assistant.experiment` 做单轮一次的合成模型近似实验，不执行业务、不读取原始prompt、不修改默认模型或权限。输出为软约束，有真实用量。模型实验不进入批量、只读委派或结果缓存；未确认操作不重放。接口与证据边界见[请求级链路与近似实验](application-diagnostics.md#请求级链路与近似实验)。

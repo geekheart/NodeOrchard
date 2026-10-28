@@ -82,3 +82,5 @@ Skill 工具扩展提供 `workbench.tools.catalog`、`workbench.skills.catalog`�
 
 首次验收还需读回真实文件并核对随机标记，因此“模型说完成”不单独作为通过依据。
 
+
+受保护助手准备接受可选规范UUID `request_id`，绑定当前控制调用。`model.request.trace` 仅投影实例SDK的时序、HTTP状态、请求关联ID和固定SSE类型计数；Node核对已登记session与requestId后写入专用有界元数据表，不原样转发浏览器。`assistant.trace`读取该记录不恢复原生会话，`assistant.experiment`只在人工独立授权后使用新受保护会话发送合成文本，详见[请求级链路](application-diagnostics.md#请求级链路与近似实验)。

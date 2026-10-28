@@ -395,9 +395,12 @@ export class ApplicationAssistant {
       const catalog = tools.map(({ name, description, inputSchema, effect, readOnly }) => ({
         name, description: description?.split('；')[0].slice(0, 64), inputSchema, effect: effect || (readOnly ? 'read-only' : 'restricted'),
       }));
-      const batchExcluded = new Set(['workflow.propose', 'browser.capture', 'environment.probe', 'workflow.preflight', 'artifact.inspect', 'assistant.probe']);
+      const batchExcluded = new Set(['workflow.propose', 'browser.capture', 'environment.probe', 'workflow.preflight', 'artifact.inspect', 'assistant.probe', 'assistant.experiment']);
       const sourceRepair = role === 'supervisor' && !readOnly && permissionScope.permissions.sourceRepair === true;
+      const sourceRead = role === 'supervisor' && (permissionScope.permissions.sourceRead === true || permissionScope.permissions.sourceRepair === true);
       const fixed = `你是工作台的${role === 'workflow' ? '当前工作流独立助手' : '总控助手'}，中文回答。权限范围以SOURCE_JSON.permissionScope和工具目录为准。独立助手只可访问绑定工作流和工作文件夹。通过目录内受控工具读取状态、运行、日志和能力，再回答或生成获准修改。原生shell、任意文件${sourceRepair ? '' : '、源码写入'}、权限设置修改、学习答案和记忆均不可用；要求扩大权限时请用户到设置页操作。\n`
+        + (sourceRead ? '源码只读权限已开放：可用app.source.list/read核对相关实现与版本，这不授予源码修改或测试能力。\n' : '')
+        + '模型链路先读assistant.diagnose摘要，再按目标call用assistant.trace分页读取连接、响应头、HTTP和SSE事件类型的元数据；未观测字段保持未知。不要用传输结束代替模型成功，不把连接耗时拆成未知的上游排队或推理时间。assistant.experiment仅在工具已开放时按人工额度做无业务工具的合成近似验证，不能复原历史提示词或自动重试未知请求，不能将一次实验等同历史根因证明。\n'
         + (sourceRepair ? '用户已手动开启实验性源码自修复。当前人工消息要求修复软件时，可自行使用app.source.list/read定位、patch改代码、test运行明确的相关测试、history核对记录，失败可继续修复或rollback。权限控制与启动入口、凭据和用户工作流数据受保护；不要修改或运行现有工作流，不自动安装依赖、重启或发布。写入不算完成，只有当前版本的隔离相关测试真实通过才报告已验证；沙箱不可用或冲突时明确说明缺口，不伪造成功。只读咨询不授权写入。\n'
           : '')
         + (decision ? `本轮AI已判断类型为${decision.intent}。${decision.intent === 'discuss' ? '直接讨论和解释；只在确有能力说明缺口时读取知识，不主动启动故障取证或生成修改。' : decision.intent === 'diagnose' ? '按用户问题取最少故障证据，再给出结论或获准的业务候选。' : '按这个类型选择已开放处理入口，分类本身不授权运行、审批、学习或应用。'}\n` : '')
@@ -483,7 +486,8 @@ export class ApplicationAssistant {
           const descriptor = tools.find(tool => tool.name === name);
           turn.toolCalls++;
           const liveSource = name.startsWith('app.source.');
-          const cached = liveSource ? undefined : turn.cache.get(key) || failures.get(key);
+          const liveRead = liveSource || name === 'assistant.trace';
+          const cached = liveRead ? undefined : turn.cache.get(key) || failures.get(key);
           phase(liveSource ? 'source-repair' : name === 'workflow.propose' ? 'proposal' : 'tool-read',
             cached ? `复用已查证据：${name}` : name === 'workflow.propose' ? '生成工作流修改候选（尚未应用）' : `正在检查：${descriptor.description?.split('；')[0] || name}`,
             { tool: name, ...(cached ? { cached: true } : {}) });
@@ -517,7 +521,7 @@ export class ApplicationAssistant {
             }
             value = { error: String(redact(error.message)).slice(0, 2000), executed: false };
           }
-          const safe = turn.record(name, args, value, { key, cacheable: descriptor.effect === 'read-only' && !liveSource });
+          const safe = turn.record(name, args, value, { key, cacheable: descriptor.effect === 'read-only' && !liveRead });
           if (value?.executed === false) {
             const previous = failures.get(key);
             failures.set(key, { result: safe, collectedAt: new Date().toISOString() });

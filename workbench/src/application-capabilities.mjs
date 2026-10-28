@@ -98,6 +98,10 @@ const FEATURES = [
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '学习改进支持指定Skill、指定工具或整个流程；聊天可准备配置，界面明确启动。工具和流程候选调整业务代码或内部图，固定输入输出、评价和审核边界；最佳版本审阅后应用，训练和验证材料不开放给诊断助手。' },
   { id: 'application-source-editing', status: 'unavailable', experimental: true, defaultEnabled: false, requiredPermission: 'supervisor.sourceRepair', tools: [],
     note: '人工开启后仅总控可用受控源码读取、版本补丁、隔离相关测试、记录和冲突回滚。权限控制、凭据与用户工作流数据保持保护，没有任意shell或权限设置写工具。' },
+  { id: 'application-source-reading', status: 'unavailable', defaultEnabled: false, requiredPermission: 'supervisor.sourceRead', tools: [],
+    note: '人工独立开启后，总控可按白名单分页读取当前源码与SHA；不授予修改、测试、终端或权限设置写入。' },
+  { id: 'model-diagnostic-experiment', status: 'unavailable', defaultEnabled: false, requiredPermission: 'supervisor.modelExperiment', tools: [],
+    note: '人工预授权后，总控可对已登记历史调用进行合成近似模型实验；固定路由和已确认推理配置，每轮一次、输入规模受人工额度约束。输出为软约束，有真实模型用量，不运行或修改工作流。' },
 ];
 
 function argsObject(args, allowed) {
@@ -114,14 +118,28 @@ export class ApplicationCapabilities {
     if (scope) return scope.role === 'supervisor' && !scope.readOnly && scope.permissions?.sourceRepair === true;
     return this.app.assistantPermissionSettings?.get?.()?.supervisor?.sourceRepair === true;
   }
+  sourceReadEnabled(scope) {
+    if (scope) return scope.role === 'supervisor' && (scope.permissions?.sourceRead === true || scope.permissions?.sourceRepair === true);
+    const settings = this.app.assistantPermissionSettings?.get?.()?.supervisor;
+    return settings?.sourceRead === true || settings?.sourceRepair === true;
+  }
+  modelExperimentEnabled(scope) {
+    const permissions = scope?.permissions || this.app.assistantPermissionSettings?.get?.()?.supervisor;
+    return (!scope || scope.role === 'supervisor' && !scope.readOnly) && permissions?.modelExperiment === true && permissions.workflowRead === true && permissions.appLogs === true;
+  }
   features(scope) {
-    return structuredClone(FEATURES).map(feature => feature.id === 'application-source-editing' && this.sourceRepairEnabled(scope)
+    return structuredClone(FEATURES).map(feature => feature.id === 'application-source-reading'
+      ? { ...feature, status: this.sourceReadEnabled(scope) ? 'available' : 'unavailable', tools: this.sourceReadEnabled(scope) ? ['app.source.list', 'app.source.read'] : [] }
+      : feature.id === 'model-diagnostic-experiment'
+        ? { ...feature, status: this.modelExperimentEnabled(scope) ? 'available' : 'unavailable', tools: this.modelExperimentEnabled(scope) ? ['assistant.experiment'] : [] }
+      : feature.id === 'application-source-editing' && this.sourceRepairEnabled(scope)
       ? { ...feature, status: 'available', tools: APPLICATION_SOURCE_TOOLS.map(tool => tool.name) } : feature.id === 'application-source-editing'
         ? { id: feature.id, status: 'unavailable', defaultEnabled: false, tools: [] } : feature);
   }
   tools(scope) {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS), ...(this.sourceRepairEnabled(scope) ? structuredClone(APPLICATION_SOURCE_TOOLS) : [])];
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS).filter(tool => tool.name !== 'assistant.experiment' || this.modelExperimentEnabled(scope)),
+      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope))];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }

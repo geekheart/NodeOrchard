@@ -38,6 +38,17 @@ test('one bounded read batch avoids separate model decisions and deduplicates no
   assert.match(f.prompts[1], /FETCH_FAILED/); assert.equal(result.evidence[1].cached, true);
 });
 
+test('paged request trace reads observe transport updates instead of reusing a stale live snapshot', async t => {
+  const request = () => ({ tool: 'assistant.trace', arguments: { workflowId: 'wf', turnId: 'prior-turn', callIndex: 1 } });
+  const f = fixture(t, [request, request, () => ({ text: '最新请求已经返回响应头。' })]);
+  let traceReads = 0; const call = f.assistant.call.bind(f.assistant);
+  f.assistant.call = async (name, args, context) => name === 'assistant.trace'
+    ? { trace: { recorded: true, requests: [{ status: ++traceReads === 1 ? 'running' : 'complete', http: { status: traceReads === 1 ? null : 200 } }] } }
+    : call(name, args, context);
+  const result = await f.assistant.plan({ text: '继续核对当前请求进度', context: { workflowId: 'wf' } });
+  assert.equal(traceReads, 2); assert.match(f.prompts[2], /"status":200/); assert.match(result.text, /响应头/);
+});
+
 test('default orchestration passes no numeric deadline and can return a model result after the old six-minute limit', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2026, 9, 28) });
   let resolve, options, settled = false;

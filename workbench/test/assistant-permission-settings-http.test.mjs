@@ -71,7 +71,7 @@ test('permission settings GET declares immutable protections and PUT persists ex
 test('experimental source repair is supervisor-only, disabled by default and persists only after a human versioned save', async t => {
   const f = await fixture(t), before = businessState(f.app), original = (await f.request()).body;
   assert.equal(original.supervisor.sourceRepair, false); assert.equal(Object.hasOwn(original.workflow, 'sourceRepair'), false);
-  for (const [role, keys] of Object.entries(ASSISTANT_PERMISSION_KEYS)) for (const key of keys) assert.equal(original[role][key], key !== 'sourceRepair');
+  for (const [role, keys] of Object.entries(ASSISTANT_PERMISSION_KEYS)) for (const key of keys) assert.equal(original[role][key], !['sourceRead', 'sourceRepair', 'modelExperiment'].includes(key));
   const enabled = update(original); enabled.supervisor.sourceRepair = true;
   const saved = await f.request('PUT', enabled); assert.equal(saved.status, 200); assert.equal(saved.body.supervisor.sourceRepair, true);
   assert.equal(saved.body.immutable.unrestrictedSourceWrite, false); assert.equal(saved.body.immutable.permissionWrite, false); assert.equal(saved.body.immutable.shell, false);
@@ -79,14 +79,16 @@ test('experimental source repair is supervisor-only, disabled by default and per
   assert.deepEqual(businessState(f.app), before); assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get().count, 0);
 });
 
-test('legacy permission rows project source repair as disabled without migrating settings or business records on read', async t => {
-  const f = await fixture(t), legacy = (await f.request()).body, before = businessState(f.app); delete legacy.supervisor.sourceRepair;
+test('legacy permission rows project new grants as disabled without migrating settings or business records on read', async t => {
+  const f = await fixture(t), legacy = (await f.request()).body, before = businessState(f.app);
+  for (const key of ['sourceRead', 'sourceRepair', 'modelExperiment']) delete legacy.supervisor[key];
   const payload = JSON.stringify({ workflow: legacy.workflow, supervisor: legacy.supervisor });
   f.app.store.db.prepare('UPDATE assistant_permission_settings SET revision=17,value=? WHERE id=1').run(payload);
   const stored = () => f.app.store.db.prepare('SELECT revision,value FROM assistant_permission_settings WHERE id=1').get();
   const row = stored(), events = f.app.events.filter(event => event.type === 'assistant.permissions.updated').length;
   for (let index = 0; index < 2; index++) {
     const result = await f.request(); assert.equal(result.status, 200); assert.equal(result.body.revision, 17); assert.equal(result.body.supervisor.sourceRepair, false);
+    assert.equal(result.body.supervisor.sourceRead, false); assert.equal(result.body.supervisor.modelExperiment, false);
     assert.deepEqual(result.body.workflow, legacy.workflow); assert.deepEqual(stored(), row);
   }
   await f.bridge.close(); await f.open(); const read = (await f.request()).body;
@@ -106,6 +108,24 @@ test('permission versions reject stale windows without overwriting a newer human
   assert.equal(f.app.events.filter(event => event.type === 'assistant.permissions.updated').length, 1);
 });
 
+test('source read and model experiments are opt-in human grants with a separately bounded input quota', async t => {
+  const f = await fixture(t), before = businessState(f.app), original = (await f.request()).body;
+  assert.equal(original.supervisor.sourceRead, false); assert.equal(original.supervisor.modelExperiment, false);
+  assert.deepEqual(original.modelExperimentLimits, { maxInputCharacters: 50000 });
+  const body = update(original); body.supervisor.sourceRead = true; body.supervisor.modelExperiment = true;
+  body.modelExperimentLimits = { maxInputCharacters: 4000 };
+  const saved = await f.request('PUT', body); assert.equal(saved.status, 200);
+  assert.equal(saved.body.supervisor.sourceRead, true); assert.equal(saved.body.supervisor.sourceRepair, false);
+  assert.equal(saved.body.supervisor.modelExperiment, true); assert.deepEqual(saved.body.modelExperimentLimits, { maxInputCharacters: 4000 });
+  const legacy = update(saved.body); delete legacy.supervisor.sourceRead; delete legacy.supervisor.modelExperiment;
+  legacy.workflow.capture = false;
+  const preserved = await f.request('PUT', legacy); assert.equal(preserved.status, 200);
+  assert.equal(preserved.body.supervisor.sourceRead, true); assert.equal(preserved.body.supervisor.modelExperiment, true);
+  assert.deepEqual(preserved.body.modelExperimentLimits, { maxInputCharacters: 4000 });
+  await f.bridge.close(); await f.open(); assert.deepEqual((await f.request()).body, preserved.body);
+  assert.deepEqual(businessState(f.app), before);
+});
+
 test('HTTP permissions reject unknown fields, role escalation, incomplete scopes and non-boolean values', async t => {
   const f = await fixture(t), original = (await f.request()).body, before = businessState(f.app);
   const cases = [
@@ -117,12 +137,18 @@ test('HTTP permissions reject unknown fields, role escalation, incomplete scopes
     { ...update(original), workflow: { ...original.workflow, manageWorkflows: true } },
     { ...update(original), workflow: { ...original.workflow, permissionWrite: true } },
     { ...update(original), workflow: { ...original.workflow, sourceRepair: true } },
+    { ...update(original), workflow: { ...original.workflow, sourceRead: true } },
+    { ...update(original), workflow: { ...original.workflow, modelExperiment: true } },
     { ...update(original), supervisor: { ...original.supervisor, shell: true } },
     { ...update(original), supervisor: { ...original.supervisor, applicationSourceWrite: true } },
     { ...update(original), supervisor: { ...original.supervisor, role: 'root' } },
     { ...update(original), workflow: { ...original.workflow, customNodes: 'true' } },
     { ...update(original), supervisor: { ...original.supervisor, appLogs: 1 } },
     { ...update(original), supervisor: { ...original.supervisor, sourceRepair: 'true' } },
+    { ...update(original), supervisor: { ...original.supervisor, sourceRead: 1 } },
+    { ...update(original), supervisor: { ...original.supervisor, modelExperiment: 'true' } },
+    ...[{}, { maxInputCharacters: 999 }, { maxInputCharacters: 100001 }, { maxInputCharacters: 2000.5 }, { maxInputCharacters: '50000' },
+      { maxInputCharacters: 50000, maxCallsPerTurn: 3 }, null].map(modelExperimentLimits => ({ ...update(original), modelExperimentLimits })),
     { ...update(original), workflow: { ...original.workflow, workflowRead: null } },
     { ...update(original), supervisor: [] },
     { expectedRevision: original.revision, workflow: original.workflow },

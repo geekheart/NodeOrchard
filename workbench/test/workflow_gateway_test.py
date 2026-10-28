@@ -113,6 +113,10 @@ class FakeServer:
         self.methods = {}
         self.sessions = {"runtime-session": {"agent": agent, "cwd": str(workspace), "session_key": "stored-session", "running": False}}
         self.scopes = []
+        self.events = []
+
+    def _emit(self, event, sid, payload):
+        self.events.append((event, sid, payload))
 
     def _sess(self, params, rid):
         session = self.sessions.get(params.get("session_id"))
@@ -814,6 +818,38 @@ class WorkflowGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(gateway.WorkflowPolicyError, "native subprocess"):
             self.agent.run_conversation("diagnose")
         self.assertEqual(len(self.agent.turn_calls), 1)
+
+    def test_assistant_request_trace_is_explicitly_unavailable_and_bound_to_control_identity(self):
+        request_id = str(uuid.uuid4())
+        result = self.bridge.assistant_prepare({"session_id": "runtime-session", "request_id": request_id})
+        self.assertFalse(result["policy"]["toolsAllowed"])
+        self.assertTrue(self.server.events)
+        event, sid, payload = self.server.events[-1]
+        self.assertEqual((event, sid), ("model.request.trace", "runtime-session"))
+        trace = payload["trace"]
+        self.assertEqual(trace["requestId"], request_id)
+        self.assertEqual(trace["requestIndex"], 0)
+        self.assertEqual(trace["status"], "unavailable")
+        self.assertEqual(trace["code"], "TRACE_CLIENT_UNAVAILABLE")
+        self.assertTrue(all(value is None for value in trace["timings"].values()))
+        for invalid in ("private-not-uuid", request_id.upper(), 9):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.bridge.assistant_prepare_rpc(71, {"session_id": "runtime-session", "request_id": invalid})["error"]["code"], 4098)
+        # Native rebuilds preserve correlation and the existing execution policy.
+        rebuilt = FakeAgent()
+        self.server._wire_session_agent("runtime-session", "stored-session", rebuilt)
+        rebuilt.run_conversation("synthetic text")
+        self.assertEqual(self.server.events[-1][2]["trace"]["requestId"], request_id)
+        self.assertEqual(rebuilt.valid_tool_names, set())
+        self.bridge.assistant_prepare({"session_id": "runtime-session"})
+        self.assertIsNone(self.server.events[-1][2]["trace"]["requestId"])
+
+    def test_ordinary_and_learning_sessions_are_not_instrumented_for_model_request_traces(self):
+        self.agent.run_conversation("ordinary")
+        self.assertEqual(self.server.events, [])
+        self.new_session("learning-no-traces")
+        self.bridge.learning_prepare({"session_id": "learning-no-traces"})
+        self.assertEqual(self.server.events, [])
 
     def assistant_image(self, name="capture.png", data=b"\x89PNG\r\n\x1a\nsynthetic screenshot"):
         diagnostics = self.workspace.parent / "diagnostics"

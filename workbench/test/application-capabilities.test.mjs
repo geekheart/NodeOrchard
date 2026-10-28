@@ -27,6 +27,20 @@ function application(t) {
   return { app, assistant, capabilities: assistant.capabilities };
 }
 
+test('source inspection and model experiments are independently advertised without granting source mutation', async t => {
+  const f = application(t), settings = { revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) };
+  settings.supervisor.sourceRead = true; settings.supervisor.modelExperiment = true;
+  f.app.assistantPermissionSettings.get = () => structuredClone(settings);
+  const scope = await f.assistant.permissions.bind({ role: 'supervisor' });
+  const names = f.assistant.tools(scope).map(tool => tool.name);
+  assert(names.includes('app.source.list')); assert(names.includes('app.source.read')); assert(names.includes('assistant.experiment')); assert(names.includes('assistant.trace'));
+  assert(!names.includes('app.source.patch')); assert(!names.includes('app.source.test')); assert(!names.includes('app.source.rollback'));
+  assert.equal(f.capabilities.features(scope).find(row => row.id === 'application-source-reading').status, 'available');
+  assert.equal(f.capabilities.features(scope).find(row => row.id === 'application-source-editing').status, 'unavailable');
+  const readOnly = await f.assistant.permissions.bind({ role: 'supervisor', readOnly: true });
+  assert(f.assistant.tools(readOnly).some(tool => tool.name === 'app.source.read')); assert(!f.assistant.tools(readOnly).some(tool => tool.name === 'assistant.experiment'));
+});
+
 test('skill source discovery is bounded metadata and grants no delete or content access to the assistant', async t => {
   const f = application(t); let reads = 0;
   f.app.skills = async options => {
@@ -120,7 +134,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   const tools = f.assistant.tools();
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));
-  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS].map(row => row.name));
+  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS.filter(tool => tool.name !== 'assistant.experiment')].map(row => row.name));
   assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 5);
   assert.match((await f.capabilities.read('assistant.skills.read', { name: 'author-code-node' })).instructions, /node.describe/);
 });

@@ -8,6 +8,7 @@ import { SessionUsage, sanitizeSessionUsage } from './session-usage.mjs';
 import { HistoricalUsage } from './historical-usage.mjs';
 import { ApplicationLog } from './application-log.mjs';
 import { ApplicationLogEvents } from './application-log-events.mjs';
+import { ModelRequestTraces } from './model-request-traces.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
 import { SkillIntegrations } from './skill-integrations.mjs';
@@ -146,6 +147,7 @@ export class Application extends EventEmitter {
     this.workflowLibrary = new WorkflowLibrary(this);
     this.nodePresets = new WorkflowNodePresets(this);
     this.assistantModel = new LearningModel(this, { purpose: 'assistant' });
+    this.modelRequestTraces = new ModelRequestTraces(this);
     this.diagnostics = new AppDiagnostics(this);
     this.diagnosticBrowser = createAppDiagnosticBrowser({ dataDir: config.dataDir, chromePath: config.diagnosticChromePath, ffmpegPath: config.diagnosticFfmpegPath });
     this.assistantPermissionSettings = new AssistantPermissionSettings(this);
@@ -599,6 +601,12 @@ export class Application extends EventEmitter {
       return;
     }
     if (event.session_id && !session) return;
+    if (event.type === 'model.request.trace') {
+      // Dedicated metadata ingestion never forwards an unchecked native payload
+      // to browser SSE/history or turns it into another model message.
+      if (session) this.modelRequestTraces?.capture(session.id, event.payload?.trace);
+      return;
+    }
     const payload = event.payload || {};
     if (session && ['session.info', 'session.usage', 'message.complete'].includes(event.type)) {
       this.observeUsage(session.id, payload.usage, event.type, event.type === 'message.complete');

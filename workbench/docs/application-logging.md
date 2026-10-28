@@ -37,3 +37,7 @@ Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: her
 持久结果使用 `structured.entries`。分页以实际交付的nextAfterId继续，不能用进程内事件序号代替。工具按模型上下文与响应预算交付完整条目，较大的请求可能缩小为更短的交付窗口，hasMore和truncated提示后续可读；不因截断跳过未交付记录。
 
 `currentProcess` 中的Hermes诊断只保留当前进程窗口，不能当作历史日志。日志不可用、debug未开启或记录已过期时，助手说明证据缺口并继续使用真实运行、会话与产物工具，不虚构缺失记录，不要求用户重复粘贴仍可读取的日志。
+
+请求级诊断的详细元数据保存在独立有界 `application_model_request_traces`，不保存任意请求／响应头。只允许上游请求关联ID、状态码、数字Retry-After、时序、固定流事件计数和错误分类；通用 `assistant.request.trace` 日志仅保存会话／控制请求身份、阶段、状态、耗时及HTTP状态。原始payload不发布到浏览器事件历史。链路读取见[请求级链路](application-diagnostics.md#请求级链路与近似实验)。
+
+模型实验 `assistant.experiment.started/completed/failed` 仅记录准入身份、目标总控轮次、调用数、字符规模和状态；合成prompt及模型正文不入日志。持久准入保存在 `assistant_model_experiments`，未知状态不重放，不修改工作流或原始历史。

@@ -13,13 +13,13 @@ async function fixture(t, options = {}) {
   await mkdir(join(root, 'workbench/src'), { recursive: true }); await mkdir(join(root, 'workbench/test'), { recursive: true });
   await writeFile(join(root, 'workbench/src/feature.mjs'), 'export const value = 1;\n');
   await writeFile(join(root, 'workbench/test/feature.test.mjs'), "import test from 'node:test'; test('fixture', () => {});\n");
-  const db = new DatabaseSync(':memory:'), logs = []; let enabled = true;
+  const db = new DatabaseSync(':memory:'), logs = []; let enabled = true, sourceRead = false;
   const app = { config: { projectRoot: root, appRoot: join(root, 'workbench'), dataDir: join(root, 'workbench/.local'), workspaceRoot: join(root, 'workflow'), workflowRunRoot: join(root, 'runs') }, store: { db, list: () => [] },
-    workflows: { list: () => [] }, learning: { list: () => [] }, assistantPermissionSettings: { get: () => ({ supervisor: { sourceRepair: enabled } }) }, logger: { write: (...args) => logs.push(args) } };
+    workflows: { list: () => [] }, learning: { list: () => [] }, assistantPermissionSettings: { get: () => ({ supervisor: { sourceRepair: enabled, sourceRead } }) }, logger: { write: (...args) => logs.push(args) } };
   const service = new ApplicationSourceRepairs(app, { readGitState: async () => ({ tracked: ['workbench/src/feature.mjs', 'workbench/test/feature.test.mjs'], dirty: [] }), ...options });
   const context = { role: 'supervisor', turnId: 'fixture-turn', conversationId: 'fixture-topic', authorize: async () => { if (!enabled) throw Object.assign(Error('disabled'), { httpStatus: 403 }); return true; } };
   t.after(async () => { await service.close(); db.close(); await rm(root, { recursive: true, force: true }); });
-  return { root, app, service, context, logs, setEnabled: value => { enabled = value; } };
+  return { root, app, service, context, logs, setEnabled: value => { enabled = value; }, setSourceRead: value => { sourceRead = value; } };
 }
 
 test('source read/list are bounded and patch uses the observed hash with an immutable operation receipt', async t => {
@@ -34,6 +34,45 @@ test('source read/list are bounded and patch uses the observed hash with an immu
   assert.equal((await service.patch(payload, context)).id, repair.id);
   await assert.rejects(service.patch({ ...payload, summary: 'A different operation' }, context), /操作|幂等/);
   assert.equal((await service.history({ limit: 5 })).repairs.length, 1);
+});
+
+test('a source-read-only supervisor can inspect registered source but cannot convert that access into a repair', async t => {
+  const f = await fixture(t); f.setEnabled(false); f.setSourceRead(true);
+  const context = { role: 'supervisor', authorize: async () => true, sourceAccess: 'read', allowSourceWrite: false, deadlineAt: null };
+  const source = await f.service.read({ path: 'workbench/src/feature.mjs' }, context);
+  assert.equal(source.content, 'export const value = 1;\n');
+  const list = await f.service.list({ prefix: 'workbench/src' }, context);
+  assert.equal(list.files.length, 1); assert.equal(list.files[0].writable, false);
+  await assert.rejects(f.service.read({ path: 'workbench/.local/private.json' }, context), { code: 'SOURCE_FILE_UNTRACKED' });
+  await assert.rejects(f.service.read({ path: 'workbench/src/feature.mjs' }, { ...context, role: 'workflow' }), { code: 'SOURCE_REPAIR_FORBIDDEN' });
+  await assert.rejects(f.service.patch({ operationId: 'read-cannot-patch', summary: 'Forbidden', changes: [{ path: source.path, expectedHash: source.hash, content: 'changed' }] }, context), { code: 'SOURCE_REPAIR_FORBIDDEN' });
+  assert.equal(await readFile(join(f.root, source.path), 'utf8'), 'export const value = 1;\n');
+  f.setSourceRead(false);
+  await assert.rejects(f.service.read({ path: source.path }, context), { code: 'SOURCE_REPAIR_FORBIDDEN' });
+  assert.equal((await f.service.history()).repairs.length, 0);
+});
+
+test('source-read revocation during a file check rejects the read without returning content', async t => {
+  const f = await fixture(t); f.setEnabled(false); f.setSourceRead(true);
+  let checks = 0;
+  const context = { role: 'supervisor', authorize: async () => { if (++checks === 3) f.setSourceRead(false); return true; } };
+  await assert.rejects(f.service.read({ path: 'workbench/src/feature.mjs' }, context), { code: 'SOURCE_REPAIR_FORBIDDEN' });
+  assert.equal(checks, 3);
+  assert.equal(await readFile(join(f.root, 'workbench/src/feature.mjs'), 'utf8'), 'export const value = 1;\n');
+});
+
+test('model experiment admission source remains readable but cannot be patched to raise its quota', async t => {
+  const path = 'workbench/src/assistant-model-experiment.mjs', content = 'export const maxCallsPerTurn = 1;\n';
+  const { root, service, context } = await fixture(t, { readGitState: async () => ({ tracked: [path], dirty: [] }) });
+  await writeFile(join(root, path), content);
+  const source = await service.read({ path }, context);
+  assert.equal(source.content, content);
+  assert.equal((await service.list({ prefix: 'workbench/src' }, { ...context, allowSourceWrite: true })).files[0].writable, false);
+  await assert.rejects(service.patch({ operationId: 'raise-experiment-quota', summary: 'Raise model experiment quota',
+    changes: [{ path, expectedHash: source.hash, content: 'export const maxCallsPerTurn = 100;\n' }] }, context), { code: 'SOURCE_PATH_PROTECTED', httpStatus: 403 });
+  assert.equal(await readFile(join(root, path), 'utf8'), content);
+  const record = (await service.history()).repairs[0];
+  assert.equal(record.status, 'error'); assert.equal(record.error.code, 'SOURCE_PATH_PROTECTED'); assert.deepEqual(record.files, []);
 });
 
 test('rollback refuses later edits without changing the applied receipt, and human rollback works with AI permission off', async t => {

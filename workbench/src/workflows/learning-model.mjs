@@ -160,9 +160,10 @@ export class LearningModel {
     return { id, mode: 'batch-snapshot', memoryWriteAllowed: false, externalMemoryAllowed: false, snapshot: { ...snapshot } };
   }
   async generate(prompt, { signal, onSession, onProgress, memoryScopeId, modelRoute, deadlineAt, firstResponseTimeoutMs,
-    outputIdleTimeoutMs, reasoningEffort, images = [], userImages = [], attachmentRoot, title = '学习 · 评价 / 调整 Skill' } = {}) {
+    outputIdleTimeoutMs, reasoningEffort, expectedReasoningEffort, expectedReasoningEffortWire, images = [], userImages = [], attachmentRoot, title = '学习 · 评价 / 调整 Skill' } = {}) {
     if (this.purpose === 'assistant' && memoryScopeId !== undefined) throw fail('应用助手不能访问学习记忆。');
     if (reasoningEffort !== undefined && (this.purpose !== 'assistant' || !['low', 'medium'].includes(reasoningEffort))) throw fail('仅应用助手控制调用可指定 low 或 medium 推理强度。');
+    if ([expectedReasoningEffort, expectedReasoningEffortWire].some(value => value !== undefined && (this.purpose !== 'assistant' || !REASONING_EFFORTS.has(value)))) throw fail('模型实验的预期推理配置无效。');
     if (![images, userImages].every(Array.isArray) || images.length + userImages.length > 4
       || images.some(path => typeof path !== 'string') || userImages.some(path => typeof path !== 'string' || !isAbsolute(path) || path.includes('\0'))
       || (images.length || userImages.length || attachmentRoot !== undefined) && this.purpose !== 'assistant') throw fail('模型图像输入无效。');
@@ -215,6 +216,7 @@ export class LearningModel {
       if (signal?.aborted || this.closed || state.done) { state.abort(); return; }
       this.progress(state, 'prepare-model', '确认模型权限与配置');
       const prepared = await this.app.adapter.request(this.purpose === 'assistant' ? 'workbench.assistant.prepare' : 'workbench.learning.prepare', { session_id: session.runtimeSessionId,
+        ...(this.purpose === 'assistant' ? { request_id: state.requestId } : {}),
         ...(memoryScopeId ? { memory_scope_id: memoryScopeId } : {}) });
       if (state.done || signal?.aborted || this.closed) { state.abort(); return; }
       if (this.purpose === 'assistant') {
@@ -223,6 +225,10 @@ export class LearningModel {
         const info = this.app.sessionInfo?.get(session.runtimeSessionId);
         state.reasoningEffort = reasoningMetadata(info, 'reasoning_effort') ?? state.reasoningEffort;
         state.reasoningEffortWire = reasoningMetadata(info, 'reasoning_effort_wire') ?? state.reasoningEffortWire;
+        if (expectedReasoningEffort !== undefined && state.reasoningEffort !== expectedReasoningEffort
+          || expectedReasoningEffortWire !== undefined && state.reasoningEffortWire !== expectedReasoningEffortWire) {
+          throw Object.assign(fail('Hermes 未确认与历史一致的推理配置，未提交模型实验。'), { code: 'MODEL_CONFIGURATION_UNCONFIRMED' });
+        }
       }
       if (this.purpose === 'assistant' ? prepared?.policy?.toolsAllowed !== false || prepared.policy.applicationTools !== 'broker-only'
         || prepared.policy.sourceMutationBlocked !== true || prepared.policy.skillMutationBlocked !== true
@@ -270,7 +276,7 @@ export class LearningModel {
   }
   metrics(state) {
     const date = value => Number.isFinite(value) ? new Date(value).toISOString() : null;
-    return { version: 1, status: state.callStatus || 'running', startedAt: date(state.startedAtMs),
+    return { version: 1, requestId: state.requestId, status: state.callStatus || 'running', startedAt: date(state.startedAtMs),
       submittedAt: date(state.submittedAtMs), firstOutputAt: date(state.firstOutputAtMs), lastOutputAt: date(state.lastOutputAtMs),
       completedAt: date(state.completedAtMs), promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters,
       timeoutKind: state.timeoutKind || null, errorCode: state.errorCode || null,

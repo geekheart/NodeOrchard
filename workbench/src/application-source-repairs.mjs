@@ -13,7 +13,7 @@ const EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.tsx', '.jsx', '.py',
 const PROTECTED = new Set([
   'agents.md', 'context.md', 'workbench/package.json', 'workbench/package-lock.json',
   ...['application.mjs', 'server.mjs', 'main.mjs', 'store.mjs', 'config.mjs', 'assistant-permission-settings.mjs', 'application-assistant-permissions.mjs',
-    'application-assistant.mjs', 'assistant-diagnostic-turn.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
+    'application-assistant.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
   ...['assistant-permissions-ui.js', 'source-repair-ui.js', 'app.js'].map(name => 'workbench/public/' + name),
   ...['application-source-repairs.test.mjs', 'application-source-tools.test.mjs', 'source-repair-ui.test.mjs', 'assistant-permission-settings.test.mjs',
     'application-assistant-permissions.test.mjs', 'assistant-permissions-ui.test.mjs'].map(name => 'workbench/test/' + name),
@@ -80,16 +80,20 @@ export class ApplicationSourceRepairs {
       actor: record.actor, backupStatus: record.backupStatus || 'incomplete', backupAvailable: record.backupStatus === 'complete', files: (record.files || []).map(({ path, beforeHash, afterHash, written }) => ({ path, beforeHash, afterHash, written: Boolean(written) })), tests: record.tests || [], ...(record.error ? { error: record.error } : {}) };
   }
   async checkpoint(context) {
-    if (context.deadlineAt !== undefined && (!Number.isSafeInteger(context.deadlineAt) || context.deadlineAt < 1)) throw fail('源码操作截止时间无效。');
+    if (context.deadlineAt != null && (!Number.isSafeInteger(context.deadlineAt) || context.deadlineAt < 1)) throw fail('源码操作截止时间无效。');
     if (this.closed || context.signal?.aborted) throw fail('源码操作已取消。', 'SOURCE_REPAIR_CANCELLED', 409);
     if (context.deadlineAt && Date.now() >= context.deadlineAt) throw fail('源码操作已超过截止时间。', 'SOURCE_REPAIR_DEADLINE', 408);
     const human = context.human === true && context.role === 'human';
-    if (!human && (context.human || context.role !== 'supervisor' || this.app.assistantPermissionSettings?.get?.()?.supervisor?.sourceRepair !== true)) throw fail('源码修复权限未开启。', 'SOURCE_REPAIR_FORBIDDEN', 403);
+    const permitted = () => {
+      const flags = this.app.assistantPermissionSettings?.get?.()?.supervisor;
+      return flags?.sourceRepair === true || context.sourceAccess === 'read' && flags?.sourceRead === true;
+    };
+    if (!human && (context.human || context.role !== 'supervisor' || !permitted())) throw fail('源码工具权限未开启。', 'SOURCE_REPAIR_FORBIDDEN', 403);
     if (typeof context.authorize !== 'function') throw fail('缺少服务端源码修复授权。', 'SOURCE_REPAIR_FORBIDDEN', 403);
     if (await context.authorize() === false) throw fail('源码修复授权已失效。', 'SOURCE_REPAIR_FORBIDDEN', 403);
     if (this.closed || context.signal?.aborted) throw fail('源码操作已取消。', 'SOURCE_REPAIR_CANCELLED', 409);
     if (context.deadlineAt && Date.now() >= context.deadlineAt) throw fail('源码操作已超过截止时间。', 'SOURCE_REPAIR_DEADLINE', 408);
-    if (!human && this.app.assistantPermissionSettings?.get?.()?.supervisor?.sourceRepair !== true) throw fail('源码修复权限已关闭。', 'SOURCE_REPAIR_FORBIDDEN', 403);
+    if (!human && !permitted()) throw fail('源码工具权限已关闭。', 'SOURCE_REPAIR_FORBIDDEN', 403);
   }
   path(input, write = false) {
     if (typeof input !== 'string' || input.length > 240 || !/^[A-Za-z0-9_./-]+$/.test(input) || input.split('/').some(part => !part || part === '..' || part.startsWith('.'))
@@ -124,21 +128,26 @@ export class ApplicationSourceRepairs {
       return { content, hash: hash(bytes), mode: stat.mode & 0o777 };
     } finally { await handle?.close(); }
   }
-  async list({ prefix = 'workbench', limit = 80 } = {}) {
+  async list({ prefix = 'workbench', limit = 80 } = {}, context) {
     await this.ready;
+    const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
+    if (guarded) await this.checkpoint(guarded);
     if (typeof prefix !== 'string' || !/^[A-Za-z0-9_./-]+$/.test(prefix) || prefix.split('/').some(part => !part || part.startsWith('.')) || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw fail('源码列表参数无效。');
     const currentDirty = new Set((await this.readGitState(this.root)).dirty), files = []; let truncated = false;
     for (const path of [...this.known].sort()) {
       if (!path.startsWith(prefix)) continue;
-      try { const source = await this.source(path); let writable = true; try { this.path(path, true); if ((this.dirty.has(path) || currentDirty.has(path)) && this.owned.get(path) !== source.hash) writable = false; } catch { writable = false; }
+      try { const source = await this.source(path, { context: guarded }); let writable = !guarded || guarded.allowSourceWrite === true; try { this.path(path, true); if ((this.dirty.has(path) || currentDirty.has(path)) && this.owned.get(path) !== source.hash) writable = false; } catch { writable = false; }
         if (files.length === limit) { truncated = true; break; } files.push({ path, hash: source.hash, size: Buffer.byteLength(source.content), writable }); } catch { /* Private/unavailable files are never projected. */ }
     }
+    if (guarded) await this.checkpoint(guarded);
     return { files, truncated };
   }
-  async read({ path, startLine = 1, lineCount = 120 } = {}) {
+  async read({ path, startLine = 1, lineCount = 120 } = {}, context) {
     await this.ready;
+    const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
+    if (guarded) await this.checkpoint(guarded);
     if (!Number.isSafeInteger(startLine) || startLine < 1 || !Number.isSafeInteger(lineCount) || lineCount < 1 || lineCount > 300) throw fail('源码行范围无效。');
-    const source = await this.source(path), lines = source.content.split('\n'), text = lines.slice(startLine - 1, startLine - 1 + lineCount).join('\n');
+    const source = await this.source(path, { context: guarded }), lines = source.content.split('\n'), text = lines.slice(startLine - 1, startLine - 1 + lineCount).join('\n');
     return { path, hash: source.hash, content: clean(text, 65536), startLine, totalLines: lines.length, truncated: startLine - 1 + lineCount < lines.length || text.length > 65536 };
   }
   async history({ limit = 20, repairId, includeDiff = false } = {}) {
@@ -162,6 +171,7 @@ export class ApplicationSourceRepairs {
     return { repairs };
   }
   async mutation(kind, input, context, action) {
+    context = { ...context, sourceAccess: 'repair' };
     if (!identifier(input.operationId)) throw fail('修复操作ID无效。');
     if (kind !== 'rollback' && (context.human || context.role !== 'supervisor')) throw fail('此源码操作只供已授权总控调用。', 'SOURCE_REPAIR_FORBIDDEN', 403);
     await this.checkpoint(context);

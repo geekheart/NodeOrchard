@@ -14,6 +14,8 @@
 | `assistant.skills.list` | 发现内部操作 Skill 的用途和版本 |
 | `assistant.skills.read` | 按名称读取内部操作方法，供助手自动按需使用 |
 | `assistant.diagnose` | 按归属聊天事项一次读取各次模型等待、输出、用量和完整性，不开放控制会话正文 |
+| `assistant.trace` | 按已归属的轮次和调用分页读取有界请求链路元数据，缺失保持未知 |
+| `assistant.experiment` | 人工开启后的总控合成近似模型实验；固定历史路由／推理配置与输入字符规模，不读取原始提示词或执行业务 |
 | `assistant.probe` | 同轮固定模型的短请求探测，单轮一次；等待原生结果或用户停止，不执行业务、不重试原请求 |
 | `workbench.inspect` | 只读检查设置、模型目录、定时任务与节点派生目录 |
 | `app.state` | Hermes 状态、会话摘要、待处理请求及有限适配器错误 |
@@ -30,7 +32,8 @@
 | `workflow.propose` | 生成经过编辑器命令校验的业务流程修改候选，在原聊天中应用 |
 | `workflow.copy` / `workflow.create-test` / `workflow.delete` | 总控在明确授权下复制、创建测试草稿或移入可恢复回收站，不自动运行 |
 | `app.logs` | 总控按权限读取持久分级软件日志；当前进程 Hermes 窗口单独标识 |
-| `app.source.list` / `app.source.read` / `app.source.patch` / `app.source.test` / `app.source.history` / `app.source.rollback` | 人工开启实验性总控源码修复后，受限读取、版本绑定修改、隔离相关测试与记录回滚，见[总控源码自修复](application-source-repair.md) |
+| `app.source.list` / `app.source.read` | 人工独立开启源码只读后，按白名单与行号读取当前版本；不取得写入／测试权限 |
+| `app.source.patch` / `app.source.test` / `app.source.history` / `app.source.rollback` | 人工另行开启实验性总控源码修复后，版本绑定修改、隔离相关测试与记录回滚，见[总控源码自修复](application-source-repair.md) |
 | `conversations.list` | 总控读取工作流独立会话的有界目录摘要，不合并历史 |
 | `conversation.inspect` | 按工作流读取有界脱敏消息和待处理元数据，不附带学习材料、节点代码配置或检查点 |
 | `conversation.delegate` | 在明确授权和目标版本下提交只读诊断，返回任务身份后按需检查进度，不运行工作流 |
@@ -72,6 +75,18 @@
 `assistant.probe` 通过已有受保护控制器发起固定短请求，使用本轮固定模型，默认等待原生返回或用户停止。不能批量、任意指定模型或提示词、同轮重复或跨轮缓存；只读委派不提供探测。短请求通过仅证明当前短请求可完成，不代表原复杂任务已恢复。编排每轮告知剩余工具、决策与等待策略；查询额度耗尽后只进行一次最终答复，不反复尝试被拒绝的工具。
 
 `workbench.assistant.diagnostics` 仅接受经Node按轮次核验后映射的1至12个存储会话身份，在Hermes固定启动库上使用原生只读句柄。SQL仅提取字符数量、消息数、完成标记与数字用量，不创建agent、不恢复会话，不接受路径、查询或profile。
+
+## 请求级链路与近似实验
+
+新的受保护助手调用将控制 `requestId` 传入原生准备接口。原生仅对该助手实例的SDK客户端挂接HTTP元数据观察；不修改Hermes源码或全局HTTP客户端，不采集普通工作流、第三方请求或正文。`model.request.trace` 进入Node专用校验入口，不原样转发SSE／浏览器历史；按已登记控制会话与请求身份写入 `application_model_request_traces`，最多1000条、4MiB和14天。每次控制调用至多32个实际HTTP请求，阶段更新有界，原始流不逐块落库。
+
+观测含HTTP状态、白名单 `x-request-id`／`request-id` 值、数字Retry-After、连接与TLS阶段耗时、响应头及首末body字节相对时刻、固定SSE事件类型计数，以及固定错误分类。DNS无法独立观测；connect可能含DNS与代理。SDK复用连接、压缩流或不支持的客户端可能缺少阶段，明确返回 `unavailable`，不把缺失当零。原始流EOF只描述传输，SDK读到结束标记后可正常提前关闭；模型完整性仍按原生终态与完整结果核对。应用取消来源与传输错误分开，控制器abort不擅自细分为用户／系统原因。
+
+`assistant.diagnose` 默认附紧凑请求摘要，完整细节通过 `assistant.trace({workflowId|conversationId,turnId,callIndex,afterRequestIndex?,limit?})` 逐页读取，limit为1至4。工具直接按真实调用编号核对持久归属（编号不受摘要12条限制），分页不重复读取原生历史元数据，不缓存活动请求快照；不接受任意session／文件路径；重启前未采集的历史请求不能补造。requestCount指当前保留的请求记录数，不是历史请求总数；coverage说明序号缺口、保留限制和采集上限。记录保留窗口或采集上限可能使详情不完整，仍按具体证据与缺口解释。
+
+总控的 `sourceRead` 和 `modelExperiment` 为人工独立开关，默认关闭且旧配置不自动扩权。源码读取与修复权限分开，实验额度和一次准入的执行模块固定保护，不能借源码修复自行提高额度。实验设置 `modelExperimentLimits.maxInputCharacters` 默认50000，人工范围1000至100000；每个总控轮次最多一次应用模型调用，持久准入阻止重启／停止／失败重放，不将原生SDK内部HTTP重试计为新增工具调用。
+
+`assistant.experiment` 必须指定已登记历史turnId与callIndex；先核对目标归属、已确认模型／提供商／推理配置和字符规模，仅发送固定合成内容。超过人工输入额度、历史规模过小或配置未知则明确不可用，不缩小样本或读原始提示词。新会话准备后再次核对实际推理配置，不一致时不提交模型请求。它没有业务工具，不生成或运行工作流；真实模型用量仍会发生，输出长度只靠固定短JSON指令软约束，不能声称有Token／费用硬上限。比较结果只检验路由与字符规模，不能替代原任务语义和真实Token分布，不能证明历史唯一根因。实验默认无本地时间截止，可手动停止；权限改变立即结束，已有准入不会自动续发。
 
 ## 截图与录制
 

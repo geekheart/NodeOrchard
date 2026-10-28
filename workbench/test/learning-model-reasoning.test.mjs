@@ -83,3 +83,20 @@ test('unknown or unconfirmed reasoning readback remains null instead of copying 
   assert.equal(saved.requestedReasoningEffort, null); assert.equal(saved.reasoningEffort, null); assert.equal(saved.reasoningEffortWire, null);
   assert(!JSON.stringify([saved, f.logs]).includes('PRIVATE_'));
 });
+
+test('a diagnostic experiment verifies inherited historical reasoning before submitting any prompt', async t => {
+  const f = fixture(t, 'assistant', { reasoningEffort: 'ultra', reasoningEffortWire: 'xhigh' });
+  await f.model.generate('Synthetic diagnostic sample.', { expectedReasoningEffort: 'ultra', expectedReasoningEffortWire: 'xhigh' });
+  assert.equal(f.submitted.length, 1); assert.equal(Object.hasOwn(f.created[0], 'assistantReasoningEffort'), false);
+});
+
+test('changed or unavailable native reasoning refuses an experiment before a paid model submission', async t => {
+  for (const metadata of [{ reasoningEffort: 'medium', reasoningEffortWire: 'medium' }, {}]) {
+    const f = fixture(t, 'assistant', metadata);
+    await assert.rejects(f.model.generate('Synthetic diagnostic sample.', { expectedReasoningEffort: 'ultra', expectedReasoningEffortWire: 'xhigh' }),
+      error => error.code === 'MODEL_CONFIGURATION_UNCONFIRMED');
+    assert.equal(f.submitted.length, 0);
+  }
+  const f = fixture(t, 'learning');
+  await assert.rejects(f.model.generate('Never submit.', { expectedReasoningEffort: 'medium' }), /预期推理配置/); assert.equal(f.submitted.length, 0);
+});

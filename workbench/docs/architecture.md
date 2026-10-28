@@ -155,3 +155,5 @@ AI 方案的预应用与并发检查仍用完整 `documentFingerprint()`；仅�
 目前没有对外 MCP server。后续 MCP 适配器复用上述 schema、dispatcher 和校验，仅承担协议转换，不复制另一套权限实现。
 
 模型等待默认由原生结果、错误及用户停止结束。分类、模型控制器和对话编排均以 `null` 表示无本地期限；工具次数、权限、版本、业务节点执行时限及不重放规则保持。历史期限仍按当时记录解释，详见[上下文、进度与中断](application-diagnostics.md#上下文进度与中断)。
+
+请求级模型观测由实例绑定的Python HTTP钩子采集，`model.request.trace` 经Node身份与字段二次投影落独立有界表，不透传浏览器。`assistant.diagnose/trace` 只读证据；源码只读由独立人工权限控制。`assistant.experiment` 用新受保护会话和合成文本验证已确认路由、推理配置与字符规模，持久准入限制每轮一次且不重放，不接入业务执行器。

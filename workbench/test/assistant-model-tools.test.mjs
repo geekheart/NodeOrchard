@@ -98,3 +98,78 @@ test('a supervisor without cross-workflow access can diagnose only its own conve
   assert.equal(result.target.turnId, 'supervisor-failure');
   await assert.rejects(f.assistant.call('assistant.diagnose', { conversationId: 'another-conversation' }, { permissionScope: scope, sourceConversationId: 'global-application' }), /跨会话/);
 });
+
+test('a human-enabled experiment resolves an owned historical call without forwarding any original material', async t => {
+  const f = fixture(t), calls = [];
+  f.app.store.db.exec('CREATE TABLE application_model_calls(session_id TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  f.app.store.db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('owned-session', JSON.stringify({ version: 1, status: 'timeout',
+    startedAt: '2026-10-27T07:00:00.000Z', submittedAt: '2026-10-27T07:00:01.000Z', completedAt: '2026-10-27T07:03:00.000Z',
+    promptCharacters: 21204, reasoningEffort: 'medium', reasoningEffortWire: 'medium', prompt: 'PRIVATE_ORIGINAL_CONTROL_PROMPT' }));
+  const args = { workflowId: 'workflow-a', turnId: 'failed-turn', callIndex: 1 };
+  const disabled = await f.assistant.permissions.bind({ role: 'supervisor' });
+  await assert.rejects(f.assistant.call('assistant.experiment', args, { permissionScope: disabled, diagnosticTurnId: 'experiment-turn' }), { httpStatus: 403 });
+  f.settings.supervisor.modelExperiment = true; f.settings.revision++;
+  const scope = await f.assistant.permissions.bind({ role: 'supervisor' }), context = { permissionScope: scope, diagnosticTurnId: 'experiment-turn', sourceConversationId: 'global-application' };
+  f.app.assistantModel.generate = async (...values) => { calls.push(values); return '{"ok":true}'; };
+  const result = await f.assistant.call('assistant.experiment', args, context);
+  assert.equal(result.success, true, JSON.stringify(result)); assert.equal(calls.length, 1); assert.equal(calls[0][0].length, 21204);
+  assert.deepEqual(calls[0][1].modelRoute, { provider: 'fixture', model: 'fixture' });
+  assert.equal(calls[0][1].expectedReasoningEffort, 'medium');
+  assert.equal(JSON.stringify([calls, result]).includes('PRIVATE_'), false);
+  await assert.rejects(f.assistant.call('assistant.experiment', args, context), { code: 'MODEL_EXPERIMENT_QUOTA' });
+  for (const invalid of [{ ...args, prompt: 'PRIVATE_OVERRIDE' }, { ...args, provider: 'arbitrary' }, { ...args, callIndex: 0 }, { workflowId: 'workflow-a', callIndex: 1 }]) {
+    await assert.rejects(f.assistant.call('assistant.experiment', invalid, context), { httpStatus: 400 });
+  }
+  const independent = await f.assistant.permissions.bind({ role: 'workflow', workflowId: 'workflow-a' });
+  await assert.rejects(f.assistant.call('assistant.experiment', args, { ...context, permissionScope: independent }), { httpStatus: 403 });
+  assert.equal(calls.length, 1);
+});
+
+test('request trace paging remains scoped to the selected call and accepts no arbitrary session identity', async t => {
+  const f = fixture(t), scope = await f.assistant.permissions.bind({ role: 'workflow', workflowId: 'workflow-a' });
+  const context = { permissionScope: scope }, args = { workflowId: 'workflow-a', turnId: 'failed-turn', callIndex: 1, afterRequestIndex: 0, limit: 1 };
+  const empty = await f.assistant.call('assistant.trace', args, context);
+  assert.equal(empty.trace.recorded, false); assert.equal(empty.sessionId, 'owned-session');
+  assert.equal(f.requests.length, 0, 'trace paging must not repeat optional native session metadata reads');
+  for (const invalid of [{ ...args, sessionId: 'unowned' }, { ...args, callIndex: 0 }, { ...args, afterRequestIndex: -1 }, { ...args, limit: 5 }]) {
+    await assert.rejects(f.assistant.call('assistant.trace', invalid, context), error => [400, 403].includes(error.httpStatus));
+  }
+  await assert.rejects(f.assistant.call('assistant.trace', { ...args, workflowId: 'workflow-other' }, context), { httpStatus: 403 });
+  await assert.rejects(f.assistant.call('assistant.trace', { ...args, callIndex: 2 }, context), { httpStatus: 404 });
+  assert.equal(JSON.stringify(empty).includes('PRIVATE_'), false);
+});
+
+test('a fourteen-call history keeps its true call indexes for trace and experiment selection', async t => {
+  const f = fixture(t), db = f.app.store.db, calls = [], ids = ['owned-session', ...Array.from({ length: 13 }, (_, index) => 'owned-session-' + (index + 2))];
+  const turn = JSON.parse(db.prepare('SELECT value FROM workflow_conversation_turns WHERE id=?').get('failed-turn').value);
+  turn.modelSessionIds = ids; turn.modelSessionId = ids.at(-1);
+  db.prepare('UPDATE workflow_conversation_turns SET value=? WHERE id=?').run(JSON.stringify(turn), turn.id);
+  db.exec('CREATE TABLE application_model_calls(session_id TEXT PRIMARY KEY,value TEXT NOT NULL)');
+  for (const id of ids.slice(1)) {
+    db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').run(id, 'stored-' + id, 'fixture', 'fixture');
+    db.prepare('INSERT INTO application_model_sessions VALUES(?)').run(id);
+  }
+  f.app.store.get = id => ids.includes(id) ? { id, storedSessionId: 'stored-' + id } : null;
+  f.app.adapter.request = async (method, args) => { f.requests.push({ method, args }); return { schemaVersion: 1, sessions: [{
+    storedSessionId: args.stored_session_ids[0], found: true, promptCharacters: 21204, source: 'hermes.state-db' }] }; };
+  db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run(ids.at(-1), JSON.stringify({ version: 1, status: 'timeout',
+    startedAt: '2026-10-27T07:00:00.000Z', completedAt: '2026-10-27T07:03:00.000Z',
+    promptCharacters: 21204, reasoningEffort: 'medium', reasoningEffortWire: 'medium' }));
+  f.settings.supervisor.modelExperiment = true; f.settings.revision++;
+  const scope = await f.assistant.permissions.bind({ role: 'supervisor' }), context = { permissionScope: scope, diagnosticTurnId: 'experiment-turn-14', sourceConversationId: 'global-application' };
+  const args = { workflowId: 'workflow-a', turnId: 'failed-turn' };
+  const summary = await f.assistant.call('assistant.diagnose', args, context);
+  assert.equal(summary.totalModelCalls, 14); assert.deepEqual(summary.calls.map(call => call.index), Array.from({ length: 12 }, (_, index) => index + 3));
+  assert.equal(f.requests.length, 12); f.requests.length = 0;
+  const trace = await f.assistant.call('assistant.trace', { ...args, callIndex: 14 }, context);
+  assert.equal(trace.callIndex, 14); assert.equal(trace.sessionId, ids.at(-1));
+  assert.equal(f.requests.length, 0);
+  assert.equal((await f.assistant.call('assistant.trace', { ...args, callIndex: 1 }, context)).sessionId, ids[0]);
+  assert.equal(f.requests.length, 0, 'an earlier call outside the summary window is still directly selectable');
+  f.app.assistantModel.generate = async (...values) => { calls.push(values); return '{"ok":true}'; };
+  const result = await f.assistant.call('assistant.experiment', { ...args, callIndex: 14 }, context);
+  assert.equal(result.success, true); assert.equal(result.source.callIndex, 14); assert.equal(calls.length, 1);
+  assert.deepEqual(f.requests, [{ method: 'workbench.assistant.diagnostics', args: { stored_session_ids: ['stored-' + ids.at(-1)] } }]);
+  for (const tool of ['assistant.trace', 'assistant.experiment']) await assert.rejects(f.assistant.call(tool, { ...args, callIndex: 15 }, context), { httpStatus: 404 });
+  assert.equal(calls.length, 1);
+});

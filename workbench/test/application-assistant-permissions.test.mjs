@@ -176,6 +176,40 @@ test('missing or malformed trusted permission configuration fails closed', async
   }
 });
 
+test('source read is an independent supervisor grant and cannot promote a workflow or permit source mutations', async t => {
+  const f = await fixture(t), reads = ['app.source.list', 'app.source.read'], writes = ['app.source.patch', 'app.source.test', 'app.source.rollback', 'app.source.history'];
+  f.settings.supervisor.sourceRead = true;
+  const scope = await f.policy.bind({ role: 'supervisor' }), readonly = await f.policy.bind({ role: 'supervisor', readOnly: true });
+  for (const tool of reads) { assert.equal(f.policy.allowed(tool, scope), true); assert.equal(f.policy.allowed(tool, readonly), true); assert.equal(f.policy.allowed(tool, f.scope), false); }
+  for (const tool of writes) { assert.equal(f.policy.allowed(tool, scope), false); assert.equal(f.policy.allowed(tool, readonly), false); }
+  f.settings.supervisor.sourceRead = false; f.settings.supervisor.sourceRepair = true; f.settings.revision++;
+  const repair = await f.policy.bind({ role: 'supervisor' });
+  for (const tool of [...reads, ...writes]) assert.equal(f.policy.allowed(tool, repair), true);
+});
+
+test('model experiments require their own human grant and the original diagnostic evidence permissions', async t => {
+  const f = await fixture(t);
+  f.settings.supervisor.modelExperiment = true;
+  let scope = await f.policy.bind({ role: 'supervisor' });
+  assert.equal(f.policy.allowed('assistant.experiment', scope), true); assert.equal(f.policy.allowed('assistant.experiment', f.scope), false);
+  assert.equal(f.policy.allowed('assistant.experiment', await f.policy.bind({ role: 'supervisor', readOnly: true })), false);
+  for (const flag of ['workflowRead', 'appLogs']) {
+    f.settings.supervisor[flag] = false; f.settings.revision++; scope = await f.policy.bind({ role: 'supervisor' });
+    assert.equal(f.policy.allowed('assistant.experiment', scope), false); f.settings.supervisor[flag] = true;
+  }
+});
+
+test('model traces follow diagnostic read permissions while workflow callers remain bound to their own conversation', async t => {
+  const f = await fixture(t), readOnly = await f.policy.bind({ role: 'workflow', workflowId: 'workflow-a', readOnly: true });
+  assert.equal(f.policy.allowed('assistant.trace', readOnly), true); assert.equal(f.policy.allowed('assistant.probe', readOnly), false);
+  const admitted = await f.policy.admit('assistant.trace', {}, readOnly);
+  assert.equal(admitted.args.workflowId, 'workflow-a');
+  await assert.rejects(f.policy.admit('assistant.trace', { workflowId: 'workflow-b' }, readOnly), /当前工作流/);
+  await assert.rejects(f.policy.admit('assistant.trace', { conversationId: 'supervisor-other' }, readOnly), /总控会话/);
+  f.settings.supervisor.appLogs = false;
+  assert.equal(f.policy.allowed('assistant.trace', await f.policy.bind({ role: 'supervisor' })), false);
+});
+
 test('permission projection marks denied feature descriptions unavailable and filters page evidence', async t => {
   const f = await fixture(t), projected = f.policy.project({
     run: { id: 'run-b', workflowId: 'workflow-b', outputText: 'foreign result' },
