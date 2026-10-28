@@ -88,6 +88,8 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.deepEqual(interfaces.protocol.conversationIssues.resolutionCommands, ['这个问题解决了', '不用处理了']);
   assert.equal(interfaces.protocol.conversationIssues.resolutionRouting, 'local-command');
   assert.equal(interfaces.features.find(row => row.id === 'execution').status, 'ui-only');
+  const inspector = interfaces.features.find(row => row.id === 'workflow-property-inspector');
+  assert.equal(inspector.status, 'ui-only'); assert.deepEqual(inspector.tools, []);
   assert.equal(interfaces.features.find(row => row.id === 'business-code').status, 'proposal-only');
   assert.equal(interfaces.features.find(row => row.id === 'application-source-editing').status, 'unavailable');
   const recycle = interfaces.features.find(row => row.id === 'workflow-recycle-bin');

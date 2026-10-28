@@ -83,6 +83,77 @@ function editor(doc = documentWith()) {
 
 function titleField(instance) { instance.titleInput = new FakeElement('input'); instance.titleInput.value = instance.doc.title; instance.bindTitleInput(); return instance.titleInput; }
 
+function propertiesEditor(t, doc = documentWith()) {
+  globalValue(t, 'document', { createElement: tag => new FakeElement(tag), createElementNS: (_namespace, tag) => new FakeElement(tag), createTextNode: text => ({ textContent: text }) });
+  globalValue(t, 'Option', function (label, value) { this.textContent = label; this.value = value; });
+  globalValue(t, 'innerWidth', 1400); globalValue(t, 'requestAnimationFrame', () => 0);
+  const instance = editor(doc); instance.properties = new FakeElement('aside');
+  instance.renderProperties = WorkflowEditor.prototype.renderProperties; instance.renderSelection = () => {}; instance.applySettings = () => {};
+  return instance;
+}
+
+test('clicking blank canvas closes properties without applying or discarding the node draft', t => {
+  const instance = propertiesEditor(t), before = structuredClone(instance.doc);
+  const draft = { title: '未应用的名称', config: structuredClone(instance.doc.nodes[0].config) };
+  instance.propertyDrafts.set('node-a', draft); instance.selectNode('node-a');
+  assert.equal(instance.settings.propertiesClosed, false); assert.ok(instance.properties.childElementCount);
+  instance.gesture = { kind: 'pan', pointerId: 7, dragged: false }; instance.onPointerUp({ pointerId: 7 });
+  assert.equal(instance.selection.size, 0); assert.equal(instance.settings.propertiesClosed, true); assert.equal(instance.properties.childElementCount, 0);
+  assert.deepEqual(instance.propertyDrafts.get('node-a'), draft); assert.deepEqual(instance.doc, before);
+  instance.selectNode('node-a');
+  assert.equal(instance.settings.propertiesClosed, false);
+  const form = instance.properties.children.find(child => child.className === 'wf-property-form');
+  assert.equal(form.children[0].children[1].value, draft.title); assert.deepEqual(instance.doc, before);
+});
+
+test('removing the last node from an additive selection closes properties and selecting again opens them', t => {
+  const doc = documentWith(); doc.nodes.push(createNode('input', { x: 300, y: 0 }, { id: 'node-b' }));
+  const instance = propertiesEditor(t, doc), before = structuredClone(doc);
+  instance.selectNode('node-a'); instance.selectNode('node-b', true); instance.selectNode('node-a', true);
+  assert.equal(instance.settings.propertiesClosed, false); assert.deepEqual([...instance.selection], ['node-b']);
+  instance.selectNode('node-b', true); assert.equal(instance.settings.propertiesClosed, true); assert.equal(instance.properties.childElementCount, 0);
+  instance.togglePanel('properties'); assert.equal(instance.settings.propertiesClosed, true, 'an empty inspector cannot be reopened by its button or shortcut');
+  instance.selectNode('node-a'); assert.equal(instance.settings.propertiesClosed, false); assert.deepEqual(instance.doc, before);
+});
+
+test('an empty selection box, removed node IDs and an unloaded document close stale properties', t => {
+  const instance = propertiesEditor(t), before = structuredClone(instance.doc);
+  instance.selectNode('node-a');
+  instance.gesture = { kind: 'box', pointerId: 8, start: { x: 0, y: 0 }, previousSelection: [] };
+  instance.onPointerUp({ pointerId: 8, clientX: 10, clientY: 10 }); assert.equal(instance.settings.propertiesClosed, true);
+  for (const unloaded of [false, true]) {
+    instance.documentLoaded = !unloaded; instance.selection = new Set([unloaded ? 'node-a' : 'removed-node']); instance.selectedEdge = 'removed-edge';
+    instance.settings.propertiesClosed = false; instance.properties.append(new FakeElement('stale-form')); instance.renderProperties();
+    assert.equal(instance.settings.propertiesClosed, true); assert.equal(instance.properties.childElementCount, 0);
+    instance.togglePanel('properties'); assert.equal(instance.settings.propertiesClosed, true);
+  }
+  assert.deepEqual(instance.doc, before);
+});
+
+test('valid edge properties remain available until the edge selection is cleared', t => {
+  let doc = documentWith(); doc.nodes.push(createNode('output', { x: 300, y: 0 }, { id: 'node-b' }));
+  doc = connectNodes(doc, { sourceNode: 'node-a', sourcePort: 'out', targetNode: 'node-b', targetPort: 'in' });
+  const instance = propertiesEditor(t, doc), before = structuredClone(doc);
+  instance.selectEdge(doc.edges[0].id); assert.equal(instance.settings.propertiesClosed, false); assert.ok(instance.properties.childElementCount);
+  instance.togglePanel('properties'); assert.equal(instance.settings.propertiesClosed, true);
+  instance.togglePanel('properties'); assert.equal(instance.settings.propertiesClosed, false);
+  instance.gesture = { kind: 'pan', pointerId: 9, dragged: false }; instance.onPointerUp({ pointerId: 9 });
+  assert.equal(instance.selectedEdge, null); assert.equal(instance.settings.propertiesClosed, true); assert.deepEqual(instance.doc, before);
+});
+
+test('historical run nodes remain inspectable and clearing them only closes the run inspector', t => {
+  const snapshot = documentWith(), instance = propertiesEditor(t, { ...snapshot, nodes: [] }), inspected = [];
+  instance.settings.propertiesClosed = false; instance.runtime = { currentRun: () => ({ workflowId: snapshot.id, document: snapshot }) };
+  instance.studio = { view: 'run', renderInspectorData: id => inspected.push(id) };
+  instance.selectNode('node-a'); assert.deepEqual(inspected, ['node-a']); assert.equal(instance.panelSettings().propertiesClosed, false);
+  instance.togglePanel('properties'); instance.togglePanel('properties'); assert.equal(instance.panelSettings().propertiesClosed, false);
+  instance.selectNode('node-a', true); assert.equal(instance.panelSettings().propertiesClosed, true); assert.equal(instance.settings.propertiesClosed, false);
+  assert.equal(instance.properties.childElementCount, 0); assert.equal(instance.doc.nodes.length, 0);
+  instance.runtime.currentRun = () => ({ workflowId: 'another-workflow', document: snapshot });
+  instance.selectNode('node-a'); assert.equal(instance.panelSettings().propertiesClosed, true, 'a previous workflow snapshot cannot keep this inspector open');
+  assert.deepEqual(inspected, ['node-a']);
+});
+
 test('unloading a workflow clears its active pointer and editing state while preserving every saved draft', t => {
   const original = documentWith(), key = 'workbench.workflow-document.v1:' + original.id;
   const raw = JSON.stringify({ version: 1, document: original }), legacy = '{preserve legacy draft';
@@ -587,7 +658,7 @@ test('rebound editor shortcuts replace old keys and preserve native text editing
 
 test('canvas commands share existing actions and are isolated from closed views, chat, controls and composition', t => {
   globalValue(t, 'Element', FakeElement); globalValue(t, 'innerWidth', 1200);
-  const instance = editor(), calls = []; const canvas = new FakeElement();
+  const instance = editor(), calls = []; const canvas = new FakeElement(); instance.selection.add('node-a');
   instance.fit = () => calls.push('fit'); instance.openHelp = () => calls.push('help'); instance.applySettings = () => calls.push('panels');
   const event = (key, target = canvas, other = {}) => ({ key, target, preventDefault() {}, ...other });
   instance.onKeyDown(event('f')); instance.onKeyDown(event('l')); instance.onKeyDown(event('p')); instance.onKeyDown(event('?', canvas, { shiftKey: true, code: 'Slash' }));

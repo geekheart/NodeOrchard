@@ -340,6 +340,10 @@ export class WorkflowEditor {
   }
 
   togglePanel(panel) {
+    const target = this.propertyDocument();
+    if (panel === 'properties' && (this.documentLoaded === false || !target?.nodes.some(node => this.selection.has(node.id)) && !target?.edges.some(edge => edge.id === this.selectedEdge))) {
+      this.setPanelClosed('properties', true); return;
+    }
     const panels = this.panelSettings(), key = panel + 'Closed'; panels[key] = !panels[key];
     if (innerWidth <= 780 && !panels[key]) panels[panel === 'library' ? 'propertiesClosed' : 'libraryClosed'] = true;
     if (panel === 'library' && this.studio?.view === 'run') this.studio.setTab('inputs');
@@ -592,15 +596,20 @@ export class WorkflowEditor {
     this.fit(); return true;
   }
 
+  propertyDocument() {
+    const run = this.studio?.view === 'run' ? this.runtime?.currentRun?.() : null;
+    return run?.workflowId === this.doc.id ? run.document || this.doc : this.doc;
+  }
   renderProperties() {
-    if (this.documentLoaded === false) { this.properties?.replaceChildren(); return; }
+    const target = this.propertyDocument(), selected = (target?.nodes || []).filter(node => this.selection.has(node.id));
+    if (this.documentLoaded === false || !selected.length && !target?.edges.some(edge => edge.id === this.selectedEdge)) {
+      this.properties?.replaceChildren();
+      if (this.panelSettings().propertiesClosed !== true) this.setPanelClosed('properties', true);
+      return;
+    }
     const parent = this.properties; parent.replaceChildren();
     const heading = el('div', 'wf-properties-head'); heading.append(el('h2', '', this.selectedEdge ? '连线属性' : '节点属性'), control('关闭属性面板', 'toggle-properties', 'close', { compact: true })); parent.append(heading);
     if (this.selectedEdge) { this.renderEdgeProperties(); this.applyLibraryReadOnly(); return; }
-    const selected = this.doc.nodes.filter(node => this.selection.has(node.id));
-    if (!selected.length) {
-      const empty = el('div', 'wf-property-empty'); empty.append(icon('cursor'), el('p', '', '未选择节点')); parent.append(empty); return;
-    }
     if (selected.length > 1) {
       parent.append(el('p', 'wf-field-help', `已选中 ${selected.length} 个节点`));
       const row = el('div', 'wf-property-actions'); row.append(control('复制所选节点', 'duplicate', 'copy'), control('删除所选节点', 'delete', 'trash')); parent.append(row); this.nodeLibrary?.renderInspector(selected); this.applyLibraryReadOnly(); return;
