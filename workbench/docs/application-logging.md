@@ -43,3 +43,5 @@ Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: her
 模型实验 `assistant.experiment.started/completed/failed` 仅记录准入身份、目标总控轮次、调用数、字符规模和状态；合成prompt及模型正文不入日志。持久准入保存在 `assistant_model_experiments`，未知状态不重放，不修改工作流或原始历史。
 
 压缩SSE只在已受保护SDK实例解码后的字节流中统计类型；不另行解压或保存正文，缓存重读不重计。新增观察超过8MiB时明确计数不可观测并继续原业务流；代理隧道TLS计入观测TLS总时长。
+
+请求链路仅保存响应头声明格式与编码的固定枚举（不保存原始头值），以及SSE不可观测的固定原因；旧记录保持unknown/null。头部MIME声明不能代替正文协议证据，更不能把未观测的SSE当作无响应。

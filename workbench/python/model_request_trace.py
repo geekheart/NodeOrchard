@@ -54,6 +54,14 @@ def _error_type(error, *, sdk=False):
     return next((name for name in names if name in ERROR_TYPES), 'SDKError' if sdk else 'UnknownError')
 
 
+def _response_format(value):
+    mime = value.split(';', 1)[0].strip().lower() if isinstance(value, str) else ''
+    if not mime: return 'unknown'
+    if mime == 'text/event-stream': return 'event-stream'
+    if mime == 'application/json' or re.fullmatch(r'application/[a-z0-9!#$&^_.+-]+\+json', mime): return 'json'
+    return 'other'
+
+
 class SSECounter:
     """Parse framing only. data: bytes are discarded without buffering payloads."""
     def __init__(self):
@@ -127,9 +135,11 @@ class _Request:
         self.status, self.code, self.done, self.body_complete = 'running', None, False, None
         self.timings = {key: None for key in ('connectMs', 'tlsMs', 'headersMs', 'firstBodyByteMs', 'lastBodyByteMs')}
         self.observable = {key: 'unavailable' for key in ('dns', 'connect', 'tls', 'headers', 'sse')}
-        self.http = {'status': None, 'requestId': None, 'requestIdHeader': None, 'retryAfterSeconds': None}
+        self.http = {'status': None, 'requestId': None, 'requestIdHeader': None, 'retryAfterSeconds': None,
+                     'responseFormat': 'unknown', 'contentEncoding': None}
         self.error = {'source': None, 'type': None}
         self.counter, self.sse, self.phases = SSECounter(), False, {}
+        self.sse_unavailable_reason = 'unknown'
         self.decoded_started, self.decoded_active, self.final_pending = False, False, False
         self.sse_bytes, self.sse_exhausted = 0, False
         self.emissions, self.last_emit = 0, 0.0
@@ -143,7 +153,7 @@ class _Request:
             return {'version': 1, 'traceId': self.id, 'requestId': self.request_id, 'requestIndex': self.index,
                 'status': self.status, 'startedAt': self.started_at, 'updatedAt': _iso(), 'durationMs': self.elapsed(),
                 'transport': 'httpx', 'observability': dict(self.observable), 'timings': dict(self.timings),
-                'http': dict(self.http), 'sse': self.counter.snapshot(), 'error': dict(self.error),
+                'http': dict(self.http), 'sse': {**self.counter.snapshot(), 'unavailableReason': self.sse_unavailable_reason}, 'error': dict(self.error),
                 'bodyComplete': self.body_complete, **({'code': self.code} if self.code else {})}
 
     def emit(self, *, final=False):
@@ -177,7 +187,12 @@ class _Request:
             value = response.headers.get('retry-after')
             if isinstance(value, str) and re.fullmatch(r'[0-9]{1,9}', value):
                 self.http['retryAfterSeconds'] = int(value)
-            self.sse = response.headers.get('content-type', '').split(';', 1)[0].strip().lower() == 'text/event-stream'
+            self.http['responseFormat'] = _response_format(response.headers.get('content-type'))
+            encoding = response.headers.get('content-encoding', '').strip().lower() or 'identity'
+            self.http['contentEncoding'] = encoding if encoding in {'identity', 'gzip', 'deflate', 'br', 'zstd'} else 'other'
+            self.sse = self.http['responseFormat'] == 'event-stream'
+            self.sse_unavailable_reason = ('decoded-stream-unobserved' if self.sse else
+                                          'unknown' if self.http['responseFormat'] == 'unknown' else 'not-event-stream')
             if status is not None and status >= 400: self.error = {'source': 'http', 'type': 'HTTPStatusError'}
         self.emit()
 
@@ -196,7 +211,9 @@ class _Request:
             # count the same server frames again or reset the observation quota.
             if self.decoded_started: return False
             self.decoded_started, self.decoded_active = True, True
-            if self.sse: self.observable['sse'] = 'observed'
+            if self.sse:
+                self.observable['sse'] = 'observed'
+                self.sse_unavailable_reason = None
             return True
 
     def decoded_body(self, chunk):
@@ -206,7 +223,7 @@ class _Request:
             if len(chunk) > MAX_SSE_OBSERVED_BYTES - self.sse_bytes:
                 # Do not scan, copy, buffer or decompress an oversized chunk.
                 # Empty counters plus unavailable/truncated mean unknown, not zero.
-                self.invalidate_sse()
+                self.invalidate_sse('observation-limit')
                 publish = True
             else:
                 self.sse_bytes += len(chunk)
@@ -215,11 +232,12 @@ class _Request:
             publish = publish and not self.final_pending
         if publish: self.emit()
 
-    def invalidate_sse(self):
+    def invalidate_sse(self, reason='parser-error'):
         with self.lock:
             self.sse_exhausted = True
             self.counter = SSECounter(); self.counter.truncated = True
             self.observable['sse'] = 'unavailable'
+            self.sse_unavailable_reason = reason
 
     def end_decoded(self, error=None):
         with self.lock:

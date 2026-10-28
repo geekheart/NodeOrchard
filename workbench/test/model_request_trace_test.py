@@ -138,7 +138,8 @@ class HttpTraceTests(unittest.TestCase):
         self.assertTrue(final['bodyComplete'])
         self.assertEqual(final['requestId'], tracer.request_id)
         self.assertEqual(final['http'], {'status': 200, 'requestId': 'synthetic-request-123',
-                         'requestIdHeader': 'x-request-id', 'retryAfterSeconds': 2})
+                         'requestIdHeader': 'x-request-id', 'retryAfterSeconds': 2,
+                         'responseFormat': 'event-stream', 'contentEncoding': 'identity'})
         self.assertEqual(final['observability'], {'dns': 'unavailable', 'connect': 'observed', 'tls': 'unavailable',
                                                  'headers': 'observed', 'sse': 'observed'})
         for name in ('connectMs', 'headersMs', 'firstBodyByteMs', 'lastBodyByteMs'):
@@ -276,7 +277,39 @@ class HttpTraceTests(unittest.TestCase):
                 self.assertEqual(len(events), before)
         self.assertEqual(events[-1]['observability']['sse'], 'observed')
         self.assertEqual(events[-1]['sse']['events'], {'response.completed': 1})
+        self.assertEqual(events[-1]['http']['responseFormat'], 'event-stream')
+        self.assertEqual(events[-1]['http']['contentEncoding'], 'gzip')
+        self.assertIsNone(events[-1]['sse']['unavailableReason'])
         self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_response_headers_project_only_safe_format_encoding_and_sse_reason_enums(self):
+        cases = [({}, 'unknown', 'identity', 'unknown'),
+                 ({'Content-Type': 'text/event-stream'}, 'event-stream', 'identity', 'decoded-stream-unobserved'),
+                 ({'Content-Type': 'Text/Event-Stream; charset=utf-8', 'Content-Encoding': 'gzip'}, 'event-stream', 'gzip', 'decoded-stream-unobserved'),
+                 ({'Content-Type': 'application/json', 'Content-Encoding': 'deflate'}, 'json', 'deflate', 'not-event-stream'),
+                 ({'Content-Type': 'application/problem+json', 'Content-Encoding': 'br'}, 'json', 'br', 'not-event-stream'),
+                 ({'Content-Type': 'application/json; PRIVATE_PARAMETER=PRIVATE_HEADER', 'Content-Encoding': 'zstd'}, 'json', 'zstd', 'not-event-stream'),
+                 ({'Content-Type': 'text/plain', 'Content-Encoding': 'identity'}, 'other', 'identity', 'not-event-stream'),
+                 ({'Content-Type': 'PRIVATE_TYPE', 'Content-Encoding': 'PRIVATE_ENCODING'}, 'other', 'other', 'not-event-stream'),
+                 ({'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip, br'}, 'event-stream', 'other', 'decoded-stream-unobserved')]
+        for headers, response_format, encoding, reason in cases:
+            with self.subTest(response_format=response_format, encoding=encoding, reason=reason):
+                events = []; tracer = self.tracer(events)
+                with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+                        200, headers=headers, stream=httpx.ByteStream(b'PRIVATE_BODY')))) as client:
+                    tracer.attach_http_client(client)
+                    # Intentionally do not invoke a decoder; no response body is inspected.
+                    with tracer.turn(), client.stream('POST', 'https://private.invalid/v1/responses'):
+                        pass
+                self.assertEqual(events[0]['http']['responseFormat'], 'unknown')
+                self.assertIsNone(events[0]['http']['contentEncoding'])
+                self.assertEqual(events[0]['sse']['unavailableReason'], 'unknown')
+                final = events[-1]
+                self.assertEqual(final['http']['responseFormat'], response_format)
+                self.assertEqual(final['http']['contentEncoding'], encoding)
+                self.assertEqual(final['sse']['unavailableReason'], reason)
+                self.assertEqual(final['observability']['sse'], 'unavailable')
+                self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_decoded_flush_tail_is_included_once_in_final_snapshot(self):
         events = []; tracer = self.tracer(events)
@@ -327,7 +360,7 @@ class HttpTraceTests(unittest.TestCase):
         actual = [event for event in events if event['requestIndex'] == 1]
         self.assertEqual(actual[-1]['status'], 'complete')
         self.assertEqual(actual[-1]['observability']['sse'], 'unavailable')
-        self.assertEqual(actual[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True})
+        self.assertEqual(actual[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'parser-error'})
         self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_compressed_observation_quota_falls_back_unknown_without_interrupting_sdk_bytes(self):
@@ -342,7 +375,7 @@ class HttpTraceTests(unittest.TestCase):
             with tracer.turn():
                 self.assertEqual(client.post('https://private.invalid/v1/responses').content, expected)
         self.assertEqual(events[-1]['observability']['sse'], 'unavailable')
-        self.assertEqual(events[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True})
+        self.assertEqual(events[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'observation-limit'})
         self.assertEqual(events[-1]['status'], 'complete')
         self.assertNotIn('PRIVATE', json.dumps(events))
 
@@ -382,6 +415,9 @@ class HttpTraceTests(unittest.TestCase):
                 self.assertEqual([event.delta for event in response], ['PRIVATE_THINK', 'PRIVATE_RESULT'])
         self.assertEqual(events[-1]['sse']['events'], {'response.reasoning_text.delta': 1, 'response.output_text.delta': 1, 'message': 1})
         self.assertEqual(events[-1]['observability']['sse'], 'observed')
+        self.assertEqual(events[-1]['http']['responseFormat'], 'event-stream')
+        self.assertEqual(events[-1]['http']['contentEncoding'], 'gzip')
+        self.assertIsNone(events[-1]['sse']['unavailableReason'])
         self.assertEqual(events[-1]['status'], 'complete')
         self.assertNotIn('PRIVATE', json.dumps(events))
 

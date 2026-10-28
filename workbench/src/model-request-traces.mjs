@@ -33,8 +33,11 @@ export function modelRequestTraceView(raw) {
     observability: Object.fromEntries(['dns', 'connect', 'tls', 'headers', 'sse'].map(key => [key, key !== 'dns' && get(observability, key) === 'observed' ? 'observed' : 'unavailable'])),
     timings: Object.fromEntries(['connectMs', 'tlsMs', 'headersMs', 'firstBodyByteMs', 'lastBodyByteMs'].map(key => [key, number(get(timings, key))])),
     http: { status: integer(get(http, 'status'), 599) && get(http, 'status') >= 100 ? get(http, 'status') : null,
+      responseFormat: ['event-stream', 'json', 'other', 'unknown'].includes(get(http, 'responseFormat')) ? get(http, 'responseFormat') : 'unknown',
+      contentEncoding: ['identity', 'gzip', 'deflate', 'br', 'zstd', 'other'].includes(get(http, 'contentEncoding')) ? get(http, 'contentEncoding') : null,
       requestId: header ? identifier(get(http, 'requestId')) : null, requestIdHeader: header, retryAfterSeconds: number(get(http, 'retryAfterSeconds')) },
-    sse: { events, otherEvents: integer(get(sse, 'otherEvents'), 100000000) ? get(sse, 'otherEvents') : 0, truncated: get(sse, 'truncated') === true },
+    sse: { events, otherEvents: integer(get(sse, 'otherEvents'), 100000000) ? get(sse, 'otherEvents') : 0, truncated: get(sse, 'truncated') === true,
+      unavailableReason: get(observability, 'sse') === 'observed' ? null : ['not-event-stream', 'decoded-stream-unobserved', 'observation-limit', 'parser-error', 'unknown'].includes(get(sse, 'unavailableReason')) ? get(sse, 'unavailableReason') : 'unknown' },
     bodyComplete: typeof get(raw, 'bodyComplete') === 'boolean' ? raw.bodyComplete : null,
     error: { source: ['transport', 'http', 'sdk', 'cancelled'].includes(get(error, 'source')) ? get(error, 'source') : null,
       type: ERRORS.has(get(error, 'type')) ? get(error, 'type') : null }, code: CODES.has(get(raw, 'code')) ? raw.code : null };

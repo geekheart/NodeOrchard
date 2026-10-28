@@ -78,3 +78,14 @@ test('an unavailable metadata write sink never changes application admission or 
   assert.equal(observer.capture('owned', f.raw()), false);
   assert.equal(f.db.prepare('SELECT value FROM business_records').get().value, 'unchanged');
 });
+
+test('format and encoding are whitelisted header classifications and missing legacy observability stays unknown', t => {
+  const f = fixture(t), raw = f.raw();
+  raw.observability.sse = 'unavailable'; raw.http.responseFormat = 'json'; raw.http.contentEncoding = 'gzip'; raw.sse.unavailableReason = 'not-event-stream';
+  assert(f.traces.capture('owned', raw)); const value = readModelRequestTraces(f.db, 'owned').requests[0];
+  assert.equal(value.http.responseFormat, 'json'); assert.equal(value.http.contentEncoding, 'gzip'); assert.equal(value.sse.unavailableReason, 'not-event-stream');
+  delete raw.http.responseFormat; delete raw.http.contentEncoding; delete raw.sse.unavailableReason;
+  const legacy = modelRequestTraceView(raw); assert.equal(legacy.http.responseFormat, 'unknown'); assert.equal(legacy.http.contentEncoding, null); assert.equal(legacy.sse.unavailableReason, 'unknown');
+  raw.http.responseFormat = 'PRIVATE_HEADER'; raw.http.contentEncoding = 'PRIVATE_HEADER'; raw.sse.unavailableReason = 'PRIVATE_ERROR';
+  assert(!JSON.stringify(modelRequestTraceView(raw)).includes('PRIVATE_'));
+});
