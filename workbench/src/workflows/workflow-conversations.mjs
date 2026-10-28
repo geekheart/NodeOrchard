@@ -585,7 +585,7 @@ export class WorkflowConversations {
           turn.updatedAt = now(); this.update(turn); this.emit(turn.workflowId);
         } },
         onSession: sessionId => { if (!this.closed) { turn.modelSessionId = sessionId; turn.modelSessionIds = [...new Set([...(turn.modelSessionIds || []), sessionId])]; this.update(turn); } } };
-      const assistant = this.app.applicationAssistant, deadlineAt = Date.parse(turn.createdAt) + (assistant?.maxDurationMs || 360000);
+      const assistant = this.app.applicationAssistant, deadlineAt = Number.isSafeInteger(assistant?.maxDurationMs) ? Date.parse(turn.createdAt) + assistant.maxDurationMs : undefined;
       let decision;
       if (privateValue.automatic || readOnly) {
         if (!assistant?.classify) fail('AI对话分类暂不可用，未选择默认处理方式。', 409);

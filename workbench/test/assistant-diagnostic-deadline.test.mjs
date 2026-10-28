@@ -3,6 +3,18 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { AssistantDiagnosticTurn } from '../src/assistant-diagnostic-turn.mjs';
 
+test('a default diagnostic wait has no local deadline beyond six minutes and still honors user cancellation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
+  const turn = new AssistantDiagnosticTurn({ scope: 'fixture', evidence: {} }), controller = new AbortController();
+  let resolve, settled = false; const pending = turn.wait(new Promise(done => { resolve = done; }), controller.signal);
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  t.mock.timers.tick(600000); await new Promise(done => setImmediate(done));
+  assert.equal(settled, false); assert.equal(turn.maxDurationMs, null);
+  resolve('confirmed provider result'); assert.equal(await pending, 'confirmed provider result');
+  const cancelled = turn.wait(new Promise(() => {}), controller.signal); cancelled.catch(() => {});
+  t.mock.timers.tick(600000); controller.abort(); await assert.rejects(cancelled, error => error.code === 'ABORT_ERR');
+});
+
 test('an expired parent wait consumes an already-created real model rejection without crashing the process', () => {
   const modelURL = new URL('../src/workflows/learning-model.mjs', import.meta.url).href;
   const diagnosticURL = new URL('../src/assistant-diagnostic-turn.mjs', import.meta.url).href;

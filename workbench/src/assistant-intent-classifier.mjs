@@ -1,7 +1,7 @@
 import { sanitizeDiagnosticText } from './app-diagnostics.mjs';
 
 export const ASSISTANT_INTENTS = Object.freeze(['workflow', 'diagnose', 'discuss', 'feedback', 'skill', 'run', 'review']);
-export const ASSISTANT_INTENT_LIMITS = Object.freeze({ durationMs: 30000, historyItems: 8, textCharacters: 12000 });
+export const ASSISTANT_INTENT_LIMITS = Object.freeze({ durationMs: null, historyItems: 8, textCharacters: 12000 });
 const OPTIONS = ['text', 'role', 'readOnly', 'document', 'context', 'history', 'signal', 'deadlineAt', 'modelRoute', 'onSession', 'onProgress'];
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const STATUSES = new Set(['queued', 'thinking', 'preparing', 'running', 'waiting', 'waiting_review', 'complete', 'completed', 'error',
@@ -20,6 +20,8 @@ const invalid = () => { throw error('ASSISTANT_INTENT_ARGUMENTS', '任务分类�
 const notify = (callback, value) => { try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* Observers do not control classification. */ } };
 const timeout = () => error('ASSISTANT_INTENT_TIMEOUT', '任务分类达到等待上限，未继续生成或执行。', 504);
 const cancelled = () => error('ASSISTANT_INTENT_CANCELLED', '任务分类已停止，未继续生成或执行。', 409);
+const UPSTREAM_CODES = new Set(['MODEL_ERROR', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_ABORTED', 'MODEL_TIMEOUT',
+  'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT', 'MODEL_TOTAL_TIMEOUT', 'ASSISTANT_TURN_TIMEOUT']);
 
 function plain(value, allowed) {
   if (!object(value) || Reflect.ownKeys(value).some(key => typeof key !== 'string' || !allowed.includes(key)
@@ -35,7 +37,7 @@ function argumentsView(input) {
   if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > ASSISTANT_INTENT_LIMITS.textCharacters || input.text.includes('\0')
     || !['workflow', 'supervisor'].includes(input.role) || input.readOnly !== undefined && typeof input.readOnly !== 'boolean') invalid();
   if (input.signal !== undefined && !(input.signal instanceof AbortSignal)
-    || input.deadlineAt !== undefined && (!Number.isSafeInteger(input.deadlineAt) || input.deadlineAt < 0)
+    || input.deadlineAt != null && (!Number.isSafeInteger(input.deadlineAt) || input.deadlineAt < 0)
     || input.document !== undefined && !object(input.document) || input.context !== undefined && !object(input.context)
     || input.history !== undefined && !Array.isArray(input.history)) invalid();
   for (const key of ['onSession', 'onProgress']) if (input[key] !== undefined && typeof input[key] !== 'function') invalid();
@@ -66,12 +68,13 @@ export class AssistantIntentClassifier {
   constructor(app) { this.app = app; }
   async classify(options) {
     const input = argumentsView(options), start = Date.now(), startedAt = new Date(start).toISOString();
-    const deadlineAt = Math.min(start + ASSISTANT_INTENT_LIMITS.durationMs, input.deadlineAt ?? Infinity);
+    const deadlineAt = input.deadlineAt ?? null;
     const controller = new AbortController(), signal = input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal;
     const prompt = PROMPT + '\nSOURCE_JSON=' + JSON.stringify(source(input));
     let done = false, timedOut = false, timer, abort, sessionId = null, modelCalls = 0;
     const elapsed = () => Math.max(0, Date.now() - start);
-    const current = () => !done && !signal.aborted && Date.now() < deadlineAt;
+    const expired = () => deadlineAt !== null && Date.now() >= deadlineAt;
+    const current = () => !done && !signal.aborted && !expired();
     const trace = Object.fromEntries([['workflowId', own(input.document, 'id')], ['runId', own(input.context, 'runId')],
       ['nodeId', own(input.context, 'nodeId')]].filter(([, value]) => validId(value)));
     const log = (level, event, status, code) => {
@@ -81,29 +84,29 @@ export class AssistantIntentClassifier {
     };
     try {
       if (signal.aborted) throw cancelled();
-      if (deadlineAt <= Date.now()) throw timeout();
+      if (expired()) throw timeout();
       if (typeof this.app.assistantModel?.generate !== 'function') throw error('ASSISTANT_INTENT_UNAVAILABLE', '受保护的任务分类模型暂不可用。', 409);
       log('info', 'assistant.intent.started', 'started');
       const stopped = new Promise((_, reject) => {
-        timer = setTimeout(() => { timedOut = true; controller.abort(); reject(timeout()); }, deadlineAt - Date.now());
+        if (deadlineAt !== null) timer = setTimeout(() => { timedOut = true; controller.abort(); reject(timeout()); }, Math.max(0, deadlineAt - Date.now()));
         abort = () => reject(cancelled());
         input.signal?.addEventListener('abort', abort, { once: true }); if (input.signal?.aborted) abort();
       });
       const classify = async () => {
         const modelRoute = input.modelRoute || route(await this.app.captureModelRoute());
         if (signal.aborted) throw input.signal?.aborted ? cancelled() : timeout();
-        if (deadlineAt <= Date.now()) throw timeout();
+        if (expired()) throw timeout();
         modelCalls = 1;
         notify(input.onProgress, { stage: 'classify-intent', label: '识别对话任务', modelCall: true, startedAt, elapsedMs: elapsed() });
-        const raw = await this.app.assistantModel.generate(prompt, { signal, deadlineAt, modelRoute,
-          firstResponseTimeoutMs: ASSISTANT_INTENT_LIMITS.durationMs, outputIdleTimeoutMs: 10000, title: '应用对话 · 任务意图分类',
+        const raw = await this.app.assistantModel.generate(prompt, { signal, ...(deadlineAt !== null ? { deadlineAt } : {}), modelRoute,
+          title: '应用对话 · 任务意图分类',
           onSession: id => { if (current() && validId(id)) { sessionId = id; notify(input.onSession, id); } },
           onProgress: value => { const stage = own(value, 'stage'); if (current() && Object.hasOwn(STAGES, stage)) {
             notify(input.onProgress, { stage, label: STAGES[stage], startedAt, elapsedMs: elapsed() });
           } },
         });
         if (signal.aborted) throw input.signal?.aborted ? cancelled() : timeout();
-        if (deadlineAt <= Date.now()) throw timeout();
+        if (expired()) throw timeout();
         let answer;
         try { if (typeof raw !== 'string' || raw.length > 512) throw Error(); answer = JSON.parse(raw); } catch {
           throw error('ASSISTANT_INTENT_INVALID', '任务分类返回了无效协议，未选择默认处理方式。');
@@ -119,11 +122,12 @@ export class AssistantIntentClassifier {
       return result;
     } catch (cause) {
       const code = input.signal?.aborted || cause?.code === 'ASSISTANT_INTENT_CANCELLED' ? 'ASSISTANT_INTENT_CANCELLED'
-        : timedOut || ['ASSISTANT_INTENT_TIMEOUT', 'MODEL_TIMEOUT', 'ASSISTANT_TURN_TIMEOUT'].includes(cause?.code) ? 'ASSISTANT_INTENT_TIMEOUT'
-          : ['ASSISTANT_INTENT_INVALID', 'ASSISTANT_INTENT_UNAVAILABLE'].includes(cause?.code) ? cause.code : 'ASSISTANT_INTENT_FAILED';
-      log(code === 'ASSISTANT_INTENT_FAILED' ? 'error' : 'warn', 'assistant.intent.failed', code === 'ASSISTANT_INTENT_CANCELLED' ? 'cancelled' : 'error', code);
+        : timedOut || cause?.code === 'ASSISTANT_INTENT_TIMEOUT' ? 'ASSISTANT_INTENT_TIMEOUT'
+          : ['ASSISTANT_INTENT_INVALID', 'ASSISTANT_INTENT_UNAVAILABLE'].includes(cause?.code) || UPSTREAM_CODES.has(own(cause, 'code')) ? cause.code : 'ASSISTANT_INTENT_FAILED';
+      log(code === 'ASSISTANT_INTENT_FAILED' || UPSTREAM_CODES.has(code) ? 'error' : 'warn', 'assistant.intent.failed', code === 'ASSISTANT_INTENT_CANCELLED' ? 'cancelled' : 'error', code);
       if (code === 'ASSISTANT_INTENT_TIMEOUT') throw timeout();
       if (code === 'ASSISTANT_INTENT_CANCELLED') throw cancelled();
+      if (UPSTREAM_CODES.has(code)) throw error(code, 'Hermes 或模型提供商返回错误，任务分类未完成。');
       if (cause?.code === code) throw cause;
       throw error(code, '任务分类调用失败，未选择默认处理方式。');
     } finally {

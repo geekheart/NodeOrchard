@@ -38,6 +38,29 @@ test('one bounded read batch avoids separate model decisions and deduplicates no
   assert.match(f.prompts[1], /FETCH_FAILED/); assert.equal(result.evidence[1].cached, true);
 });
 
+test('default orchestration passes no numeric deadline and can return a model result after the old six-minute limit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2026, 9, 28) });
+  let resolve, options, settled = false;
+  const reply = new Promise(done => { resolve = done; });
+  const f = fixture(t, [value => { options = value; return reply; }]);
+  const pending = f.assistant.plan({ text: '继续等待提供商结果' }); pending.then(() => { settled = true; }, () => { settled = true; });
+  for (let i = 0; i < 300 && !options; i++) await new Promise(done => setImmediate(done));
+  assert.ok(options); assert.equal(options.deadlineAt, undefined);
+  const budget = JSON.parse(f.prompts[0].split('\nBUDGET_JSON=')[1].split('\nFINAL_ANSWER_ONLY=')[0]); assert.equal(budget.remainingMs, null);
+  t.mock.timers.tick(600000); await new Promise(done => setImmediate(done)); assert.equal(settled, false);
+  resolve({ text: '真实上游结果已返回。' }); assert.equal((await pending).text, '真实上游结果已返回。');
+  assert.equal(f.prompts.length, 1); assert.equal(f.reads.length, 0);
+});
+
+test('an explicitly finite orchestration limit remains effective under a later parent deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2026, 9, 28) });
+  let options, failure; const f = fixture(t, [value => { options = value; return new Promise(() => {}); }], { maxDurationMs: 25 });
+  const pending = f.assistant.plan({ text: '有限测试等待', deadlineAt: Date.now() + 600000 }); pending.catch(error => { failure = error; });
+  for (let i = 0; i < 300 && !options; i++) await new Promise(done => setImmediate(done)); assert.ok(options);
+  t.mock.timers.tick(25); await new Promise(done => setImmediate(done));
+  assert.equal(failure?.code, 'ASSISTANT_TURN_TIMEOUT'); assert.equal(f.reads.length, 0);
+});
+
 test('tool budget exhaustion gets one final answer decision with an empty advertised catalog', async t => {
   const f = fixture(t, [() => ({ tool: 'workflow.run', arguments: { runId: 'latest' } }), () => ({ text: '依据现有证据结束。' })], { maxCalls: 1 });
   await f.assistant.plan({ text: '诊断超时' });
@@ -50,7 +73,7 @@ test('tool budget exhaustion gets one final answer decision with an empty advert
 
 test('parent deadline and server turn identity reach protected model generation and diagnostic tools', async t => {
   let generated, called;
-  const f = fixture(t, [options => { generated = options; return { tool: 'assistant.probe', arguments: {} }; }, () => ({ text: '完成探测。' })]);
+  const f = fixture(t, [options => { generated = options; return { tool: 'assistant.probe', arguments: {} }; }, () => ({ text: '完成探测。' })], { maxDurationMs: 360000 });
   f.assistant.call = async (name, args, context) => { called = context; return { success: true }; };
   await f.assistant.plan({ text: '检查模型连接', sourceConversationId: 'global-application', operationNamespace: 'owned-turn' });
   assert.equal(generated.deadlineAt, called.deadlineAt);
@@ -93,13 +116,17 @@ test('proposal timeout ends the turn instead of starting another outer model dec
 });
 
 test('initial context omits repeated long code and logs with explicit on-demand markers', async t => {
-  const f = fixture(t, [() => ({ text: '先检查状态。' })]);
+  const f = fixture(t, [() => ({ text: '先检查状态。' }), () => ({ text: '先检查状态。' })]);
+  const small = { id: 'wf', nodes: [{ id: 'code', type: 'tool', config: { code: 'small' } }], edges: [] };
+  f.app.diagnostics.snapshot = async () => ({ workflow: { document: small }, run: { id: 'run', document: small, outputText: 'small', nodes: [{ id: 'code', error: 'FETCH_FAILED', logs: { stderr: 'small' } }] } });
+  await f.assistant.plan({ text: '为什么失败', document: small }); const baseline = f.prompts[0].length;
   const doc = { id: 'wf', nodes: [{ id: 'code', type: 'tool', config: { code: 'PRIVATE_LONG_CODE_'.repeat(2000) } }], edges: [] };
   f.app.diagnostics.snapshot = async () => ({ workflow: { document: doc }, run: { id: 'run', document: doc, outputText: 'LONG_OUTPUT_'.repeat(3000), nodes: [{ id: 'code', error: 'FETCH_FAILED', logs: { stderr: 'LONG_LOG_'.repeat(3000) } }] } });
   await f.assistant.plan({ text: '为什么失败', document: doc });
-  assert.ok(f.prompts[0].length < 18000, `prompt characters: ${f.prompts[0].length}`);
-  assert.equal(f.prompts[0].includes('PRIVATE_LONG_CODE_'), false);
-  assert.match(f.prompts[0], /FETCH_FAILED/); assert.match(f.prompts[0], /按需|省略/);
+  const prompt = f.prompts[1]; t.diagnostic(`small-context baseline ${baseline}; large input ${prompt.length}; added ${prompt.length - baseline} characters`);
+  assert.ok(prompt.length < 24000 && prompt.length <= baseline + 2000, `prompt characters: ${prompt.length}, small-context baseline: ${baseline}`);
+  assert.equal(prompt.includes('PRIVATE_LONG_CODE_'), false);
+  assert.match(prompt, /FETCH_FAILED/); assert.match(prompt, /按需|省略/);
 });
 
 test('whole-turn deadline stops an unresponsive model without starting a late tool', async t => {

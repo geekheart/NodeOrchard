@@ -4,7 +4,7 @@ import { sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from './app-diagno
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const safe = value => sanitizeDiagnosticEvidence({ value }).value;
 const now = () => new Date().toISOString();
-export const ASSISTANT_DIAGNOSTIC_LIMITS = Object.freeze({ batchQueries: 4, toolRequests: 8, durationMs: 360000 });
+export const ASSISTANT_DIAGNOSTIC_LIMITS = Object.freeze({ batchQueries: 4, toolRequests: 8, durationMs: null });
 const STATIC = new Set(['node.describe', 'app.capabilities', 'assistant.skills.list', 'assistant.skills.read']);
 const REUSABLE = new Set([...STATIC, 'workflow.inspect', 'workflow.run', 'session.history', 'tools.catalog', 'runtime.inspect']);
 const terminal = status => ['complete', 'completed', 'error', 'interrupted', 'cancelled', 'blocked', 'skipped'].includes(status);
@@ -91,6 +91,7 @@ function coveredBySnapshot(row, evidence) {
 
 export class AssistantDiagnosticTurn {
   constructor({ scope, checkpoint, evidence, onProgress, onCheckpoint, maxDurationMs = ASSISTANT_DIAGNOSTIC_LIMITS.durationMs }) {
+    if (maxDurationMs !== null && (!Number.isSafeInteger(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 2147483647)) throw new Error('诊断等待时限无效。');
     this.started = Date.now(); this.onProgress = onProgress; this.onCheckpoint = onCheckpoint;
     this.maxDurationMs = maxDurationMs; this.modelCalls = 0; this.toolCalls = 0;
     this.cache = new Map(); this.observations = []; this.steps = []; this.evidence = [];
@@ -147,13 +148,13 @@ export class AssistantDiagnosticTurn {
     // Callers may already have started an async operation before this budget
     // check. Even an expired wait must observe its eventual rejection.
     const pending = Promise.resolve(promise); pending.catch(() => {});
-    const remaining = this.maxDurationMs - (Date.now() - this.started);
+    const remaining = this.maxDurationMs === null ? null : this.maxDurationMs - (Date.now() - this.started);
     const timeout = () => Object.assign(new Error(`整轮诊断达到总等待上限（${Math.round(this.maxDurationMs / 1000)} 秒），已保留诊断进度。`), { code: 'ASSISTANT_TURN_TIMEOUT' });
-    if (remaining <= 0) throw timeout();
+    if (remaining !== null && remaining <= 0) throw timeout();
     let timer, abort;
     try {
       return await Promise.race([pending, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(timeout()), remaining);
+        if (remaining !== null) timer = setTimeout(() => reject(timeout()), remaining);
         abort = () => reject(Object.assign(new Error('诊断已停止。'), { code: 'ABORT_ERR' }));
         signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
       })]);

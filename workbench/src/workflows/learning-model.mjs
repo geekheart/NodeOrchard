@@ -5,6 +5,10 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { redact } from '../hermes-adapter.mjs';
 
 const fail = message => new Error(message);
+// null is an intentional unlimited wait, not zero or an absent measurement.
+// An explicitly bounded controller may still narrow its own requests.
+const modelWaitLimit = (configured, requested) => requested == null ? configured
+  : configured === null ? requested : Math.min(configured, requested);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const reasoningMetadata = (session, key) => {
@@ -74,15 +78,15 @@ async function stageUserImages(app, paths, root) {
 // tools or memory writes. Existing builtin memory context remains readable.
 // Only the controller can submit to these durable, inspectable sessions.
 export class LearningModel {
-  constructor(app, { timeoutMs = 180000, purpose = 'learning', outputIdleTimeoutMs = Math.min(timeoutMs, 60000),
-    maxDurationMs = purpose === 'assistant' ? Math.min(timeoutMs * 2, 360000) : timeoutMs } = {}) {
+  constructor(app, { timeoutMs = null, purpose = 'learning', outputIdleTimeoutMs = timeoutMs === null ? null : Math.min(timeoutMs, 60000),
+    maxDurationMs = timeoutMs === null ? null : purpose === 'assistant' ? Math.min(timeoutMs * 2, 360000) : timeoutMs } = {}) {
     if (!['learning', 'assistant'].includes(purpose)) throw fail('模型控制用途无效。');
-    if ([timeoutMs, outputIdleTimeoutMs, maxDurationMs].some(value => !Number.isSafeInteger(value) || value < 1 || value > 2147483647)) throw fail('模型等待时限无效。');
+    if ([timeoutMs, outputIdleTimeoutMs, maxDurationMs].some(value => value !== null && (!Number.isSafeInteger(value) || value < 1 || value > 2147483647))) throw fail('模型等待时限无效。');
     this.purpose = purpose;
     this.subject = purpose === 'assistant' ? '应用助手' : '学习模型';
     this.sessionTable = purpose === 'assistant' ? 'application_model_sessions' : 'learning_model_sessions';
     this.app = app; this.timeoutMs = timeoutMs; this.outputIdleTimeoutMs = outputIdleTimeoutMs;
-    this.maxDurationMs = purpose === 'assistant' ? Math.min(maxDurationMs, 360000) : timeoutMs;
+    this.maxDurationMs = purpose === 'assistant' ? maxDurationMs : timeoutMs;
     this.active = new Map(); this.pending = new Set(); this.closed = false;
     this.memoryScopes = new Set();
     this.db = app.store.db;
@@ -107,8 +111,10 @@ export class LearningModel {
       this.pending.add(state);
       state.abort = () => this.finish(state, fail('学习记忆准备已停止。'), true);
       signal?.addEventListener('abort', state.abort, { once: true });
-      state.timer = setTimeout(() => this.finish(state, fail('学习记忆准备超时，已停止。'), true), this.timeoutMs);
-      state.timer.unref?.();
+      if (this.timeoutMs !== null) {
+        state.timer = setTimeout(() => this.finish(state, fail('学习记忆准备超时，已停止。'), true), this.timeoutMs);
+        state.timer.unref?.();
+      }
     });
     result.catch(() => {});
     void (async () => { try {
@@ -170,16 +176,16 @@ export class LearningModel {
     if (this.closed || signal?.aborted) throw fail(`${this.subject}调用已停止。`);
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw fail(`${this.subject}指令超过长度限制。`);
     if (typeof title !== 'string' || !title.trim() || title.length > 120) throw fail('模型会话名称无效。');
-    if (deadlineAt !== undefined && (!Number.isSafeInteger(deadlineAt) || deadlineAt < 1 || deadlineAt > 8640000000000000)) throw fail('模型调用截止时间无效。');
-    if ([firstResponseTimeoutMs, outputIdleTimeoutMs].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 2147483647))) throw fail('模型等待时限无效。');
+    if (deadlineAt !== undefined && deadlineAt !== null && (!Number.isSafeInteger(deadlineAt) || deadlineAt < 1 || deadlineAt > 8640000000000000)) throw fail('模型调用截止时间无效。');
+    if ([firstResponseTimeoutMs, outputIdleTimeoutMs].some(value => value !== undefined && value !== null && (!Number.isSafeInteger(value) || value < 1 || value > 2147483647))) throw fail('模型等待时限无效。');
     if (memoryScopeId !== undefined && !UUID.test(memoryScopeId || '')) throw fail('无效的学习记忆范围标识。');
     let state;
     const result = new Promise((resolve, reject) => {
       state = { id: null, requestId: randomUUID(), signal, resolve, reject, done: false, terminal: false, submitting: false,
         onProgress, startedAtMs: Date.now(), promptCharacters: prompt.length, outputCharacters: 0,
-        firstResponseTimeoutMs: Math.min(this.timeoutMs, firstResponseTimeoutMs ?? this.timeoutMs),
-        outputIdleTimeoutMs: Math.min(this.outputIdleTimeoutMs, outputIdleTimeoutMs ?? this.outputIdleTimeoutMs) };
-      state.deadlineAtMs = Math.min(state.startedAtMs + this.maxDurationMs, deadlineAt ?? Infinity);
+        firstResponseTimeoutMs: modelWaitLimit(this.timeoutMs, firstResponseTimeoutMs),
+        outputIdleTimeoutMs: modelWaitLimit(this.outputIdleTimeoutMs, outputIdleTimeoutMs) };
+      state.deadlineAtMs = Math.min(this.maxDurationMs === null ? Infinity : state.startedAtMs + this.maxDurationMs, deadlineAt ?? Infinity);
       this.pending.add(state);
       state.abort = () => this.finish(state, Object.assign(fail(`${this.subject}调用已停止。`), { code: 'MODEL_ABORTED' }), true);
       signal?.addEventListener('abort', state.abort, { once: true });
@@ -263,7 +269,7 @@ export class LearningModel {
     try { Promise.resolve(state.onProgress?.(value)).catch(() => {}); } catch { /* Keep the controller authoritative. */ }
   }
   metrics(state) {
-    const date = value => value === undefined ? null : new Date(value).toISOString();
+    const date = value => Number.isFinite(value) ? new Date(value).toISOString() : null;
     return { version: 1, status: state.callStatus || 'running', startedAt: date(state.startedAtMs),
       submittedAt: date(state.submittedAtMs), firstOutputAt: date(state.firstOutputAtMs), lastOutputAt: date(state.lastOutputAtMs),
       completedAt: date(state.completedAtMs), promptCharacters: state.promptCharacters, outputCharacters: state.outputCharacters,
@@ -293,11 +299,16 @@ export class LearningModel {
     if (state.done) return;
     clearTimeout(state.timer);
     const absolute = state.deadlineAtMs;
-    const response = state.startedAtMs + (this.purpose === 'assistant' ? state.firstResponseTimeoutMs : this.timeoutMs);
+    const responseLimit = this.purpose === 'assistant' ? state.firstResponseTimeoutMs : this.timeoutMs;
+    const response = responseLimit === null ? Infinity : state.startedAtMs + responseLimit;
     const activity = state.responseAtMs ?? state.lastOutputAtMs;
-    const phaseDeadline = this.purpose === 'assistant' && activity !== undefined ? activity + state.outputIdleTimeoutMs : response;
+    const phaseDeadline = this.purpose === 'assistant' && activity !== undefined
+      ? state.outputIdleTimeoutMs === null ? Infinity : activity + state.outputIdleTimeoutMs : response;
     const next = Math.min(absolute, phaseDeadline);
     state.nextDeadlineAtMs = next;
+    // Normal model waits have no application deadline. Keep cancellation and
+    // native terminal/error events authoritative; never schedule Infinity/0.
+    if (!Number.isFinite(next)) return;
     const kind = this.purpose === 'learning' || absolute <= phaseDeadline ? 'absolute' : activity === undefined ? 'first-response' : 'output-idle';
     const timeout = () => {
       const elapsedMs = Math.max(0, Date.now() - state.startedAtMs);

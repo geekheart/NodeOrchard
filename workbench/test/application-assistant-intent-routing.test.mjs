@@ -70,12 +70,25 @@ test('the original no-input GitHub poster request is AI-classified before one pr
   assert.equal(proposalPrompt.split(ORIGINAL).length - 1, 1, 'the original task is sent once');
   assert.equal(turn.assistant.progress.modelCalls, 2);
   assert.deepEqual(f.options[0].modelRoute, { provider: 'fixture-provider', model: 'fixture-model' });
-  assert(f.options[1].deadlineAt > f.options[0].deadlineAt);
+  assert.equal(f.options[0].deadlineAt, undefined); assert.equal(f.options[1].deadlineAt, undefined);
   assert.deepEqual(turn.modelSessionIds, ['intent-session', 'proposal-session']);
   assert(turn.assistant.checkpoint.steps.some(step => step.modelCall === 1));
   assert(turn.assistant.checkpoint.steps.some(step => step.modelCall === 2));
   assert.deepEqual(f.app.workflowLibrary.get(f.document.id), f.before);
   assert.deepEqual(f.app.workflows.list(), []);
+});
+
+test('a workflow conversation keeps waiting beyond six minutes without injecting a hidden planner deadline', async t => {
+  const f = await fixture(t); t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  f.app.applicationAssistant.intentClassifier.classify = async () => ({ intent: 'workflow', modelRoute: { provider: 'fixture-provider', model: 'fixture-model' }, modelCalls: 1 });
+  let release, reached;
+  const gate = new Promise(done => { release = done; }), prepared = new Promise(done => { reached = done; });
+  f.beforeReply = async () => { reached(); await gate; };
+  const pending = message(f, ORIGINAL); pending.catch(() => {}); await prepared;
+  assert.equal(f.options[0].deadlineAt, undefined);
+  t.mock.timers.tick(600000); await new Promise(done => setImmediate(done));
+  assert.equal(f.app.conversations.get(f.document.id).conversation.turns.at(-1).status, 'thinking');
+  release(); assert.equal((await pending).status, 'proposed'); assert.deepEqual(f.app.workflowLibrary.get(f.document.id), f.before); assert.deepEqual(f.app.workflows.list(), []);
 });
 
 test('direct workflow proposals receive restored early context without adding it to the lightweight classifier payload', async t => {

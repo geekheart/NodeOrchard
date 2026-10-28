@@ -14,7 +14,7 @@ function fixture(t, options = {}) {
     memoryAllowed: false, memoryWriteAllowed: false, applicationTools: 'broker-only', sourceMutationBlocked: true } }) };
   app.submit = async () => {};
   app.history = async () => ({ messages: [{ role: 'assistant', text: '{"text":"complete"}' }] });
-  const model = new LearningModel(app, { purpose: 'assistant', ...options });
+  const model = new LearningModel(app, { purpose: 'assistant', timeoutMs: 180000, ...options });
   t.after(async () => { await model.close(); db.close(); });
   return { app, db, model, interrupted, progress, generate: options => {
     const pending = model.generate('Return the next controlled diagnostic action.', { onProgress: value => { progress.push(value); }, ...options });
@@ -38,7 +38,7 @@ test('an assistant first output at 179 seconds gets its bounded output window in
   assert.deepEqual(interrupted, []);
 });
 
-test('default assistant budgets and durable metadata describe real first output without persisting content', async t => {
+test('explicitly bounded assistant budgets and durable metadata describe real first output without persisting content', async t => {
   const { app, db, generate, progress } = fixture(t);
   const pending = generate(); await ready();
   const read = () => JSON.parse(db.prepare('SELECT value FROM application_model_calls WHERE session_id=?').get('assistant-session').value);

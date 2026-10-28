@@ -44,6 +44,7 @@ function finishDiagnostic(assistant, status, message) {
 // than a shell-capable model session, admits and executes that exact tool.
 export class ApplicationAssistant {
   constructor(app, { maxCalls = ASSISTANT_DIAGNOSTIC_LIMITS.toolRequests, maxDurationMs = ASSISTANT_DIAGNOSTIC_LIMITS.durationMs } = {}) {
+    if (maxDurationMs !== null && (!Number.isSafeInteger(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 2147483647)) fail('应用助手等待时限无效。');
     this.app = app; this.db = app.store.db; this.maxCalls = maxCalls; this.maxDurationMs = maxDurationMs; this.active = new Map(); this.closed = false;
     this.activeConversations = new Map();
     this.capabilities = new ApplicationCapabilities(app);
@@ -226,7 +227,7 @@ export class ApplicationAssistant {
           } },
           onCheckpoint: checkpoint => { if (!this.closed) { turn.assistant.checkpoint = structuredClone(checkpoint);
             turn.assistant.evidence = structuredClone(checkpoint.evidence || []); turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId); } } };
-        const deadlineAt = Date.parse(turn.createdAt) + this.maxDurationMs;
+        const deadlineAt = this.maxDurationMs === null ? undefined : Date.parse(turn.createdAt) + this.maxDurationMs;
         const decision = await this.classify({ role: 'supervisor', text: input.text, context, history, signal: controller.signal,
           deadlineAt, startedAt: turn.createdAt, ...hooks });
         check(controller.signal); turn.user.intent = decision.intent; this.save(turn);
@@ -271,7 +272,10 @@ export class ApplicationAssistant {
     const trace = new AssistantDiagnosticTurn({ scope: 'intent-classification', evidence: {}, onCheckpoint, onProgress,
       maxDurationMs: this.maxDurationMs });
     if (Number.isFinite(Date.parse(startedAt))) { trace.started = Date.parse(startedAt); trace.state.createdAt = new Date(trace.started).toISOString(); }
-    if (Number.isSafeInteger(options.deadlineAt)) trace.maxDurationMs = Math.max(1, options.deadlineAt - trace.started);
+    if (Number.isSafeInteger(options.deadlineAt)) {
+      const remaining = Math.max(1, options.deadlineAt - trace.started);
+      trace.maxDurationMs = trace.maxDurationMs === null ? remaining : Math.min(trace.maxDurationMs, remaining);
+    }
     try {
       const result = await trace.wait(this.intentClassifier.classify({ ...request, onProgress: value => {
         if (options.signal?.aborted) return;
@@ -300,13 +304,16 @@ export class ApplicationAssistant {
     const controller = new AbortController(), activeSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     const turn = new AssistantDiagnosticTurn({ scope: 'preparing', evidence: {}, onProgress, onCheckpoint, maxDurationMs: this.maxDurationMs });
     if (Number.isFinite(Date.parse(startedAt))) { turn.started = Date.parse(startedAt); turn.state.createdAt = new Date(turn.started).toISOString(); }
-    if (Number.isSafeInteger(parentDeadline)) turn.maxDurationMs = Math.max(1, parentDeadline - turn.started);
+    if (Number.isSafeInteger(parentDeadline)) {
+      const remaining = Math.max(1, parentDeadline - turn.started);
+      turn.maxDurationMs = turn.maxDurationMs === null ? remaining : Math.min(turn.maxDurationMs, remaining);
+    }
     turn.modelCalls = decision?.modelCalls || modelCallOffset;
     if (decision?.checkpoint?.steps) turn.steps = structuredClone(decision.checkpoint.steps);
     const selection = Object.fromEntries(['workflowId', 'runId', 'nodeId', 'runSelection'].filter(key => context[key] !== undefined).map(key => [key, context[key]]));
     if (document) { selection.document = document; selection.workflowId = document.id; }
     const images = [], failures = new Map(), toolErrors = [];
-    const deadlineAt = turn.started + turn.maxDurationMs;
+    const deadlineAt = turn.maxDurationMs === null ? undefined : turn.started + turn.maxDurationMs;
     let finalReason;
     let settled = false;
     const phase = (stage, label, detail) => { if (!settled && !activeSignal.aborted) turn.phase(stage, label, detail); };
@@ -406,7 +413,7 @@ export class ApplicationAssistant {
         + `总控的workflow.copy/create-test/delete仅在用户明确要求对应管理操作时调用；禁止为诊断擅自删除或修改工作流。mutation不能批量，须明确目标和版本并提供稳定operationId。delete只进入可恢复回收站。结果未知不得换operationId重放，复制与新增测试草稿均不自动运行。app.logs可按等级、模块、时间和关联ID读取有界持久日志；优先warn及以上定位，再按requestId/runId/turnId展开info阶段，按实际交付游标分页。currentProcess中的Hermes诊断仅当前进程。\n`
         + `总控通过conversations.list读取独立会话摘要，conversation.inspect按需读取一条会话。需要独立助手协助且用户明确委派时用conversation.delegate；它只提交只读诊断消息，不运行或修改工作流。返回turnId后可后续查看，不能重复提交或循环等候。总控主题的历史各自独立，不默认合并工作流聊天。\n`
         + `助手对话本身失败或超时时，优先assistant.diagnose按workflowId或conversationId读取完整模型时序；它已聚合检查点、软件日志、用量和输出完整性，不再重复查询这些证据，不用session.history读取控制会话。确需验证当前连接时单独assistant.probe一次；短探测不能证明原复杂任务已恢复。先区分等待首字、输出停滞和总截止；业务修改仍用待审提案，源码修复按本轮实际工具权限处理。\n`
-        + `SOURCE_JSON.capabilities.loadedSkills是本轮已加载的Skill，直接使用其中说明；已有能力摘要不重复读取。BUDGET_JSON给出剩余工具、模型决策和时间；FINAL_ANSWER_ONLY=true时仅返回text，报告现有证据与缺口，不再申请工具。\n`
+        + `SOURCE_JSON.capabilities.loadedSkills是本轮已加载的Skill，直接使用其中说明；已有能力摘要不重复读取。BUDGET_JSON给出剩余工具、模型决策和时间；remainingMs=null表示没有应用层时间上限，继续等待上游结果、错误或用户停止，工具与决策次数仍有限。FINAL_ANSWER_ONLY=true时仅返回text，报告现有证据与缺口，不再申请工具。\n`
         + `历史按各调用timeoutPolicy判断，缺失为未知；currentPolicy仅表示当前默认值。\n`;
       for (let index = 0; index <= this.maxCalls; index++) {
         check(activeSignal);
@@ -414,7 +421,7 @@ export class ApplicationAssistant {
         const transcript = [...turn.transcript(), ...toolErrors.slice(-8)];
         const finalOnly = !!finalReason || turn.toolCalls >= this.maxCalls || index === this.maxCalls;
         const budget = { remainingToolRequests: finalOnly ? 0 : this.maxCalls - turn.toolCalls,
-          remainingModelDecisions: this.maxCalls + 1 - index, remainingMs: Math.max(0, deadlineAt - Date.now()) };
+          remainingModelDecisions: this.maxCalls + 1 - index, remainingMs: deadlineAt === undefined ? null : Math.max(0, deadlineAt - Date.now()) };
         const prompt = fixed + '\nBUDGET_JSON=' + JSON.stringify(budget) + '\nFINAL_ANSWER_ONLY=' + finalOnly
           + '\nTOOL_CATALOG=' + JSON.stringify(finalOnly ? [] : catalog) + '\nSOURCE_JSON=' + JSON.stringify(source)
           + '\nTOOL_RESULTS_JSON=' + JSON.stringify(transcript);

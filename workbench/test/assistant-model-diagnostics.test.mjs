@@ -64,6 +64,18 @@ test('persistent model records carry authoritative timeouts, character counts an
   assert.equal(JSON.stringify(result).includes('PRIVATE_'),false);
 });
 
+test('explicitly disabled model deadlines remain known historical policy rather than missing metadata', async t => {
+  const { diagnostics, db } = fixture(t);
+  const policy = { firstResponseTimeoutMs: null, outputIdleTimeoutMs: null, maxDurationMs: null, deadlineAt: null };
+  db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'complete',
+    startedAt: start, submittedAt: start, firstOutputAt: output, lastOutputAt: end, completedAt: end, timeoutPolicy: policy }));
+  const result = await diagnostics.inspect({ workflowId: 'workflow-one', turn: turn() });
+  assert.deepEqual(result.calls[0].timeoutPolicy, policy);
+  assert(!result.missingEvidence.includes('historical-timeout-policy'));
+  db.prepare('UPDATE application_model_calls SET value=? WHERE session_id=?').run(JSON.stringify({ status: 'complete', timeoutPolicy: {} }), 'session-three');
+  assert.equal((await diagnostics.inspect({ workflowId: 'workflow-one', turn: turn() })).calls[0].timeoutPolicy, null);
+});
+
 test('legacy control sessions can expose only fixed metadata through an owned-session reader', async t => {
   const { diagnostics, reads } = fixture(t, { metadata: { source:'hermes.history', promptCharacters:48262, outputCharacters:136,
     assistantMessageCount:1,userMessageCount:1,partial:true,finishReason:null,

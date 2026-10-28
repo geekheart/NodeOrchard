@@ -28,9 +28,8 @@ test('fixed model probe uses the current protected controller and returns metada
   assert.ok(prompt.length < 400);
   assert.match(prompt, /\{"ok":true\}/);
   assert.deepEqual(options.modelRoute, { provider: 'fixture-provider', model: 'fixture-model' });
-  assert.ok(options.deadlineAt <= Date.now() + 30000);
-  assert.ok(options.firstResponseTimeoutMs <= 30000);
-  assert.ok(options.outputIdleTimeoutMs <= 10000);
+  assert.deepEqual(ASSISTANT_MODEL_PROBE_LIMITS, { durationMs: null, firstResponseMs: null, outputIdleMs: null });
+  for (const key of ['deadlineAt', 'firstResponseTimeoutMs', 'outputIdleTimeoutMs']) assert.equal(Object.hasOwn(options, key), false);
   assert.equal(result.status, 'complete');
   assert.equal(result.responseMatched, true);
   assert.equal(result.sessionId, 'session-probe');
@@ -123,31 +122,38 @@ test('unresponsive controller is cancelled at the parent deadline with no retrie
   assert.equal(f.logs.at(-1)[1], 'assistant.probe.failed');
 });
 
-test('default absolute ceiling is 30 seconds even when model emits continuous progress', async t => {
+test('default probe has no local timer and accepts a response after a long silent wait', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 2000000 });
-  let options;
-  const f = fixture(async (_prompt, value) => { options = value; return new Promise(() => {}); });
-  const pending = f.probe.run({ deadlineAt: Date.now() + 1000000 });
-  await ready();
-  assert.equal(options.deadlineAt, 2000000 + ASSISTANT_MODEL_PROBE_LIMITS.durationMs);
-  for (let index = 0; index < 3; index++) {
-    t.mock.timers.tick(9000);
-    options.onProgress({ stage: 'model-output' });
-  }
-  t.mock.timers.tick(3000);
+  const timers = t.mock.method(globalThis, 'setTimeout');
+  let options, finish, settled = false;
+  const f = fixture(async (_prompt, value) => { options = value; return new Promise(resolve => { finish = resolve; }); });
+  const pending = f.probe.run({ deadlineAt: null }); pending.finally(() => { settled = true; });
+  await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(settled, false); assert.equal(options.signal.aborted, false); assert.equal(timers.mock.callCount(), 0);
+  options.onProgress({ stage: 'model-output' }); finish('{"ok":true}');
   const result = await pending;
-  assert.equal(result.status, 'timeout');
-  assert.equal(result.durationMs, 30000);
-  assert.equal(options.signal.aborted, true);
-  assert.equal(f.calls.length, 1);
+  assert.equal(result.status, 'complete'); assert.equal(result.durationMs, 3_600_000); assert.equal(f.calls.length, 1);
 });
 
-test('external cancellation aborts the protected model and observers cannot alter outcome', async () => {
+test('default probe route preparation can wait for the provider without creating a local timer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 2000000 });
+  const timers = t.mock.method(globalThis, 'setTimeout');
+  const f = fixture(); let finish;
+  f.app.captureModelRoute = () => new Promise(resolve => { finish = resolve; });
+  const pending = f.probe.run(); await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(f.calls.length, 0); assert.equal(timers.mock.callCount(), 0);
+  finish({ provider: 'fixture-provider', model: 'fixture-model' });
+  assert.equal((await pending).status, 'complete'); assert.equal(f.calls.length, 1);
+});
+
+test('external cancellation aborts a long-waiting protected model and observers cannot alter outcome', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 2000000 });
   const controller = new AbortController(); let options;
   const f = fixture(async (_prompt, value) => { options = value; value.onSession('session-probe'); value.onProgress({ stage: 'model-output' }); return new Promise(() => {}); });
   f.app.logger.write = () => { throw new Error('observer logger'); };
   const pending = f.probe.run({ signal: controller.signal, onSession: () => { throw new Error('observer session'); }, onProgress: async () => { throw new Error('observer progress'); } });
-  await ready();
+  await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(options.signal.aborted, false);
   controller.abort();
   const result = await pending;
   assert.equal(result.status, 'cancelled');
@@ -164,4 +170,13 @@ test('route preparation shares the deadline and never starts a late model', asyn
   assert.equal((await pending).status, 'timeout');
   resolveRoute({ provider: 'fixture', model: 'fixture' });
   await ready(); assert.equal(f.calls.length, 0);
+});
+
+test('upstream errors keep safe model error codes without being called a local probe timeout', async () => {
+  for (const code of ['MODEL_ERROR', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_TIMEOUT', 'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT']) {
+    const f = fixture(async () => { throw Object.assign(Error('PRIVATE_PROVIDER_BODY password=PRIVATE_PASSWORD'), { code }); });
+    const result = await f.probe.run();
+    assert.equal(result.status, 'error'); assert.equal(result.errorCode, code); assert.equal(f.calls.length, 1);
+    assert.doesNotMatch(JSON.stringify([result, f.logs]), /PRIVATE_/);
+  }
 });

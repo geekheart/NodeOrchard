@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AssistantIntentClassifier } from '../src/assistant-intent-classifier.mjs';
+import { AssistantIntentClassifier, ASSISTANT_INTENT_LIMITS } from '../src/assistant-intent-classifier.mjs';
 
 const ready = () => new Promise(resolve => setImmediate(resolve));
 const message = '无输入，帮我完成AI获取github每日热门前10项目，并生成一张图看完github前十项目的海报';
@@ -28,7 +28,8 @@ test('freeform intent is one protected small-model decision with the current req
   assert.equal(prompt.split(message).length - 1, 1); assert(prompt.length < 6000);
   assert.doesNotMatch(prompt, /PRIVATE_|TOOL_CATALOG|CONFIG_CATALOG|SKILL_CATALOG/);
   assert.deepEqual(options.modelRoute, { provider: 'fixture-provider', model: 'fixture-model' });
-  assert(options.deadlineAt <= Date.now() + 30000); assert(options.firstResponseTimeoutMs <= 30000);
+  assert.equal(ASSISTANT_INTENT_LIMITS.durationMs, null);
+  for (const key of ['deadlineAt', 'firstResponseTimeoutMs', 'outputIdleTimeoutMs']) assert.equal(Object.hasOwn(options, key), false);
   assert.deepEqual(sessions, ['classifier-session']); assert.equal(progress.filter(value => value.modelCall === true).length, 1);
   assert.equal(result.durationMs >= 0, true); assert.equal(Number.isFinite(Date.parse(result.startedAt)), true);
   assert.equal(Number.isFinite(Date.parse(result.completedAt)), true);
@@ -95,7 +96,7 @@ test('a stalled classification stops at its parent deadline, without retry or la
   assert.equal(progress.length, observed); assert.deepEqual(sessions, []);
 });
 
-test('route preparation shares the same short budget and never starts a late model', async t => {
+test('an explicit parent deadline also bounds route preparation and never starts a late model', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
   let release;
   const f = fixture(); f.app.captureModelRoute = () => new Promise(resolve => { release = resolve; });
@@ -105,24 +106,43 @@ test('route preparation shares the same short budget and never starts a late mod
   release({ provider: 'fixture', model: 'fixture' }); await ready(); assert.equal(f.calls.length, 0);
 });
 
-test('continuous model progress cannot extend the default thirty-second classification ceiling', async t => {
+test('default classification has no timer and accepts a result after a long silent wait', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
-  let options;
-  const f = fixture(async (_prompt, value) => { options = value; return new Promise(() => {}); });
-  const pending = f.classifier.classify({ text: message, role: 'workflow' });
-  const rejected = assert.rejects(pending, { code: 'ASSISTANT_INTENT_TIMEOUT' });
-  await ready();
-  for (let count=0;count<5;count++) { t.mock.timers.tick(5000); options.onProgress({ stage: 'model-output' }); }
-  t.mock.timers.tick(5000); await rejected;
-  assert.equal(f.calls.length,1); assert.equal(options.signal.aborted,true);
+  const timers = t.mock.method(globalThis, 'setTimeout');
+  let options, finish, settled = false;
+  const f = fixture(async (_prompt, value) => { options = value; return new Promise(resolve => { finish = resolve; }); });
+  const progress = [], sessions = [];
+  const pending = f.classifier.classify({ text: message, role: 'workflow', deadlineAt: null,
+    onProgress: value => progress.push(value), onSession: value => sessions.push(value) });
+  pending.finally(() => { settled = true; });
+  await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(settled, false); assert.equal(options.signal.aborted, false); assert.equal(timers.mock.callCount(), 0);
+  options.onProgress({ stage: 'model-output' }); options.onSession('after-long-wait');
+  finish('{"intent":"workflow"}'); const result = await pending;
+  assert.equal(result.intent, 'workflow'); assert.equal(result.durationMs, 3_600_000); assert.equal(f.calls.length, 1);
+  assert.deepEqual(sessions, ['after-long-wait']); assert.equal(progress.at(-1).stage, 'model-output');
 });
 
-test('external cancellation stops a live classification without returning an intent', async () => {
+test('default route preparation can complete after the former classification deadline without a retry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
+  const timers = t.mock.method(globalThis, 'setTimeout');
+  let release;
+  const f = fixture(); f.app.captureModelRoute = () => new Promise(resolve => { release = resolve; });
+  const pending = f.classifier.classify({ text: message, role: 'workflow' });
+  await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(f.calls.length, 0); assert.equal(timers.mock.callCount(), 0);
+  release({ provider: 'fixture', model: 'fixture' });
+  assert.equal((await pending).intent, 'workflow'); assert.equal(f.calls.length, 1);
+});
+
+test('external cancellation still stops a classification after a long wait without returning an intent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000000 });
   const controller = new AbortController(); let options;
   const f = fixture(async (_prompt, value) => { options = value; return new Promise(() => {}); });
   const pending = f.classifier.classify({ text: message, role: 'workflow', signal: controller.signal });
   const rejected = assert.rejects(pending, { code: 'ASSISTANT_INTENT_CANCELLED' });
-  await ready(); controller.abort(); await rejected;
+  await ready(); t.mock.timers.tick(3_600_000); await ready();
+  assert.equal(options.signal.aborted, false); controller.abort(); await rejected;
   assert.equal(options.signal.aborted,true); assert.equal(f.calls.length,1);
 });
 
@@ -144,4 +164,12 @@ test('provider failures and observer failures remain isolated and never expose b
   const result = await f.classifier.classify({ text: message, role: 'workflow', onSession: () => { throw Error('observer'); },
     onProgress: async () => { throw Error('observer'); } });
   assert.equal(result.intent, 'workflow'); await ready();
+});
+
+test('upstream errors retain their safe identity instead of becoming a local classification deadline', async () => {
+  for (const code of ['MODEL_ERROR', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_TIMEOUT', 'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT']) {
+    const f = fixture(async () => { throw Object.assign(Error('PRIVATE_PROVIDER_BODY password=PRIVATE_PASSWORD'), { code }); });
+    await assert.rejects(f.classifier.classify({ text: message, role: 'workflow' }), value => value.code === code && !value.message.includes('PRIVATE_'));
+    assert.equal(f.calls.length, 1); assert.equal(f.logs.at(-1)[2].code, code); assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE_/);
+  }
 });

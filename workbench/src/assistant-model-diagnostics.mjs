@@ -36,7 +36,10 @@ function policyView(value) {
   if (!object(value)) return null;
   const result = Object.fromEntries(['firstResponseTimeoutMs', 'outputIdleTimeoutMs', 'maxDurationMs'].map(key => [key, number(own(value, key))]));
   result.deadlineAt = time(own(value, 'deadlineAt'));
-  return Object.values(result).some(value => value !== null) ? result : null;
+  // An explicit all-null record means local deadlines were disabled. Missing
+  // legacy metadata stays unknown instead of being reinterpreted as unlimited.
+  const disabled = Object.keys(result).every(key => own(value, key) === null);
+  return disabled || Object.values(result).some(value => value !== null) ? result : null;
 }
 
 function usageView(value, fallback, complete) {

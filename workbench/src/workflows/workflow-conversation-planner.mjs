@@ -271,7 +271,7 @@ USER_SOURCE_JSON=${JSON.stringify(source)}`;
     const raw = await model.generate(modelPrompt, { signal, onSession, onProgress: request.onProgress,
       ...(request.userImages?.length ? { userImages: request.userImages, attachmentRoot: request.attachmentRoot } : {}),
       ...(model.purpose === 'assistant' && request.modelRoute?.provider === 'openai-codex' ? { reasoningEffort: 'medium' } : {}),
-      ...(request.deadlineAt !== undefined ? { deadlineAt: request.deadlineAt } : {}),
+      ...(request.deadlineAt != null ? { deadlineAt: request.deadlineAt } : {}),
       ...(request.modelRoute ? { modelRoute: request.modelRoute } : {}), title: '工作流对话 · 搭建与修改' });
     if (signal?.aborted) throw failure('工作流对话已停止。', 409);
     request.onProgress?.({ stage: 'validate-proposal', label: '正在校验节点配置、连线与固定版本' });

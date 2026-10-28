@@ -45,6 +45,14 @@ test('diagnostic broker reads only turn-owned numeric model metadata without res
   assert.equal(result.currentPolicy.outputIdleTimeoutMs, 60000);
 });
 
+test('current disabled deadlines are exposed as null and never as zero or the previous defaults', async t => {
+  const f = fixture(t), scope = await f.assistant.permissions.bind({ role: 'supervisor' });
+  Object.assign(f.app.assistantModel, { timeoutMs: null, outputIdleTimeoutMs: null, maxDurationMs: null });
+  const result = await f.assistant.call('assistant.diagnose', { workflowId: 'workflow-a', turnId: 'failed-turn' }, { permissionScope: scope });
+  assert.deepEqual(result.currentPolicy, { scope: 'current-defaults', firstResponseTimeoutMs: null, outputIdleTimeoutMs: null,
+    maxDurationMs: null, automaticRetry: false, arbitrarySourceMutation: false, businessReplay: false });
+});
+
 test('model diagnostics enforce workflow ownership, protected log permission and exact tool schema', async t => {
   const f = fixture(t), independent = await f.assistant.permissions.bind({ role: 'workflow', workflowId: 'workflow-a' });
   await f.assistant.call('assistant.diagnose', {}, { permissionScope: independent });

@@ -8,9 +8,9 @@ const definition = (name, description, properties, effect = 'read-only') => ({ n
   inputSchema: { type: 'object', properties, additionalProperties: false }, readOnly: effect === 'read-only', availability: 'available',
   annotations: { readOnlyHint: effect === 'read-only', destructiveHint: false, idempotentHint: effect === 'read-only', openWorldHint: false } });
 export const ASSISTANT_MODEL_TOOLS = Object.freeze([
-  definition('assistant.diagnose', '助手对话失败或超时的首选诊断：一次返回指定会话轮次的所有模型调用时序、输出完整性、字符数、Token覆盖、超时类型和当前等待策略。省略turnId读取最近失败或已结束轮次。独立助手仅当前工作流，总控需软件日志权限。控制会话不使用session.history；本工具不返回提示词、模型正文或推理。',
+  definition('assistant.diagnose', '助手对话失败或超时的首选诊断：一次返回指定会话轮次的所有模型调用时序、输出完整性、字符数、Token覆盖、超时类型和当前等待策略。策略中的期限字段为null表示该期限关闭；整个历史策略为null表示未记录，不能当作零或套用当前默认。省略turnId读取最近失败或已结束轮次。独立助手仅当前工作流，总控需软件日志权限。控制会话不使用session.history；本工具不返回提示词、模型正文或推理。',
     { workflowId: identifier, conversationId: identifier, turnId: identifier }),
-  definition('assistant.probe', '单轮最多一次的固定短模型连接探测，最多30秒且受整轮剩余预算限制；不接受prompt/model/provider，不切换模型、不运行工作流、不重试失败请求。不能批量或跨轮缓存；成功仅证明当前短请求可完成，不能证明原复杂任务已恢复。', {}, 'probe'),
+  definition('assistant.probe', '单轮最多一次的固定短模型连接探测，等待Hermes或提供商返回结果、错误或用户停止，不设置本地回答时限；不接受prompt/model/provider，不切换模型、不运行工作流、不重试失败请求。不能批量或跨轮缓存；成功仅证明当前短请求可完成，不能证明原复杂任务已恢复。', {}, 'probe'),
 ]);
 const validId = value => typeof value === 'string' && ID.test(value) && !['__proto__', 'prototype', 'constructor'].includes(value);
 const plain = (value, names) => {
