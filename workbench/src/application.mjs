@@ -10,6 +10,7 @@ import { ApplicationLog } from './application-log.mjs';
 import { ApplicationLogEvents } from './application-log-events.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
+import { SkillIntegrations } from './skill-integrations.mjs';
 import { validatePreferences } from './preferences.mjs';
 import { initializeWorkspace } from './workspace-layout.mjs';
 import { readSkillCatalog, readSkill, readSkillLabels, applySkillLabel } from './catalog.mjs';
@@ -87,6 +88,7 @@ export class Application extends EventEmitter {
     try { this.logger = new ApplicationLog(this.store.db, { level: config.logLevel || 'info' }); }
     catch { this.logger = null; /* Log persistence cannot prevent business execution. */ }
     this.logEvents = new ApplicationLogEvents(this.logger);
+    this.skillIntegrations = new SkillIntegrations(this);
     this.logEvents.write('info', 'application.starting', { component: 'application' });
     try { this.sessionUsage = new SessionUsage(this.store.db); this.store.sessionUsage = this.sessionUsage; }
     catch { this.sessionUsage = null; /* Missing telemetry must not prevent task execution. */ }
@@ -107,6 +109,7 @@ export class Application extends EventEmitter {
       authenticated: null, hermesVersion: config.hermesVersion, lastError: '', cwdDefault: join(config.workspaceRoot, this.preferences.defaultWorkspace) };
     adapter.on('state', state => {
       if (this.closed) return;
+      this.skillIntegrations.invalidate();
       Object.assign(this.backend, state);
       this.publish('backend.status', null, { ...this.backend });
       if (['disconnected', 'error', 'stopped'].includes(state.state)) {

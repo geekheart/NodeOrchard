@@ -18,9 +18,13 @@ import uuid
 
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "python" / "workflow_gateway.py"
+sys.path.insert(0, str(_SCRIPT.parent))
 _SPEC = importlib.util.spec_from_file_location("workbench_workflow_gateway", _SCRIPT)
 gateway = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(gateway)
+
+def copy_dict(value):
+    return json.loads(json.dumps(value))
 
 
 class FakeMemoryStore:
@@ -213,6 +217,113 @@ class WorkflowGatewayTests(unittest.TestCase):
         return self.tools._execute_tool(name, args or {}, {}, SimpleNamespace(session_id=session, task_id=session),
                                         user_task=None, enabled_tools=None, skip_tool_execution_middleware=True)
 
+    def test_media_output_types_require_real_json_paths(self):
+        for output_type in ("image", "artifactRef", "artifactBundle", "folderRef"):
+            with self.subTest(output_type=output_type):
+                params = self.params | {"run_id": str(uuid.uuid4()), "output_type": output_type}
+                prepared = self.bridge.prepare(params)
+                self.assertIn("JSON", prepared["text"])
+                self.assertIn("real", prepared["text"])
+                self.bridge.finish({"session_id": params["session_id"], "run_id": params["run_id"]})
+
+    def image_bridge(self, image_delay=None):
+        from workflow_integrations import WorkflowIntegrations
+        agent = FakeAgent(); server = FakeServer(self.workspace, agent)
+        tools, executor, calls = fake_tool_modules()
+        original = tools._execute_tool
+        cache = self.base/'hermes-cache'; cache.mkdir(exist_ok=True)
+        image = cache/'native.png'
+        image.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY1kAAAAASUVORK5CYII='))
+        def execute(function_name, function_args, original_args, ids, *, user_task, enabled_tools, skip_tool_execution_middleware):
+            if function_name == 'image_generate':
+                calls.append((function_name, function_args, ids.session_id))
+                if image_delay is not None: image_delay()
+                return json.dumps({'success': True, 'image': str(image)})
+            return original(function_name, function_args, original_args, ids, user_task=user_task, enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
+        tools._execute_tool = execute
+        tools.get_tool_definitions = lambda enabled_toolsets=None, **kw: [{'function': {'name': 'image_generate', 'parameters': {'type': 'object'}}}] if 'image_gen' in (enabled_toolsets or []) else []
+        cfg = {'image_gen': {'provider': 'openai-codex'}}
+        integrations = WorkflowIntegrations(tools, dependencies={'load_config': lambda: copy_dict(cfg), 'enabled_toolsets': lambda cfg: ['image_gen'], 'providers': lambda: [], 'cache_root': lambda: cache})
+        bridge = gateway.WorkflowGateway(server, self.skills, tools, executor, workspace_root=self.workspace.parent, integrations=integrations).install()
+        return bridge, agent, server, tools, calls, cfg
+
+    def test_declared_image_tool_captures_artifact_without_final_answer_and_stops_after_finish(self):
+        bridge, agent, server, tools, calls, cfg = self.image_bridge()
+        revision = bridge.integrations.catalog()['revision']
+        params = self.params | {'required_toolsets': ['image_gen'], 'capability_revision': revision, 'output_type': 'image'}
+        result = bridge.prepare(params)
+        self.assertEqual(result['policy']['requiredToolsets'], ['image_gen'])
+        self.assertEqual(result['policy']['toolNames'], ['image_generate'])
+        self.assertEqual(result['policy']['capabilityRevision'], revision)
+        self.assertIn('image_generate', agent.valid_tool_names)
+        self.assertTrue(json.loads(tools.handle_function_call('image_generate', {'prompt': 'synthetic'}, session_id='stored-session'))['success'])
+        receipt = bridge.finish({'session_id': params['session_id'], 'run_id': params['run_id']})
+        self.assertEqual(len(receipt['artifacts']), 1)
+        self.assertTrue(Path(receipt['artifacts'][0]['path']).is_relative_to(self.workspace/'.workbench-artifacts'))
+        self.assertNotIn('image_generate', agent.valid_tool_names)
+        self.assertEqual(json.loads(tools.handle_function_call('image_generate', {}, session_id='stored-session'))['code'], 'workbench_integration_tool_blocked')
+        self.assertEqual(len(calls), 1)
+
+    def test_legacy_deferred_image_success_is_captured_without_advertising_new_tools(self):
+        bridge, agent, server, tools, calls, cfg = self.image_bridge()
+        params = self.params | {'output_type': 'image'}
+        bridge.prepare(params)
+        self.assertNotIn('image_generate', agent.valid_tool_names)
+        # The native dispatcher may discover deferred tools after prepare. Its
+        # actual successful execution, not the initial schema list, is evidence.
+        result = tools.handle_function_call('image_generate', {'prompt': 'synthetic deferred native call'}, session_id='stored-session')
+        self.assertTrue(json.loads(result)['success'])
+        receipt = bridge.finish({'session_id': params['session_id'], 'run_id': params['run_id']})
+        self.assertEqual(len(receipt['artifacts']), 1)
+        self.assertEqual(receipt['artifacts'][0]['toolName'], 'image_generate')
+        self.assertTrue(Path(receipt['artifacts'][0]['path']).is_relative_to(self.workspace/'.workbench-artifacts'))
+        self.assertNotIn('image_generate', agent.valid_tool_names)
+        self.assertEqual(len(calls), 1)
+
+    def test_late_deferred_image_result_is_not_imported_after_attempt_finish(self):
+        started, release = threading.Event(), threading.Event()
+        def wait_for_finish():
+            started.set(); release.wait(2)
+        bridge, agent, server, tools, calls, cfg = self.image_bridge(wait_for_finish)
+        bridge.prepare(self.params)
+        results = []
+        worker = threading.Thread(target=lambda: results.append(tools.handle_function_call('image_generate', {}, session_id='stored-session')))
+        worker.start()
+        try:
+            self.assertTrue(started.wait(1))
+            finish = {'session_id': self.params['session_id'], 'run_id': self.params['run_id']}
+            self.assertNotIn('artifacts', bridge.finish(finish))
+        finally:
+            release.set(); worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(json.loads(results[0])['success'])
+        self.assertNotIn('artifacts', bridge.finish(finish))
+        self.assertFalse((self.workspace/'.workbench-artifacts').exists())
+
+    def test_undeclared_tool_and_changed_provider_are_blocked_across_agent_rebuilds(self):
+        bridge, agent, server, tools, calls, cfg = self.image_bridge()
+        agent.tools.append({'function': {'name': 'browser_snapshot'}}); agent.valid_tool_names.add('browser_snapshot')
+        bridge.prepare(self.params)
+        self.assertIn('browser_snapshot', agent.valid_tool_names)
+        self.assertNotIn('image_generate', agent.valid_tool_names)
+        self.assertEqual(json.loads(tools.handle_function_call('browser_snapshot', {}, session_id='stored-session'))['called'], 'browser_snapshot')
+        bridge.finish({'session_id': self.params['session_id'], 'run_id': self.params['run_id']})
+        params = self.params | {'run_id': str(uuid.uuid4()), 'required_toolsets': ['image_gen'], 'capability_revision': bridge.integrations.catalog()['revision']}
+        bridge.prepare(params)
+        self.assertNotIn('browser_snapshot', agent.valid_tool_names)
+        self.assertEqual(json.loads(tools.handle_function_call('browser_snapshot', {}, session_id='stored-session'))['code'], 'workbench_integration_tool_blocked')
+        rebuilt = FakeAgent(); rebuilt.session_id = 'rebuilt-stored'
+        server._wire_session_agent('runtime-session', 'stored-session', rebuilt)
+        self.assertIn('image_generate', rebuilt.valid_tool_names)
+        self.assertTrue(json.loads(tools.handle_function_call('image_generate', {}, session_id='rebuilt-stored'))['success'])
+        cfg['image_gen']['provider'] = 'other-provider'
+        with self.assertRaisesRegex(ValueError, 'revision changed'):
+            rebuilt.run_conversation('run again')
+        with self.assertRaisesRegex(ValueError, 'revision changed'):
+            server._wire_session_agent('runtime-session', 'stored-session', FakeAgent())
+        self.assertEqual(json.loads(tools.handle_function_call('image_generate', {}, session_id='rebuilt-stored'))['code'], 'workbench_integration_tool_blocked')
+        self.assertEqual([call[0] for call in calls], ['browser_snapshot', 'image_generate'])
+
     def test_native_scaffold_complete_snapshot_and_session_policy(self):
         before = gateway.read_bundle(self.source)[0]
         memory_manager = self.agent.memory_manager
@@ -237,10 +348,11 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.assertEqual(self.agent._skill_nudge_interval, 0)
         self.assertIs(self.agent.memory_manager, memory_manager)
         self.assertFalse(self.agent.skip_background_review)
-        self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy"})
+        self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy", 'requiredToolsets': [], 'toolNames': []})
         self.assertEqual(set(self.server.methods), {"workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish", "workbench.learning.prepare",
                                                    "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history", "workbench.assistant.diagnostics",
                                                    "workbench.usage.history",
+                                                   'workbench.tools.catalog', 'workbench.skill.create', 'workbench.image.provider',
                                                    "workbench.learning.memory.capture", "workbench.learning.memory.release", "workbench.learning.memory.restore"})
         self.assertIn("workbench.skill.prepare", self.server._LONG_HANDLERS)
         self.assertTrue(self.server.scopes)
@@ -1198,7 +1310,7 @@ class WorkflowGatewayTests(unittest.TestCase):
         original_store, original_manager = ordinary._memory_store, ordinary._memory_manager
         ordinary_params = self.params | {"session_id": "ordinary-skill", "run_id": str(uuid.uuid4())}
         result = self.bridge.prepare(ordinary_params)
-        self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy"})
+        self.assertEqual(result["policy"], {"skillMutationBlocked": True, "memoryAllowed": True, "freeze": "bundle-copy", 'requiredToolsets': [], 'toolNames': []})
         self.assertIs(ordinary._memory_store, original_store)
         self.assertIs(ordinary._memory_manager, original_manager)
         self.assertFalse(ordinary.skip_background_review)

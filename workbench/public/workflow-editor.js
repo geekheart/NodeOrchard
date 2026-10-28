@@ -22,7 +22,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const NS = 'http://www.w3.org/2000/svg';
 const TYPES = new Map(NODE_TYPES.map(type => [type.type, type]));
 const GROUPS = new Map(NODE_GROUPS.map(group => [group.id, group]));
-const DATA_TYPES = ['fileRef', 'text', 'number', 'boolean', 'object', 'array', 'any'];
+const DATA_TYPES = ['fileRef', 'image', 'text', 'number', 'boolean', 'object', 'array', 'any'];
 const COPY = {
   input: '输入 / 触发', validation: '校验', skill: 'AI / Skill', tool: '工具 / 代码', subflow: '子流程',
   transform: '数据整理', condition: '条件判断', foreach: '逐项处理', loop: '条件循环',
@@ -777,8 +777,12 @@ export class WorkflowEditor {
   readForm(form, node) {
     const config = clone(node.config);
     for (const input of form.querySelectorAll('input[name], select[name], textarea[name]')) {
-      if (input.name === 'title' || input.name === 'targetSkillNodeIds' || input.name === 'targetNodeIds' || input.name === 'validationRules' || input.name === 'defaultValue' || input.disabled) continue;
+      if (input.name === 'title' || input.name === 'requiredToolsets' || input.name === 'targetSkillNodeIds' || input.name === 'targetNodeIds' || input.name === 'validationRules' || input.name === 'defaultValue' || input.disabled) continue;
       config[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
+    }
+    if (node.type === 'skill' && form.elements.requiredToolsets) {
+      try { config.requiredToolsets = JSON.parse(form.elements.requiredToolsets.value); } catch { throw new Error('所需工具选择无效。'); }
+      if (!Array.isArray(config.requiredToolsets) || config.requiredToolsets.some(value => typeof value !== 'string')) throw new Error('所需工具选择无效。');
     }
     if (node.type === 'input' && form.elements.defaultValue) {
       const raw = form.elements.defaultValue.value;

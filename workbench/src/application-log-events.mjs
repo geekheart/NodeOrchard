@@ -98,7 +98,7 @@ export class ApplicationLogEvents {
 }
 
 const STATIC_ROUTES = new Set(['/', '/api/bootstrap', '/api/app-capabilities', '/api/app-assistant', '/api/conversation-hub', '/api/app-assistant/conversations', '/api/app-assistant/messages',
-  '/api/settings', '/api/assistant-permissions', '/api/models', '/api/statistics', '/api/statistics/history', '/api/skills', '/api/events', '/api/connect',
+  '/api/settings', '/api/assistant-permissions', '/api/models', '/api/statistics', '/api/statistics/history', '/api/skills', '/api/skill-integrations', '/api/skill-integrations/image-provider', '/api/events', '/api/connect',
   '/api/workflow-node-presets', '/api/workflow-examples', '/api/workflow-library', '/api/workflow-packages/import', '/api/workflow-runs', '/api/workflow-schedules', '/api/workflow-v2/queue', '/api/sessions']);
 const ROUTES = [
   [/^\/api\/workflow-examples\/[^/]+\/prepare$/, '/api/workflow-examples/:exampleId/prepare'],

@@ -16,6 +16,7 @@ import { SourceRepairUI } from './source-repair-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
 import { WorkflowPackageUI } from './workflow-package-ui.js';
 import { WorkflowExamplesUI } from './workflow-examples-ui.js';
+import { SkillAuthoringUI } from './skill-authoring-ui.js';
 import { openAttachmentInput } from './workflow-attachment-input.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
@@ -117,6 +118,7 @@ const hermesModels = new HermesModelUI({
 });
 const assistantPermissions = new AssistantPermissionsUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
 const sourceRepairs = new SourceRepairUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
+const skillAuthoring = new SkillAuthoringUI({ api, readOnly: diagnosticCapture });
 const shortcutSettings = new ShortcutSettingsUI({ api, readOnly: diagnosticCapture,
   onSaved: settings => { state.settingsRevision++; state.settings = settings; applyPreferences(preferences()); if (state.route?.page === 'settings') renderSettings(); },
 }).mount($('shortcut-settings-root'));
@@ -507,6 +509,7 @@ function renderSettings() {
   $('runtime-paths').replaceChildren(...factList([['Hermes 程序', runtime.hermesRoot], ['Hermes 目录', runtime.hermesHome], ['工作区根目录', runtime.workspaceRoot]]).children); renderBackend(); renderEvents();
 }
 function renderSkills() {
+  $('create-skill').disabled = diagnosticCapture;
   const data = state.skills; $('refresh-skills').disabled = state.skillsLoading; const search = $('skill-search').value.trim().toLowerCase(); const skills = (data?.skills || []).filter((skill) => !search || `${skillDisplayName(skill)} ${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(search)); $('skills-count').textContent = data ? `${skills.length} 项技能` : '';
   const list = $('skill-list'); const detail = $('skill-detail');
   if (state.skillsLoading && !data) { list.replaceChildren(empty('正在读取 Skills…', '', 'sparkles')); detail.replaceChildren(); return; }
@@ -688,6 +691,9 @@ $('close-inspector').addEventListener('click', () => setTaskQuery({ panel: '' })
 for (const tab of $('inspector-tabs').querySelectorAll('button')) tab.addEventListener('click', () => setTaskQuery({ panel: tab.dataset.inspector }));
 $('skill-search').addEventListener('input', renderSkills);
 $('refresh-skills').addEventListener('click', () => { state.skillDetails.clear(); void loadSkills(true).then(() => loadSkillDetail(state.route.name)); });
+$('create-skill').addEventListener('click', () => void skillAuthoring.open({ onCreated: async (skill, { isCurrent }) => {
+  state.skillDetails.set(skill.name, skill); await loadSkills(true); if (isCurrent()) location.hash = `#/skills/${encodeURIComponent(skill.name)}`;
+} }));
 $('statistics-period').addEventListener('change', () => { renderStatistics(); void loadStatistics(); });
 $('preferences-form').addEventListener('input', () => { state.settingsDirty = true; $('preferences-status').textContent = '有未保存的更改'; });
 $('preferences-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.saving) return; state.saving = true; $('preferences-status').textContent = '正在保存…'; renderSettings(); try { const prefs = { theme: $('setting-theme').value, density: $('setting-density').value, defaultWorkspace: $('setting-workspace').value.trim() }; state.settings = await api('/api/settings', { method: 'POST', body: { preferences: prefs } }); state.settingsRevision++; state.settingsDirty = false; applyPreferences(preferences()); await synchronize(); $('preferences-status').textContent = '偏好已保存'; } catch (error) { $('preferences-status').textContent = `保存失败：${error.message}`; } finally { state.saving = false; renderSettings(); } });

@@ -221,6 +221,17 @@ test('streaming stays provisional; terminal result comes from exclusive session 
   assert.equal(fixture.cleanups, 1);
 });
 
+test('legacy runs retain acknowledged tool bindings but cannot publish native images without a human review graph', async t => {
+  const capabilities = { requiredToolsets: ['browser'], toolNames: ['browser_navigate'] };
+  const { app, manager } = await setup(t, { prepareSkill: async (_app, _session, skill) => ({ text: 'prepared', skill, capabilities,
+    cleanup: async () => ({ artifacts: [{ path: '/fixture/native-image.png', toolName: 'image_generate' }] }) }) });
+  const run = await manager.start({ document: document(), input: 'hello' });
+  assert.deepEqual(manager.get(run.id).nodes.skill.capabilities, capabilities);
+  const done = finished(app, manager, run.id); complete(app, run, 'generated an image');
+  const result = await done;
+  assert.equal(result.status, 'error'); assert.match(result.error, /图片.*第二版.*人工审核/); assert.equal(result.nodes.output.status, 'skipped');
+});
+
 test('mixed execution skips learning controls without preparing or invoking them and completes every business node', async t => {
   const preparation = chainPreparation();
   const calls = [];

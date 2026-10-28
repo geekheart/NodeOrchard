@@ -7,6 +7,7 @@ import { STUDIO_STATUS, isV2, inputEntries } from '../shared/workflow/workflow-s
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { PendingNoticeDismissals, pendingNoticeKey, requestNoticeKey } from './pending-notice-dismissals.js';
+import { SkillAuthoringUI, SkillToolsetsUI } from './skill-authoring-ui.js';
 
 const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
@@ -49,6 +50,12 @@ export function mergeSkillSelectionDraft(editor, workflowId, nodeId, name, revis
   const item = editor.doc.nodes.find(node => node.id === nodeId && node.type === 'skill'); if (!item) return false;
   const latest = editor.propertyDrafts.get(nodeId) || { title: item.title, config: structuredClone(item.config) };
   editor.propertyDrafts.set(nodeId, { ...latest, config: { ...latest.config, skillRef: name, version: revision } }); editor.renderHeader(); return true;
+}
+export function mergeSkillToolsetsDraft(editor, workflowId, nodeId, requiredToolsets) {
+  if (editor.doc.id !== workflowId || editor.libraryReadOnly) return false;
+  const item = editor.doc.nodes.find(node => node.id === nodeId && node.type === 'skill'); if (!item) return false;
+  const latest = editor.propertyDrafts.get(nodeId) || { title: item.title, config: structuredClone(item.config) };
+  editor.propertyDrafts.set(nodeId, { ...latest, config: { ...latest.config, requiredToolsets: [...requiredToolsets] } }); editor.renderHeader(); return true;
 }
 
 // Historical inspection reads the run snapshot; it never plans or executes an old run.
@@ -598,10 +605,27 @@ export class WorkflowRuntimeUI {
     const actions = node('div', 'wf-skill-picker-actions'); const refresh = button('刷新技能', () => { void this.loadSkills(true).then(() => { if (skillRef.value && this.skills?.connected) void choose(skillRef.value, false); }); }, 'wf-button wf-runtime-small');
     const connect = button('连接 Hermes', () => void this.connectBackend(), 'wf-button wf-runtime-small');
     const update = button('更新内容指纹', () => void choose(skillRef.value, true), 'wf-button wf-runtime-small'); update.hidden = true;
+    const create = button('新建 Skill', () => {
+      if (this.editor.libraryReadOnly || this.editor.documentLoaded === false || this.editor.doc.id !== workflowId) return;
+      this.skillAuthoring ||= new SkillAuthoringUI({ api: this.api, readOnly: new URLSearchParams(globalThis.location?.search || '').get('diagnosticCapture') === 'readonly' });
+      void this.skillAuthoring.open({ onCreated: async (skill, { isCurrent = () => true } = {}) => {
+        await this.loadSkills(true);
+        if (!isCurrent() || this.editor.libraryReadOnly || this.editor.doc.id !== workflowId || !this.editor.doc.nodes.some(item => item.id === workflowNode.id && item.type === 'skill')) throw Error('原工作流或节点已变化，请在当前节点重新选择。');
+        if (!await choose(skill.name, true, skill)) throw Error('节点版本尚未绑定，请刷新技能后重新选择。');
+      } });
+    }, 'wf-button wf-runtime-small');
     const versionDetails = node('details', 'wf-skill-version-details'); versionDetails.append(node('summary', '', '固定版本与来源'), revision);
-    actions.append(refresh, connect, update); wrapper.append(label, skillRef, version, search, select, details, versionDetails, actions); form.append(wrapper);
+    actions.append(refresh, connect, update, create); wrapper.append(label, skillRef, version, search, select, details, versionDetails, actions); form.append(wrapper);
     const state = { wrapper, render: null }; this.pickers.add(state); let selectionRequest = 0; let currentDetail = null;
     const workflowId = this.editor.doc.id, selectionKey = `${workflowId}:${workflowNode.id}`; this.skillSelectionRequests ||= new Map();
+    const required = node('input'); required.type = 'hidden'; required.name = 'requiredToolsets'; required.value = JSON.stringify(config.requiredToolsets || []);
+    const integrationHost = node('section', 'skill-toolsets wf-skill-toolsets'); wrapper.append(required, integrationHost);
+    const integrations = new SkillToolsetsUI(integrationHost, { api: this.api, selected: config.requiredToolsets || [], readOnly: this.editor.libraryReadOnly,
+      onChange: values => {
+        if (!mergeSkillToolsetsDraft(this.editor, workflowId, workflowNode.id, values)) return;
+        required.value = JSON.stringify(values); required.dispatchEvent?.(new Event('input', { bubbles: true }));
+      } });
+    void integrations.load();
     const changed = () => { skillRef.dispatchEvent(new Event('input', { bubbles: true })); this.updateRunButton(); };
     const describe = () => {
       if (!currentDetail) return;
@@ -610,7 +634,8 @@ export class WorkflowRuntimeUI {
       const differs = Boolean(version.value && currentDetail.revision && version.value !== currentDetail.revision);
       update.hidden = !differs; if (differs) revision.textContent += ' · 内容已有更新，重新运行前请更新引用。';
     };
-    const choose = async (name, apply) => {
+    const choose = async (name, apply, readback) => {
+      const replaceRequirements = apply && name !== skillRef.value, requirementRevision = integrations.revision;
       const request = ++selectionRequest; currentDetail = null; update.hidden = true;
       const generation = (this.skillSelectionRequests.get(selectionKey) || 0) + 1; this.skillSelectionRequests.set(selectionKey, generation);
       for (const pending of this.skillPending) if (pending.selectionKey === selectionKey) this.skillPending.delete(pending);
@@ -619,13 +644,15 @@ export class WorkflowRuntimeUI {
       if (apply) { skillRef.value = name; version.value = ''; changed(); }
       this.updateRunButton(); details.textContent = '正在读取技能内容指纹…';
       try {
-        const result = await this.api(`/api/skills/${encodeURIComponent(name)}`);
-        if (request !== selectionRequest || this.skillSelectionRequests.get(selectionKey) !== generation || this.editor.doc.id !== workflowId) return;
+        const result = readback || await this.api(`/api/skills/${encodeURIComponent(name)}`);
+        if (request !== selectionRequest || this.skillSelectionRequests.get(selectionKey) !== generation || this.editor.doc.id !== workflowId) return false;
         currentDetail = { name: result.name, displayName: result.displayName, description: result.description, source: result.source, revision: result.revision };
         if (result.name !== name || typeof result.revision !== 'string' || !/^sha256:[a-f0-9]{64}$/i.test(result.revision)) throw new Error('服务未返回匹配的 Skill 内容指纹。');
         if (apply) { version.value = result.revision; mergeSkillSelectionDraft(this.editor, workflowId, workflowNode.id, name, result.revision); }
-        describe();
-      } catch (error) { if (request === selectionRequest && this.skillSelectionRequests.get(selectionKey) === generation && this.editor.doc.id === workflowId) { details.textContent = text(`技能读取失败：${error.message}`); revision.textContent = version.value ? text(`保留引用 ${version.value}`) : '内容指纹尚未记录，不能运行。'; } }
+        if (replaceRequirements && requirementRevision === integrations.revision) integrations.setSelected(result.requiredToolsets || []);
+        state.render();
+        return true;
+      } catch (error) { if (request === selectionRequest && this.skillSelectionRequests.get(selectionKey) === generation && this.editor.doc.id === workflowId) { details.textContent = text(`技能读取失败：${error.message}`); revision.textContent = version.value ? text(`保留引用 ${version.value}`) : '内容指纹尚未记录，不能运行。'; } return false; }
       finally { this.skillPending.delete(ticket); this.updateRunButton(); }
     };
     state.render = () => {
@@ -634,6 +661,7 @@ export class WorkflowRuntimeUI {
       if (skillRef.value && !skills.some(skill => skill.name === skillRef.value)) { const selected = node('option', '', `${skillDisplayName(currentDetail) || skillRef.value} · ${query ? '当前选择' : '引用待确认'}`); selected.value = skillRef.value; select.append(selected); }
       for (const skill of skills) { const option = node('option', '', [skillDisplayName(skill), skillVersionLabel(skill)].filter(Boolean).join(' · ')); option.value = skill.name; option.title = text(skill.description || ''); select.append(option); }
       select.value = skillRef.value; select.disabled = !data?.connected || Boolean(data?.error); refresh.disabled = Boolean(this.skillsPromise); connect.hidden = this.getBackend()?.state === 'ready';
+      create.disabled = Boolean(this.editor.libraryReadOnly) || this.editor.documentLoaded === false;
       if (data?.error) details.textContent = text(`技能列表读取失败：${data.error}`); else if (!data?.connected) details.textContent = '连接 Hermes 后选择实际安装的技能。'; else if (!skillRef.value) details.textContent = skills.length ? '选择后记录内容指纹，运行时使用固定快照。' : '没有匹配的技能。'; else describe();
     };
     state.refreshDetail = () => { if (skillRef.value && this.skills?.connected) void choose(skillRef.value, !version.value); };

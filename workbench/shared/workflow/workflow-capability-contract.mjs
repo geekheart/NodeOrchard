@@ -43,7 +43,8 @@ export function workflowNodeContract(type, { schemaVersion = 2 } = {}) {
     ], runtime: codeRuntimeContract(schemaVersion) } : {}),
     ...(type === 'transform' ? { runtime: codeRuntimeContract(schemaVersion) } : {}),
     ...(type === 'output' ? { note: '负责保存和交付已产生的文件；文件名后缀不执行格式转换。' } : {}),
-    ...(type === 'skill' ? { note: '需要真实 skillRef 与固定内容版本；仅在工具调用与业务输出确认后视为成功。' } : {}) };
+    ...(type === 'skill' ? { note: '需要真实 skillRef 与固定内容版本；requiredToolsets 可声明 image_gen、browser、computer_use 或已配置的 mcp-* 工具集，只检查并绑定人工配置的能力，不授予权限。图片从原生工具真实文件归集，必须经人工审核；创建 Skill 与图片提供商选择是人工界面入口。仅在工具调用与业务输出确认后视为成功。',
+      integrations: { inspectTool: 'workbench.inspect', section: 'integrations', declarationGrantsPermission: false, imageReviewRequired: true } } : {}) };
 }
 
 export function workflowEditContract() {

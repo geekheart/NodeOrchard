@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { declaredSkillToolsets } from '../shared/workflow/workflow-integrations.mjs';
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const SOURCES = new Set(['bundled', 'hub', 'local']);
@@ -69,6 +70,8 @@ export async function readSkill(adapter, name) {
   if (detail?.ok !== true || detail.kind !== 'skill' || typeof detail.content !== 'string') {
     throw Object.assign(new Error('此 Skill 的内容当前不可用。'), { httpStatus: 404 });
   }
+  const requiredToolsets = declaredSkillToolsets(detail.content);
   return { name, description: skill.description, content: detail.content, source: skill.source,
+    ...(requiredToolsets.length ? { requiredToolsets } : {}),
     revision: `sha256:${createHash('sha256').update(detail.content, 'utf8').digest('hex')}` };
 }

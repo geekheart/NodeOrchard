@@ -25,6 +25,12 @@ function operations(nodes) {
   });
   return doc;
 }
+
+test('legacy linear workflows cannot request image generation without a human review node', () => {
+  const doc = chain(1);
+  doc.nodes.find(node => node.type === 'skill').config.requiredToolsets = ['image_gen'];
+  assert.throws(() => planWorkflow(doc), /图片生成.*第二版.*人工审核/);
+});
 const codeNode = (id, config = {}) => createNode('tool', { x: 400, y: 0 }, { id,
   config: { executionMode: 'code', inputType: 'text', outputType: 'object', code: 'return { text: input };', ...config } });
 

@@ -77,6 +77,10 @@
 
 优化器只取得训练证据，各候选执行完整训练与验证集后才选择最佳。代码错误保留真实状态，允许已确认的可恢复错误以零分诊断继续，不把未知执行当成功。候选接口不提供注册工具或应用源码补丁，用户应用到草稿后沿用正常保存机制；业务代码仍是可信本地执行，不构成 OS 沙箱。节点字段、冻结边界、来源、记忆及旧 Skill／反馈兼容见[学习范围与候选校验](learning-protocol.md#学习范围与候选校验)。
 
+## Skill 图片与外部软件
+
+`workbench.inspect` 的 `integrations` 区段只读发现无凭据的真实工具状态，独立助手也可读取。`requiredToolsets` 只声明请求，不改人工配置或会话权限。新建全局 Skill、选择图片提供商保留人工入口，助手没有写工具；执行固定正文并按尝试绑定原生工具版本，从可信图片回执登记文件，再经人工审核。Figma／MCP、浏览器和 Computer Use 仅按真实连接及驱动状态广告，见[扩展合约](skill-integrations.md)。
+
 ## 示例目录
 
 `workbench.inspect` 的 `section: examples` 读取固定目录的元数据，供助手说明执行／学习示例及模型依赖，不读取模板正文，也不创建、载入或运行工作流。空画布“载入示例”属于 `ui-only`；目录与准备接口分别为 `GET /api/workflow-examples` 和 `POST /api/workflow-examples/:id/prepare`，准备请求仅接受当前 `workflowId`，不接受任意文件路径。

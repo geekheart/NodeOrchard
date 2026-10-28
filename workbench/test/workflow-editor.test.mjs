@@ -334,6 +334,17 @@ test('clearing a version-one fixed input remains a valid variable-input configur
   assert.equal(Object.hasOwn(cleared.nodes[0].config, 'value'), false);
 });
 
+test('Skill dependency form preserves arrays and older forms do not acquire new configuration', () => {
+  const node = createNode('skill', {}, { config: { inputType: 'text', outputType: 'image' } }), required = { name: 'requiredToolsets', type: 'hidden', value: '["image_gen","mcp-drawing"]' };
+  const form = { elements: { title: { value: node.title }, requiredToolsets: required }, querySelectorAll: () => [required] };
+  const value = WorkflowEditor.prototype.readForm(form, node); assert.deepEqual(value.config.requiredToolsets, ['image_gen', 'mcp-drawing']); assert.equal(value.config.outputType, 'image');
+  const document = createDocument({ schemaVersion: 2 }); document.nodes = [node];
+  assert.deepEqual(updateNode(document, node.id, value).nodes[0].config.requiredToolsets, ['image_gen', 'mcp-drawing']);
+  required.value = '"image_gen"'; assert.throws(() => WorkflowEditor.prototype.readForm(form, node), /所需工具选择无效/);
+  required.value = '['; assert.throws(() => WorkflowEditor.prototype.readForm(form, node), /所需工具选择无效/);
+  delete form.elements.requiredToolsets; form.querySelectorAll = () => []; assert.equal(Object.hasOwn(WorkflowEditor.prototype.readForm(form, node).config, 'requiredToolsets'), false);
+});
+
 test('real input properties show legacy fixed instructions and keep them when applying unrelated edits', t => {
   globalValue(t, 'document', { createElement: tag => new FakeElement(tag), createElementNS: (_namespace, tag) => new FakeElement(tag), createTextNode: text => ({ textContent: text }) });
   globalValue(t, 'Option', function (label, value) { this.textContent = label; this.value = value; });

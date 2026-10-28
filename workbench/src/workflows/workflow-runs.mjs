@@ -326,6 +326,7 @@ export class WorkflowRuns {
         for (const key of ['bundleHash', 'snapshotDirectory']) {
           if (typeof prepared.skill[key] === 'string') run.skills.find(skill => skill.nodeId === step.node.id)[key] = prepared.skill[key];
         }
+        if (prepared.capabilities) run.nodes[step.node.id].capabilities = clone(prepared.capabilities);
         this.save(run);
         if (state.stopRequested) throw failure('准备期间已停止。');
       }
@@ -505,8 +506,10 @@ export class WorkflowRuns {
         throw failure('Hermes 历史中没有已完成的最终助手结果。');
       }
       const value = transferValue(resultValue(last.text, step.node.config.outputType), step.node.config.outputType);
-      try { await this.cleanupStep(step); }
+      let receipt;
+      try { receipt = await this.cleanupStep(step); }
       catch (cause) { throw failure('Skill 收尾校验失败：' + errorText(cause)); }
+      if (receipt?.artifacts?.length) throw failure('图片生成需要第二版数据流与人工审核节点；本次原生图片未交给下游。');
       if (!this.isCurrent(state, step, epoch)) return;
       await this.confirmStep(state, step, epoch, value, last.text);
     } catch (error) {

@@ -161,6 +161,10 @@ export function createWorkbenchServer(config, application = new Application(conf
         return json(res, 200, await application.backfillHistoricalUsage());
       }
       if (req.method === 'GET' && path === '/api/skills') return json(res, 200, await application.skills());
+      if (req.method === 'POST' && path === '/api/skills') return json(res, 201, await application.skillIntegrations.create(await readJson(req, 64000), { human: true }));
+      if (req.method === 'GET' && path === '/api/skill-integrations') return json(res, 200, await application.skillIntegrations.inspect());
+      if (req.method === 'POST' && path === '/api/skill-integrations/image-provider') return json(res, 200,
+        await application.skillIntegrations.selectImageProvider(await readJson(req, 4096), { human: true }));
       const skillMatch = path.match(/^\/api\/skills\/([^/]+)$/);
       if (req.method === 'GET' && skillMatch) return json(res, 200, await application.skill(decodeURIComponent(skillMatch[1])));
       if (req.method === 'GET' && path === '/api/events') {
@@ -452,6 +456,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-node-library-ui.js': ['workflow-node-library-ui.js', 'text/javascript'],
         '/workflow-editor.css': ['workflow-editor.css', 'text/css'],
         '/workflow-runtime-ui.js': ['workflow-runtime-ui.js', 'text/javascript'],
+        '/skill-authoring-ui.js': ['skill-authoring-ui.js', 'text/javascript'],
         '/workflow-runtime-ui.css': ['workflow-runtime-ui.css', 'text/css'],
         '/workflow-learning-ui.js': ['workflow-learning-ui.js', 'text/javascript'],
         '/workflow-learning-ui.css': ['workflow-learning-ui.css', 'text/css'],
@@ -475,6 +480,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/shared/workflow/workflow-dataset.mjs': 'workflow-dataset.mjs',
         '/shared/workflow/workflow-inputs.mjs': 'workflow-inputs.mjs',
         '/shared/workflow/workflow-model.mjs': 'workflow-model.mjs',
+        '/shared/workflow/workflow-integrations.mjs': 'workflow-integrations.mjs',
         '/shared/workflow/workflow-plan.mjs': 'workflow-plan.mjs',
         '/shared/workflow/workflow-learning-scope.mjs': 'workflow-learning-scope.mjs',
         '/shared/workflow/workflow-presets.mjs': 'workflow-presets.mjs',

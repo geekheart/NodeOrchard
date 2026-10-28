@@ -1,5 +1,6 @@
 import { workflowInputFields } from './workflow-inputs.mjs';
 import { validationRules } from './workflow-validation.mjs';
+import { validateSkillToolsets } from './workflow-integrations.mjs';
 const freezeRows = rows => Object.freeze(rows.map(row => Object.freeze(row)));
 
 export const NODE_GROUPS = freezeRows([
@@ -155,14 +156,16 @@ function inputDefault(value) {
 
 function configFor(type, input = {}, v2 = true) {
   const defaults = DEFAULTS[nodeType(type)];
-  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(type === 'improvement' ? ['targetNodeIds'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), 'maxRevisions', ...(type === 'output' ? ['stage'] : [])] : [])]);
+  object(input, '节点配置', [...Object.keys(defaults), ...(type === 'input' ? ['defaultValue'] : []), ...(type === 'skill' ? ['requiredToolsets'] : []), ...(type === 'improvement' ? ['targetNodeIds'] : []), ...(v2 ? [...Object.keys(V2_DEFAULTS), 'maxRevisions', ...(type === 'output' ? ['stage'] : [])] : [])]);
   const result = { ...defaults };
   if (type === 'validation') result.rules = validationRules(defaults.rules);
   if (type === 'improvement') result.targetSkillNodeIds = [...defaults.targetSkillNodeIds];
   // Older drafts used the presence of toolName to distinguish tools from code.
   if (type === 'tool' && !has(input, 'executionMode')) result.executionMode = typeof input.toolName === 'string' && input.toolName.trim() ? 'tool' : 'code';
   for (const [key, value] of Object.entries(input)) {
-    if (type === 'input' && key === 'defaultValue') {
+    if (type === 'skill' && key === 'requiredToolsets') {
+      result.requiredToolsets = validateSkillToolsets(value);
+    } else if (type === 'input' && key === 'defaultValue') {
       result.defaultValue = inputDefault(value);
     } else if (type === 'validation' && key === 'rules') {
       result.rules = validationRules(value);
@@ -259,6 +262,7 @@ export function nodeConfigurationContract(type, { schemaVersion = 2 } = {}) {
   if (![1, 2].includes(schemaVersion)) fail('仅支持 schemaVersion 1 或 2。');
   const defaults = configFor(type, {}, schemaVersion === 2);
   const allowedConfigKeys = [...new Set([...Object.keys(DEFAULTS[type]), ...(type === 'input' ? ['defaultValue'] : []),
+    ...(type === 'skill' ? ['requiredToolsets'] : []),
     ...(type === 'improvement' ? ['targetNodeIds'] : []),
     ...(schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])])];
   const enums = { language: [...CODE_LANGUAGES], executionMode: [...TOOL_EXECUTION_MODES], inputType: [...PORT_TYPES], outputType: [...PORT_TYPES],
@@ -440,7 +444,7 @@ export function updateNode(doc, id, patch) {
   if (!existing) fail('要更新的节点不存在。');
   const next = { ...existing, ...patch };
   if (has(patch, 'config')) {
-    object(patch.config, '节点配置', [...Object.keys(DEFAULTS[existing.type]), ...(existing.type === 'input' ? ['defaultValue'] : []), ...(clean.schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(existing.type === 'output' ? ['stage'] : [])] : [])]);
+    object(patch.config, '节点配置', [...Object.keys(DEFAULTS[existing.type]), ...(existing.type === 'input' ? ['defaultValue'] : []), ...(existing.type === 'skill' ? ['requiredToolsets'] : []), ...(clean.schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(existing.type === 'output' ? ['stage'] : [])] : [])]);
     next.config = { ...existing.config, ...patch.config };
   }
   // Validate every retained edge against the proposed port types before returning anything.

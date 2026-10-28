@@ -8,6 +8,7 @@ import { prepareSkillRun } from '../src/workflows/workflow-skill.mjs';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const policy = { skillMutationBlocked: true, memoryAllowed: true, freeze: 'bundle-copy' };
+const capabilityRevision = 'sha256:' + 'c'.repeat(64);
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'workflow-skill-bridge-'));
@@ -83,6 +84,92 @@ test('legacy single-step preparation keeps its original metadata path and run id
   await prepared.cleanup();
   assert.equal(calls[1][1].run_id, options.runId);
   assert.equal(calls[2][1].run_id, options.runId);
+});
+
+test('requested Skill toolsets require an exact native acknowledgement and retain their frozen binding', async t => {
+  const { app, calls, dataDir, skill, session, options } = await fixture(t);
+  options.skillNode.config.requiredToolsets = ['image_gen'];
+  let acknowledged = false;
+  app.onRequest = (method, params) => {
+    if (method === 'workbench.tools.catalog') return { revision: capabilityRevision, toolsets: [{ id: 'image_gen', label: 'Images', available: true, enabled: true, tools: ['image_generate'] }] };
+    if (method === 'workbench.skill.prepare') return { text: 'bound image Skill', skill: { name: skill.name, revision: skill.revision },
+      policy: { ...policy, ...(acknowledged ? { requiredToolsets: ['image_gen'], toolNames: ['image_generate'], capabilityRevision } : {}) } };
+  };
+  await assert.rejects(prepareSkillRun(app, session, skill, options), /工具能力/);
+  assert.deepEqual(await readdir(dataDir), []);
+  acknowledged = true;
+  const prepared = await prepareSkillRun(app, session, skill, options);
+  assert.deepEqual(calls.filter(([method]) => method === 'workbench.skill.prepare').at(-1)[1].required_toolsets, ['image_gen']);
+  assert.deepEqual(prepared.capabilities, { requiredToolsets: ['image_gen'], toolNames: ['image_generate'], revision: capabilityRevision });
+  assert.equal(calls.filter(([method]) => method === 'workbench.skill.prepare').at(-1)[1].capability_revision, capabilityRevision);
+  const metadata = JSON.parse(await readFile(join(dataDir, 'workflow-snapshots', options.runId, 'skill.json'), 'utf8'));
+  assert.deepEqual(metadata.capabilities, prepared.capabilities);
+  options.skillNode.config.requiredToolsets.push('computer_use');
+  assert.deepEqual(prepared.capabilities.requiredToolsets, ['image_gen']);
+  await prepared.cleanup();
+});
+
+test('unavailable or changed toolsets refuse preparation rather than granting a different tool list', async t => {
+  const { app, calls, skill, session, options } = await fixture(t);
+  options.skillNode.config.requiredToolsets = ['image_gen'];
+  for (const change of [{ available: false }, { enabled: false }, { tools: [] }]) {
+    app.onRequest = method => method === 'workbench.tools.catalog' ? { revision: capabilityRevision, toolsets: [{ id: 'image_gen', available: true, enabled: true, tools: ['image_generate'], ...change }] } : undefined;
+    await assert.rejects(prepareSkillRun(app, session, skill, options), /工具能力不可用/);
+  }
+  assert.equal(calls.some(([method]) => method === 'workbench.skill.prepare'), false);
+  app.onRequest = method => method === 'workbench.tools.catalog' ? { revision: capabilityRevision, toolsets: [{ id: 'image_gen', available: true, enabled: true, tools: ['image_generate'] }] }
+    : method === 'workbench.skill.prepare' ? { text: 'changed tools', skill: { name: skill.name, revision: skill.revision },
+      policy: { ...policy, requiredToolsets: ['image_gen'], toolNames: ['image_generate', 'computer_use'], capabilityRevision } } : undefined;
+  await assert.rejects(prepareSkillRun(app, session, skill, options), /准确确认/);
+});
+
+test('a repeated Skill attempt refuses changed native capabilities instead of silently switching the image provider', async t => {
+  const { app, calls, skill, session, options } = await fixture(t);
+  options.skillNode.config.requiredToolsets = ['image_gen']; let revision = capabilityRevision;
+  app.onRequest = method => method === 'workbench.tools.catalog' ? { revision, toolsets: [{ id: 'image_gen', available: true, enabled: true, tools: ['image_generate'] }] }
+    : method === 'workbench.skill.prepare' ? { text: 'bound image Skill', skill: { name: skill.name, revision: skill.revision },
+      policy: { ...policy, requiredToolsets: ['image_gen'], toolNames: ['image_generate'], capabilityRevision: revision } } : undefined;
+  const first = await prepareSkillRun(app, session, skill, options); await first.cleanup();
+  revision = 'sha256:' + 'd'.repeat(64);
+  const prepares = calls.filter(([method]) => method === 'workbench.skill.prepare').length;
+  await assert.rejects(prepareSkillRun(app, session, skill, { ...options, expectedCapabilities: first.capabilities }), /工具能力.*变化.*新建运行/);
+  assert.equal(calls.filter(([method]) => method === 'workbench.skill.prepare').length, prepares);
+});
+
+test('runtime Skill capability IDs accept the same configured MCP names as the shared node contract', async t => {
+  for (const id of ['mcp-Figma.Desktop', 'mcp-' + 'A'.repeat(96)]) await t.test(id, async sub => {
+    const { app, skill, session, options } = await fixture(sub);
+    options.skillNode.config.requiredToolsets = [id];
+    app.onRequest = method => method === 'workbench.tools.catalog' ? { revision: capabilityRevision,
+      toolsets: [{ id, available: true, enabled: true, tools: ['mcp__Figma_V2_read'] }] }
+      : method === 'workbench.skill.prepare' ? { text: 'configured MCP Skill', skill: { name: skill.name, revision: skill.revision },
+        policy: { ...policy, requiredToolsets: [id], toolNames: ['mcp__Figma_V2_read'], capabilityRevision } } : undefined;
+    const prepared = await prepareSkillRun(app, session, skill, options);
+    assert.deepEqual(prepared.capabilities.requiredToolsets, [id]);
+    await prepared.cleanup();
+  });
+});
+
+test('media wire types remain JSON and native image receipts are returned by the integrity cleanup', async t => {
+  const { app, calls, skill, session, options } = await fixture(t);
+  options.skillNode.config.outputType = 'image';
+  const artifacts = [{ path: '/fixture/.workbench-artifacts/image.png', sourcePath: '/fixture/cache/image.png',
+    sha256: 'a'.repeat(64), mimeType: 'image/png', toolName: 'image_generate' }];
+  app.onRequest = method => method === 'workbench.skill.finish' ? { unchanged: true, snapshotIntact: true, artifacts } : undefined;
+  const prepared = await prepareSkillRun(app, session, skill, options);
+  assert.equal(calls[0][1].output_type, 'object');
+  await prepared.bindInput(null); assert.equal(calls[1][1].output_type, 'object');
+  assert.deepEqual(await prepared.cleanup(), { artifacts });
+});
+
+test('a no-tools learning Skill cannot request image-generation capabilities', async t => {
+  const { app, calls, skill, session, options } = await fixture(t);
+  skill.content = '---\nname: fixture-skill\nallowed-tools: []\n---\nPlan.\n';
+  skill.revision = `sha256:${createHash('sha256').update(skill.content).digest('hex')}`;
+  options.skillNode.config = { ...options.skillNode.config, version: skill.revision, requiredToolsets: ['image_gen'] };
+  const id = randomUUID();
+  await assert.rejects(prepareSkillRun(app, session, skill, { ...options, learningId: id, memoryScopeId: id }), /无工具.*工具能力/);
+  assert.equal(calls.length, 0);
 });
 
 test('binding retains typed JSON values and captured step configuration without live Skill reloads', async t => {

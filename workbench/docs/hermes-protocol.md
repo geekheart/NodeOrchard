@@ -41,6 +41,8 @@ SQLite 只保存应用元数据和运行结果。对话历史通过 `session.his
 
 ## 最小业务接口
 
+Skill 工具扩展还提供受限 `workbench.tools.catalog`、`workbench.skill.create` 与 `workbench.image.provider` RPC，分别用于只读依赖目录、人工创建和人工图片服务选择。它们不进入模型工具目录；准备／结束沿原 Skill RPC 绑定能力版本和可信图片回执，见[Skill 图片与外部工具](skill-integrations.md)。
+
 | 应用 API | 执行关系 |
 | --- | --- |
 | `POST /api/connect` | 进程启动、能力握手、`config.get(approvals.mode)`、受限 `model.options` |

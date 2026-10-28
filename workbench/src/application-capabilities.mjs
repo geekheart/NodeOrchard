@@ -27,8 +27,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
-  definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录及固定父级、示例和统计。统计含对话、执行、Token覆盖和上下文，独立助手限定当前工作流。', {
-    section: { enum: ['settings', 'models', 'schedules', 'node-derivations', 'node-presets', 'statistics', 'examples'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
+  definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录、示例、统计及Skill图片/浏览器/桌面/MCP工具的真实就绪状态。独立助手限定当前工作流，不读取认证或修改连接。', {
+    section: { enum: ['settings', 'models', 'schedules', 'node-derivations', 'node-presets', 'statistics', 'examples', 'integrations'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
   definition('page.inspect', '读取发消息时当前页面的界面状态与脱敏操作、错误记录。', {}),
   definition('environment.probe', '检查固定工具版本，或检查 GitHub HTTPS 连接；代码解释器和库请使用 runtime.inspect。', { target: { enum: ['dependencies', 'github'] } }),
   definition('browser.capture', '在专用只读浏览器中真实截图或短录制，附复现步骤与错误；不会采集当前用户标签页或桌面。', {
@@ -46,6 +46,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
+  { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置，认证继续由Hermes管理。创建全局可执行资源保留人工入口，业务Skill和应用助手均无skill_manage或配置写工具。' },
   { id: 'workflow-property-inspector', status: 'ui-only', tools: [], note: '属性面板随当前视图的有效节点或连线选择打开，取消选择后自动关闭；未应用的节点属性草稿保留。此为本地界面选择状态，不提供助手操作工具。' },
   { id: 'workflow-examples', status: 'ui-only', inspect: 'workbench.inspect', tools: [], note: '空画布的示例目录提供执行与学习模板；载入前核对实际 Skill 版本，附默认输入与学习数据，保留当前工作流身份，不自动执行。' },
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
@@ -173,6 +175,7 @@ export class ApplicationCapabilities {
     if (workflowId !== undefined && (typeof workflowId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workflowId))) fail('工作流编号无效。');
     if (section === 'settings') { const settings = await this.app.settings(); return { section, preferences: settings.preferences, approvalMode: settings.approvalMode }; }
     if (section === 'models') return { section, ...(await this.app.modelOptions()) };
+    if (section === 'integrations') return { section, ...(await this.app.skillIntegrations.inspect()) };
     if (section === 'schedules') return { section, schedules: this.app.schedules.list(workflowId).slice(0, 100).map(row =>
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };

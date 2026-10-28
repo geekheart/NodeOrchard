@@ -4,11 +4,24 @@ import {
   NODE_TYPES, NODE_GROUPS, createDocument, createNode, getPorts, validateConnection,
   connectNodes, updateNode, removeNodes, removeEdge, validateDocument, serializeDocument, nodeConfigurationContract, foundationNodeParent,
 } from '../shared/workflow/workflow-model.mjs';
+import { declaredSkillToolsets } from '../shared/workflow/workflow-integrations.mjs';
 
 const node = (type, id, config = {}) => createNode(type, { x: 20, y: 40 }, { id, config });
 const graph = (...nodes) => ({ ...createDocument(), nodes });
 const wire = (sourceNode, targetNode, sourcePort = 'out', targetPort = 'in') => ({ sourceNode, sourcePort, targetNode, targetPort });
 const frozenCopy = value => JSON.parse(JSON.stringify(value));
+
+test('Skill integration requirements are optional, explicit and cannot widen to arbitrary toolsets', () => {
+  const original = graph(node('skill', 'legacy'));
+  assert.equal(Object.hasOwn(original.nodes[0].config, 'requiredToolsets'), false);
+  assert.deepEqual(validateDocument(original), original);
+  const required = ['image_gen', 'mcp-figma'], skill = node('skill', 'image-skill', { requiredToolsets: required });
+  required.push('browser'); assert.deepEqual(skill.config.requiredToolsets, ['image_gen', 'mcp-figma']);
+  assert.equal(nodeConfigurationContract('skill').allowedConfigKeys.includes('requiredToolsets'), true);
+  for (const value of ['image_gen', ['all'], ['terminal'], ['image_gen', 'image_gen'], ['mcp-../../escape']]) assert.throws(() => node('skill', 'bad', { requiredToolsets: value }), /工具依赖/);
+  assert.deepEqual(declaredSkillToolsets('---\nname: sample\nrequired-toolsets: ["image_gen"]\n---\nBody'), ['image_gen']);
+  assert.deepEqual(declaredSkillToolsets('Body\nrequired-toolsets: ["computer_use"]'), []);
+});
 
 test('renaming learning improvement preserves the frozen foundation label in historical derived origins', () => {
   const origin = { kind: 'preset', id: 'preset-legacy-improvement', version: 1, title: '旧改进节点', baseType: 'improvement',

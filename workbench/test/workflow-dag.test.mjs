@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -49,6 +49,14 @@ test('image review requirements reject a direct or merge-based bypass before any
   assert.throws(() => planWorkflow(graph([node('input', 'input'), registered, node('output', 'output')], [['input', 'image'], ['image', 'output']])), /人工审核/);
 });
 
+test('a Skill requiring native image generation needs human review before any model submission', () => {
+  const skill = node('skill', 'image', { inputType: 'object', outputType: 'object', skillRef: 'fixture', version: 'sha256:' + 'a'.repeat(64),
+    requiredToolsets: ['image_gen'], reviewImages: false });
+  assert.throws(() => planWorkflow(graph([node('input', 'input'), skill, node('output', 'output')], [['input', 'image'], ['image', 'output']])), /人工审核/);
+  assert.doesNotThrow(() => planWorkflow(graph([node('input', 'input'), skill, node('human', 'review'), node('output', 'output')],
+    [['input', 'image'], ['image', 'review'], ['review', 'output']])));
+});
+
 test('independent branches overlap and a join waits for both exact values', async t => {
   const started = []; const gates = {};
   const { manager } = await setup(t, async ({ node, input }) => { started.push(node.id); await new Promise(resolve => { gates[node.id] = resolve; }); return { output: { node: node.id, value: input.value } }; });
@@ -73,6 +81,39 @@ test('EDA resource serializes only EDA nodes while another resource progresses',
   const { manager } = await setup(t, async ({ node }) => { called.push(node.id); active++; peak = Math.max(peak, active); await delay(20); active--; return { output: { id: node.id } }; });
   const run = await manager.start({ document: split({ resource: 'eda' }), input: {} });
   await until(() => manager.get(run.id).status === 'complete'); assert.equal(peak, 1); assert.equal(called.length, 2);
+});
+
+test('Computer Use Skills in different workflows share one desktop slot and release it after completion or cancellation', async t => {
+  for (const action of ['complete', 'cancel']) await t.test(action, async sub => {
+    const { app, manager } = await setup(sub);
+    const content = '---\nname: desktop-fixture\n---\nUse the configured desktop.\n', version = 'sha256:' + createHash('sha256').update(content).digest('hex');
+    const capabilityRevision = 'sha256:' + 'c'.repeat(64), submitted = [], active = new Set(); let sessions = 0, peak = 0;
+    app.skill = async name => ({ name, revision: version, source: 'local', content });
+    app.createSession = async () => ({ id: 'desktop-' + ++sessions, runtimeSessionId: 'desktop-runtime-' + sessions });
+    app.submit = async id => { submitted.push(id); active.add(id); peak = Math.max(peak, active.size); };
+    app.history = async () => ({ messages: [{ role: 'assistant', text: '{"complete":true}' }] });
+    app.interrupt = async id => { active.delete(id); return {}; };
+    app.adapter = { request: async method => {
+      if (method === 'workbench.tools.catalog') return { revision: capabilityRevision, toolsets: [{ id: 'computer_use', available: true, enabled: true, tools: ['computer_use'] }] };
+      if (method === 'workbench.skill.prepare') return { text: 'fixed desktop Skill', skill: { name: 'desktop-fixture', revision: version },
+        policy: { freeze: 'bundle-copy', memoryAllowed: true, skillMutationBlocked: true, requiredToolsets: ['computer_use'], toolNames: ['computer_use'], capabilityRevision } };
+      if (method === 'workbench.skill.input') return { text: 'fixed input' };
+      if (method === 'workbench.skill.finish') return { unchanged: true, snapshotIntact: true, artifacts: [] };
+      throw Error('Unexpected RPC: ' + method);
+    } };
+    const document = () => graph([node('input', 'input'), node('skill', 'desktop', { inputType: 'object', outputType: 'object',
+      skillRef: 'desktop-fixture', version, requiredToolsets: ['computer_use'] }), node('output', 'output')], [['input', 'desktop'], ['desktop', 'output']]);
+    const first = await manager.start({ document: document(), input: {} }); await until(() => submitted.length === 1);
+    const second = await manager.start({ document: document(), input: {} }); assert.notEqual(first.workflowId, second.workflowId);
+    await until(() => manager.get(second.id).nodes.desktop.status === 'waiting_resource' || submitted.length > 1);
+    assert.equal(submitted.length, 1, 'the second workflow must not submit desktop commands while the first holds the slot');
+    if (action === 'cancel') { await manager.interrupt(first.id); assert.equal(manager.get(first.id).status, 'interrupted'); }
+    else { active.delete(submitted[0]); app.publish('message.complete', submitted[0], { status: 'complete' }); }
+    await until(() => submitted.length === 2); active.delete(submitted[1]); app.publish('message.complete', submitted[1], { status: 'complete' });
+    await until(() => manager.get(second.id).status === 'complete');
+    if (action === 'complete') await until(() => manager.get(first.id).status === 'complete');
+    assert.equal(peak, 1); assert.equal(active.size, 0);
+  });
 });
 
 test('multiple tasks of the same workflow run with a durable excess queue', async t => {
@@ -165,6 +206,161 @@ test('a Skill uses an isolated workspace session and stages explicit files into 
   assert(final.output.path.startsWith((await realpath(outputRoot)) + '/')); assert.equal(await readFile(final.output.path, 'utf8'), 'actual Skill file');
   assert.equal(final.nodes.skill.artifacts[0].sha256, createHash('sha256').update('actual Skill file').digest('hex'));
   assert.equal(final.nodes.output.artifacts.some(artifact => artifact.name === 'saved.json'), true);
+});
+
+test('a native image receipt supplies a real typed Skill output and waits for human review even when the final answer is prose', async t => {
+  const { app, manager, directory } = await setup(t, undefined, { files: true });
+  const content = '---\nname: fixture\n---\nGenerate the requested image.\n', version = 'sha256:' + createHash('sha256').update(content).digest('hex');
+  const capabilityRevision = 'sha256:' + 'c'.repeat(64);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z2t8AAAAASUVORK5CYII=', 'base64');
+  const sourcePath = join(directory, 'native-cache', 'image.png'); let artifactPath;
+  app.skill = async name => ({ name, revision: version, source: 'local', content });
+  app.createSession = async ({ cwd }) => { artifactPath = join(cwd, '.workbench-artifacts', 'image.png'); await mkdir(join(cwd, '.workbench-artifacts')); await writeFile(artifactPath, png); return { id: 'native-image', runtimeSessionId: 'native-image-runtime' }; };
+  app.submit = async id => { queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+  app.history = async () => ({ messages: [{ role: 'assistant', text: '图片已生成。' }] }); app.interrupt = async () => ({});
+  app.adapter = { request: async (method, params) => {
+    if (method === 'workbench.tools.catalog') return { revision: capabilityRevision, toolsets: [{ id: 'image_gen', available: true, enabled: true, tools: ['image_generate'] }] };
+    if (method === 'workbench.skill.prepare') { assert.equal(params.output_type, 'object'); assert.deepEqual(params.required_toolsets, ['image_gen']);
+      return { text: 'native image Skill', skill: { name: 'fixture', revision: version }, policy: { freeze: 'bundle-copy', skillMutationBlocked: true,
+        memoryAllowed: true, requiredToolsets: ['image_gen'], toolNames: ['image_generate'], capabilityRevision } }; }
+    if (method === 'workbench.skill.input') return { text: 'fixed input' };
+    if (method === 'workbench.skill.finish') return { unchanged: true, snapshotIntact: true,
+      artifacts: [{ path: artifactPath, sourcePath, sha256: createHash('sha256').update(png).digest('hex'), mimeType: 'image/png', toolName: 'image_generate' }] };
+    throw Error('Unexpected RPC: ' + method);
+  } };
+  const doc = graph([node('input', 'input'), node('skill', 'skill', { inputType: 'object', outputType: 'image', skillRef: 'fixture', version, requiredToolsets: ['image_gen'] }),
+    node('human', 'review', { inputType: 'image', outputType: 'image' }), node('output', 'output')], [['input', 'skill'], ['skill', 'review'], ['review', 'output']]);
+  const started = await manager.start({ document: doc, input: {} });
+  const run = await until(() => ['waiting_review', 'error'].includes(manager.get(started.id).status) && manager.get(started.id));
+  assert.equal(run.status, 'waiting_review', run.error);
+  assert.equal(run.nodes.skill.status, 'complete'); assert.equal(run.nodes.review.status, 'waiting_review');
+  const artifact = run.nodes.skill.artifacts[0];
+  assert.equal(artifact.mimeType, 'image/png'); assert.equal(artifact.sha256, createHash('sha256').update(png).digest('hex'));
+  assert.equal(run.nodes.skill.output.path, artifact.path); assert.equal((await readFile(artifact.path)).equals(png), true);
+  assert.deepEqual(run.nodes.skill.capabilities, { requiredToolsets: ['image_gen'], toolNames: ['image_generate'], revision: capabilityRevision });
+});
+
+test('a Skill redo preserves its original capability revision and refuses changed native tool configuration before resubmission', async t => {
+  const { app, manager } = await setup(t);
+  const content = '---\nname: fixture\n---\nReturn input.\n', version = 'sha256:' + createHash('sha256').update(content).digest('hex');
+  const originalRevision = 'sha256:' + 'c'.repeat(64); let capabilityRevision = originalRevision, submissions = 0, preparations = 0, sessions = 0;
+  app.skill = async name => ({ name, revision: version, source: 'local', content });
+  app.createSession = async () => ({ id: 'browser-' + ++sessions, runtimeSessionId: 'runtime-' + sessions });
+  app.submit = async id => { submissions++; queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+  app.history = async () => ({ messages: [{ role: 'assistant', text: '{"value":1}' }] }); app.interrupt = async () => ({});
+  app.adapter = { request: async (method, params) => {
+    if (method === 'workbench.tools.catalog') return { revision: capabilityRevision, toolsets: [{ id: 'browser', available: true, enabled: true, tools: ['browser_navigate'] }] };
+    if (method === 'workbench.skill.prepare') { preparations++; return { text: 'browser Skill', skill: { name: 'fixture', revision: version },
+      policy: { freeze: 'bundle-copy', memoryAllowed: true, skillMutationBlocked: true, requiredToolsets: ['browser'], toolNames: ['browser_navigate'], capabilityRevision } }; }
+    if (method === 'workbench.skill.input') return { text: 'fixed input' };
+    if (method === 'workbench.skill.finish') return { unchanged: true, snapshotIntact: true, artifacts: [] };
+    throw Error('Unexpected RPC: ' + method);
+  } };
+  const doc = graph([node('input', 'input'), node('skill', 'skill', { inputType: 'object', outputType: 'object', skillRef: 'fixture', version, requiredToolsets: ['browser'] }),
+    node('output', 'output')], [['input', 'skill'], ['skill', 'output']]);
+  const started = await manager.start({ document: doc, input: {} }); await until(() => manager.get(started.id).status === 'complete');
+  capabilityRevision = 'sha256:' + 'd'.repeat(64);
+  await manager.rerun(started.id, { nodeIds: ['skill'] });
+  const run = await until(() => ['error', 'complete'].includes(manager.get(started.id).status) && manager.get(started.id));
+  assert.equal(run.status, 'error'); assert.match(run.error, /工具能力.*变化.*新建运行/);
+  assert.equal(run.nodes.skill.history.at(-1).capabilities.revision, originalRevision);
+  assert.equal(preparations, 1); assert.equal(submissions, 1);
+});
+
+async function nativeImageFixture(t, { outputType = 'object', answer, count = 1, review = true, mutate } = {}) {
+  const context = await setup(t, undefined, { files: true }), { app, manager, directory } = context;
+  const version = 'sha256:' + 'a'.repeat(64), png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z2t8AAAAASUVORK5CYII=', 'base64');
+  let receipts, cleanupCalls = 0;
+  app.skill = async name => ({ name, revision: version, source: 'local', content: 'fixture' });
+  app.createSession = async ({ cwd }) => {
+    await mkdir(join(cwd, '.workbench-artifacts'));
+    receipts = [];
+    for (let index = 0; index < count; index++) {
+      const path = join(cwd, '.workbench-artifacts', `image-${index}.png`); await writeFile(path, png);
+      receipts.push({ path, sourcePath: join(directory, 'unread-native-cache', `image-${index}.png`), sha256: createHash('sha256').update(png).digest('hex'), mimeType: 'image/png', toolName: 'image_generate' });
+    }
+    await mutate?.(receipts, { cwd, directory, png });
+    return { id: 'native-images' };
+  };
+  app.submit = async id => { queueMicrotask(() => app.publish('message.complete', id, { status: 'complete' })); };
+  app.history = async () => ({ messages: [{ role: 'assistant', text: answer ? answer(receipts) : JSON.stringify({ note: 'unchanged object', image: receipts[0].sourcePath }) }] });
+  app.interrupt = async () => ({});
+  manager.prepareSkill = async (_app, _session, detail) => ({ skill: detail, text: 'image Skill', cleanup: async () => { cleanupCalls++; return { artifacts: receipts }; } });
+  const doc = graph([node('input', 'input'), node('skill', 'skill', { inputType: 'object', outputType, skillRef: 'fixture', version }),
+    ...(review ? [node('human', 'review', { inputType: outputType, outputType })] : []), node('output', 'output')],
+  review ? [['input', 'skill'], ['skill', 'review'], ['review', 'output']] : [['input', 'skill'], ['skill', 'output']]);
+  const started = await manager.start({ document: doc, input: {} });
+  const run = await until(() => ['waiting_review', 'error', 'complete'].includes(manager.get(started.id).status) && manager.get(started.id));
+  return { ...context, run, receipts, png, cleanupCalls };
+}
+
+test('native image files are registered independently of an object result and only exact reported cache references are rewritten', async t => {
+  const { run, png, cleanupCalls } = await nativeImageFixture(t);
+  assert.equal(run.status, 'waiting_review', run.error);
+  const artifact = run.nodes.skill.artifacts[0];
+  assert.deepEqual(run.nodes.skill.output, { note: 'unchanged object', image: artifact.path });
+  assert.equal((await readFile(artifact.path)).equals(png), true);
+  assert.equal(cleanupCalls, 1);
+});
+
+test('a textual Skill image link points to the staged receipt file without reading the reported native cache path', async t => {
+  const { run, receipts } = await nativeImageFixture(t, { outputType: 'text', answer: rows => `![generated image](${rows[0].sourcePath})` });
+  assert.equal(run.status, 'waiting_review', run.error);
+  assert.equal(run.nodes.skill.output, `![generated image](${run.nodes.skill.artifacts[0].path})`);
+  assert.equal(run.nodes.skill.output.includes(receipts[0].sourcePath), false);
+});
+
+test('native image receipts cannot bypass review or the JSON contract of ordinary object outputs', async t => {
+  await t.test('actual images require a human path even if the Skill did not declare image tools', async sub => {
+    const { run, cleanupCalls } = await nativeImageFixture(sub, { review: false });
+    assert.equal(run.status, 'error'); assert.match(run.error, /人工审核/); assert.equal(run.nodes.output.status, 'blocked'); assert.equal(cleanupCalls, 1);
+  });
+  await t.test('an object result still needs valid final JSON', async sub => {
+    const { run } = await nativeImageFixture(sub, { answer: () => 'Finished.' });
+    assert.equal(run.status, 'error'); assert.match(run.error, /有效的 JSON/);
+  });
+});
+
+test('native image receipt validation refuses foreign paths, changed hashes, and disguised image data', async t => {
+  for (const [label, mutate, pattern] of [
+    ['foreign path', async (rows, { directory, png }) => { rows[0].path = join(directory, 'foreign.png'); await writeFile(rows[0].path, png); }, /当前 Skill 会话/],
+    ['symlink escape', async (rows, { directory, png }) => { const outside = join(directory, 'foreign.png'); await writeFile(outside, png);
+      const link = rows[0].path + '-link.png'; await symlink(outside, link); rows[0].path = link; }, /当前 Skill 会话/],
+    ['wrong hash', rows => { rows[0].sha256 = '0'.repeat(64); }, /内容、格式或哈希/],
+    ['wrong MIME', rows => { rows[0].mimeType = 'image/jpeg'; }, /内容、格式或哈希/],
+    ['non-image file', async rows => { await writeFile(rows[0].path, 'not image bytes'); rows[0].sha256 = createHash('sha256').update('not image bytes').digest('hex'); }, /内容、格式或哈希/],
+    ['unrecognized tool', rows => { rows[0].toolName = 'terminal'; }, /回执无效/],
+    ['disguised extension', async rows => { const target = rows[0].path + '.txt'; await writeFile(target, await readFile(rows[0].path)); rows[0].path = target; }, /内容、格式或哈希/],
+  ]) await t.test(label, async sub => {
+    const { run, cleanupCalls } = await nativeImageFixture(sub, { mutate });
+    assert.equal(run.status, 'error'); assert.match(run.error, pattern); assert.equal(run.nodes.review.status, 'blocked'); assert.equal(cleanupCalls, 1);
+  });
+});
+
+test('multiple native images require an explicit unambiguous image output reference', async t => {
+  await t.test('prose cannot select one of multiple images', async sub => {
+    const { run } = await nativeImageFixture(sub, { outputType: 'image', count: 2, answer: () => 'Finished.' });
+    assert.equal(run.status, 'error'); assert.match(run.error, /无法唯一确定/);
+  });
+  await t.test('an explicit returned path selects the real image while all generated images remain reviewable', async sub => {
+    const { run } = await nativeImageFixture(sub, { outputType: 'image', count: 2, answer: rows => JSON.stringify({ path: rows[1].sourcePath }) });
+    assert.equal(run.status, 'waiting_review', run.error); assert.equal(run.nodes.skill.artifacts.length, 2);
+    assert.equal(run.nodes.skill.output.path, run.nodes.skill.artifacts[1].path);
+  });
+});
+
+test('a Skill prepared after interruption still finishes its native snapshot exactly once without submitting', async t => {
+  const { app, manager } = await setup(t); const version = 'sha256:' + 'a'.repeat(64);
+  let release, cleanups = 0, submissions = 0;
+  app.skill = async name => ({ name, revision: version, source: 'local', content: 'fixture' });
+  app.createSession = async () => ({ id: 'late-prepared' }); app.interrupt = async () => ({}); app.submit = async () => { submissions++; };
+  manager.prepareSkill = async (_app, _session, detail) => new Promise(resolve => { release = () => resolve({ text: 'prepared', skill: detail,
+    cleanup: async () => { cleanups++; return { artifacts: [] }; } }); });
+  const doc = graph([node('input', 'input'), node('skill', 'skill', { inputType: 'object', outputType: 'object', skillRef: 'fixture', version }),
+    node('output', 'output')], [['input', 'skill'], ['skill', 'output']]);
+  const run = await manager.start({ document: doc, input: {} }); await until(() => release);
+  await manager.interrupt(run.id); release();
+  await until(() => cleanups === 1); assert.equal(submissions, 0);
 });
 
 test('human review restores the exact attempt and artifact hashes after restart without replaying workers or models', async t => {

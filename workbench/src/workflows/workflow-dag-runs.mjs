@@ -2,7 +2,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, copyFile, realpath, stat, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { join, isAbsolute, relative, dirname } from 'node:path';
+import { join, isAbsolute, relative, dirname, extname } from 'node:path';
 import { planWorkflow, requiresImageReview, assertImageReviewPaths } from '../../shared/workflow/workflow-plan.mjs';
 import { getPorts } from '../../shared/workflow/workflow-model.mjs';
 import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
@@ -11,6 +11,7 @@ import { validateNodeValue } from '../../shared/workflow/workflow-validation.mjs
 import { reviewRevisionPolicy, rerunRevisionFeedback } from '../../shared/workflow/workflow-review-revision.mjs';
 import { redact } from '../hermes-adapter.mjs';
 import { stageSubflowArtifacts } from './workflow-subflow-artifacts.mjs';
+import { imageDimensions } from './workflow-files.mjs';
 
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const NODE_DONE = new Set(['complete', 'error', 'blocked', 'skipped', 'cancelled', 'unknown']);
@@ -101,7 +102,7 @@ export class WorkflowDAGRuns {
   constructor(owner) {
     this.owner = owner; this.app = owner.app; this.db = owner.db; this.active = new Map(); this.queue = [];
     this.sessions = new Map(); this.closed = false; this.resources = new Map(); this.pumpingQueue = false; this.mutations = new Set(); this.publications = new Map();
-    this.resourceLimits = { default: 4, model: 2, eda: 1, browser: 2, drawio: 1, memory: 1, build: 1 };
+    this.resourceLimits = { default: 4, model: 2, desktop: 1, eda: 1, browser: 2, drawio: 1, memory: 1, build: 1 };
     this.maxActiveRuns = 2;
     for (const row of this.db.prepare("SELECT value FROM workflow_runs WHERE json_extract(value,'$.schemaVersion')=2 AND json_extract(value,'$.status') NOT IN ('complete','error','interrupted','unknown')").all()) {
       const run = JSON.parse(row.value);
@@ -293,7 +294,7 @@ export class WorkflowDAGRuns {
   }
   resource(node) {
     if (['input', 'validation', 'output', 'human', 'merge', 'subflow', 'foreach', 'loop'].includes(node.type)) return null;
-    if (node.type === 'skill') return 'model';
+    if (node.type === 'skill') return node.config.requiredToolsets?.includes('computer_use') ? 'desktop' : 'model';
     const registered = node.type === 'tool' && node.config.executionMode === 'tool' ? WORKFLOW_TOOLS.find(tool => tool.id === node.config.toolName) : null;
     return registered?.resource || (node.config.resource && node.config.resource !== 'default' ? node.config.resource : 'default');
   }
@@ -439,17 +440,20 @@ export class WorkflowDAGRuns {
         const session = await this.app.createSession({ title: '工作流 · ' + state.run.title + ' · ' + node.title + ' · ' + record.attempt, cwd: sessionDirectory,
           ...(state.run.modelRoute ? { modelRoute: state.run.modelRoute } : {}) });
         if (!current()) return; step.session = session; record.sessionId = session.id; this.sessions.set(session.id, { state, step });
+        const expectedCapabilities = record.capabilities || [...(record.history || [])].reverse().find(previous => previous.capabilities)?.capabilities;
         step.prepared = await this.owner.prepareSkill(this.app, session, detail, { input, skillNode: node,
           inputNode: state.plan.inputNode, outputNode: state.plan.outputNode, runId: state.run.id, stepId: step.token, attemptId: step.token, nodeId: node.id, workflowId: state.run.workflowId,
+          ...(expectedCapabilities ? { expectedCapabilities: clone(expectedCapabilities) } : {}),
           ...(state.run.learningId ? { learningId: state.run.learningId, memoryScopeId: state.run.memoryScopeId } : {}) });
-        if (!current()) { await step.prepared?.cleanup?.(); return; }
+        if (!current()) { await this.cleanupSkill(step); return; }
         if (step.prepared?.skill?.revision !== node.config.version) throw fail('Skill 固定版本准备不一致。', 409);
         record.skill = { name: node.config.skillRef, revision: node.config.version,
           ...Object.fromEntries(['bundleHash', 'snapshotDirectory'].filter(key => typeof step.prepared.skill[key] === 'string').map(key => [key, step.prepared.skill[key]])) };
+        if (step.prepared.capabilities) record.capabilities = clone(step.prepared.capabilities);
         const bound = step.prepared.bindInput ? await step.prepared.bindInput(input) : { text: step.prepared.text };
         if (!current()) return;
         const locations = '\nController artifact locations: ' + JSON.stringify({ sessionDirectory, outputDirectory: cwd,
-          fileContract: 'Keep the requested output schema. When producing files, save real files in your session directory and return their actual paths in artifacts/files/path or declared file/image output ports. Workbench deterministically copies those files into the selected output directory and registers their hashes. Do not claim a file exists before creating it.' });
+          fileContract: 'Keep the requested output schema. Native image_generate results are captured and imported by Workbench: return their real image path without copying the cached image again or replacing it with a placeholder. For files you create directly, save real files in your session directory and return their actual paths in artifacts/files/path or declared file/image output ports. Workbench copies and registers those files. Do not claim a file exists before creating it.' });
         const feedback = record.reviewFeedback ? '\nExplicit human request for this one revision (do not modify Skill):\n' + record.reviewFeedback : '';
         step.submitted = true; this.save(state.run); await this.app.submit(session.id, bound.text + locations + feedback, { workflowRunId: state.run.id }); return;
       }
@@ -513,7 +517,7 @@ export class WorkflowDAGRuns {
       const selected = dagPath(value, port.valuePath); if (!matches(selected, port.type)) throw fail(step.node.title + ' 输出端口 ' + port.label + ' 类型不符。');
     }
     if (step.childArtifacts?.length) await this.verifyArtifacts(step.childArtifacts);
-    const registered = await this.artifacts(state, step.node, value, artifacts, step.childArtifacts);
+    const registered = await this.artifacts(state, step.node, value, [...(artifacts || []), ...(step.receiptArtifacts || [])], step.childArtifacts);
     const images = registered.filter(item => String(item.mimeType || '').startsWith('image/'));
     const producedImages = images.filter(item => item.runId === state.run.id && item.nodeId === step.node.id);
     if (requiresImageReview(step.node) && !producedImages.length && !step.childArtifacts?.some(item => String(item.mimeType || '').startsWith('image/'))) throw fail('需要人工审核的产图节点没有保存可核对的真实图片产物。');
@@ -524,34 +528,77 @@ export class WorkflowDAGRuns {
     this.finishSlot(state, step);
   }
   async stageSkillArtifacts(state, step, value) {
+    const receipts = step.skillFinish?.artifacts === undefined ? [] : step.skillFinish.artifacts;
+    if (!Array.isArray(receipts) || receipts.length > 32) throw fail('Hermes 图片产物回执无效。');
     const rows = [...(Array.isArray(value?.artifacts) ? value.artifacts : []), ...(Array.isArray(value?.files) ? value.files : [])];
     if (typeof value?.path === 'string') rows.push(value);
     for (const port of getPorts(step.node).outputs.filter(port => ['image', 'fileRef', 'artifactRef', 'artifactBundle'].includes(port.type))) {
       const item = dagPath(value, port.valuePath); rows.push(...(Array.isArray(item) ? item : [typeof item === 'string' ? { path: item } : item]));
     }
     const sourceRoot = await realpath(step.sessionDirectory); const replacements = new Map(); const record = state.run.nodes[step.node.id];
+    const received = new Map(), nativeSources = new Set(), originalPaths = new Set();
+    for (const item of receipts) {
+      if (!item || item.toolName !== 'image_generate' || typeof item.path !== 'string' || !isAbsolute(item.path)
+        || typeof item.sourcePath !== 'string' || !isAbsolute(item.sourcePath) || item.sourcePath.length > 4096 || /[\x00-\x1f\x7f]/.test(item.sourcePath)
+        || !/^[a-f0-9]{64}$/.test(item.sha256 || '') || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(item.mimeType)
+        || received.has(item.path) || originalPaths.has(item.sourcePath)) throw fail('Hermes 图片产物回执无效。');
+      const source = await realpath(item.path), rel = relative(join(sourceRoot, '.workbench-artifacts'), source);
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw fail('Hermes 图片产物不属于当前 Skill 会话。');
+      if (nativeSources.has(source)) throw fail('Hermes 图片产物回执包含重复文件。');
+      const info = await stat(source);
+      if (!info.isFile() || info.size > 64 * 1024 * 1024) throw fail('Hermes 图片产物必须是最多 64MiB 的普通文件。');
+      const data = await readFile(source), image = imageDimensions(data);
+      const extensionMime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }[extname(source).toLowerCase()];
+      if (!image?.width || !image?.height || 'image/' + image.format !== item.mimeType || extensionMime !== item.mimeType
+        || createHash('sha256').update(data).digest('hex') !== item.sha256) throw fail('Hermes 图片产物内容、格式或哈希与回执不符。');
+      received.set(item.path, { ...item, source, relative: rel });
+      nativeSources.add(source); originalPaths.add(item.sourcePath);
+    }
+    rows.unshift(...receipts);
+    step.receiptArtifacts = [];
     for (const row of rows) {
       if (!row || typeof row.path !== 'string' || !isAbsolute(row.path) || replacements.has(row.path)) continue;
+      const receipt = received.get(row.path);
       const source = await realpath(row.path); const rel = relative(sourceRoot, source);
+      if (receipt && source !== receipt.source) throw fail('Hermes 图片产物位置在复制前发生变化。');
       if (rel.startsWith('..') || isAbsolute(rel)) continue;
       const info = await stat(source); if (!info.isFile() || info.size > 512 * 1024 * 1024) throw fail('Skill 产物必须是最多 512MiB 的普通文件。');
-      const target = join(record.outputDirectory, 'generated', rel); await mkdir(dirname(target), { recursive: true });
+      const target = receipt ? join(record.outputDirectory, 'generated', 'native-images', receipt.relative) : join(record.outputDirectory, 'generated', rel);
+      await mkdir(dirname(target), { recursive: true });
       const before = createHash('sha256').update(await readFile(source)).digest('hex');
+      if (receipt && before !== receipt.sha256) throw fail('Hermes 图片产物在复制前发生变化。');
       await copyFile(source, target, constants.COPYFILE_EXCL);
       const after = createHash('sha256').update(await readFile(target)).digest('hex');
       if (before !== after) throw fail('Skill 产物复制时内容发生变化，未传给下游。');
       replacements.set(row.path, target); (record.stagedArtifacts ||= []).push({ source, path: target, sha256: after });
+      if (receipt) {
+        replacements.set(receipt.sourcePath, target);
+        step.receiptArtifacts.push({ path: target, sha256: after, mimeType: receipt.mimeType, toolName: receipt.toolName, role: 'generated-image' });
+      }
     }
     if (!replacements.size) return value;
     record.modelOutput = clone(value);
     const replace = item => typeof item === 'string' ? replacements.get(item) || item : Array.isArray(item) ? item.map(replace) : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, replace(child)])) : item;
-    return json(replace(value));
+    value = replace(value);
+    if (typeof value === 'string') for (const sourcePath of [...originalPaths].sort((left, right) => right.length - left.length)) value = value.split(sourcePath).join(replacements.get(sourcePath));
+    if (step.node.config.outputType === 'image' && step.receiptArtifacts.length) {
+      const selected = typeof value === 'string' ? value : value?.path;
+      const matches = step.receiptArtifacts.filter(item => item.path === selected);
+      const image = matches.length === 1 ? matches[0] : step.receiptArtifacts.length === 1 ? step.receiptArtifacts[0] : null;
+      if (!image) throw fail('Skill 返回多张图片，无法唯一确定 image 输出；请明确返回目标图片的 path。');
+      value = { path: image.path, sha256: image.sha256, mimeType: image.mimeType };
+    }
+    return json(value);
+  }
+  cleanupSkill(step) {
+    if (!step.cleanupPromise && typeof step.prepared?.cleanup === 'function') step.cleanupPromise = Promise.resolve().then(() => step.prepared.cleanup());
+    return step.cleanupPromise || Promise.resolve();
   }
   finishSlot(state, step) { clearTimeout(step.timer); state.running.delete(step.node.id); if (step.session) this.sessions.delete(step.session.id); this.releaseResource(step); this.save(state.run); queueMicrotask(() => { if (!this.closed) { this.wake(); this.updateRun(state); } }); }
   async failNode(state, step, text, status = 'error', interrupt = false) {
     if (step.terminal || state.halted) return; step.terminal = true; step.controller.abort();
     if (interrupt && step.session && step.submitted) { try { await this.app.interrupt(step.session.id); } catch {} }
-    try { await step.prepared?.cleanup?.(); } catch (error) { text += ' Skill 收尾校验失败：' + errorText(error); }
+    try { await this.cleanupSkill(step); } catch (error) { text += ' Skill 收尾校验失败：' + errorText(error); }
     Object.assign(state.run.nodes[step.node.id], { status, error: text, completedAt: now() }); this.finishSlot(state, step);
   }
 
@@ -576,9 +623,12 @@ export class WorkflowDAGRuns {
           const history = await this.app.history(step.session.id); if (step.terminal || state.halted) return;
           const last = history.messages?.filter(message => message.role === 'assistant').at(-1);
           if (!last || last.partial || last.tool_calls?.length || last.toolCalls?.length) throw fail('Hermes 没有完整最终结果。');
-          let value = last.text;
-          if (step.node.config.outputType !== 'text') { try { value = JSON.parse(last.text); } catch { if (step.node.config.outputType !== 'any') throw fail('Skill 最终结果不是有效的 JSON。'); } }
-          await step.prepared?.cleanup?.(); await this.complete(state, step, value);
+          let value = step.node.config.outputType === 'image' && typeof last.text !== 'string' ? null : last.text;
+          step.skillFinish = await this.cleanupSkill(step);
+          if (step.node.config.outputType !== 'text') { try { value = JSON.parse(last.text); } catch {
+            if (step.node.config.outputType !== 'any' && !(step.node.config.outputType === 'image' && step.skillFinish?.artifacts?.length)) throw fail('Skill 最终结果不是有效的 JSON。');
+          } }
+          await this.complete(state, step, value);
         } catch (error) { await this.failNode(state, step, errorText(error)); }
       })();
     }
@@ -770,7 +820,7 @@ export class WorkflowDAGRuns {
     for (const step of state.steps.values()) {
       clearTimeout(step.timer); step.controller.abort(); if (step.session && step.submitted && !step.terminal) { try { await this.app.interrupt(step.session.id); } catch {} }
       if (step.childStaging) { try { await step.childStaging; } catch { /* Wait for cancelled I/O before returning. */ } }
-      try { await step.prepared?.cleanup?.(); } catch {} this.releaseResource(step); if (step.session) this.sessions.delete(step.session.id);
+      try { await this.cleanupSkill(step); } catch {} this.releaseResource(step); if (step.session) this.sessions.delete(step.session.id);
     }
     for (const node of Object.values(state.run.nodes)) if (!NODE_DONE.has(node.status)) Object.assign(node, { status: 'cancelled', completedAt: now() });
     Object.assign(state.run, { status: 'interrupted', error: '用户已停止本次工作流。', completedAt: now() }); this.save(state.run);
@@ -784,7 +834,7 @@ export class WorkflowDAGRuns {
       for (const step of state.steps.values()) {
         clearTimeout(step.timer);
         if (['subflow', 'foreach', 'loop'].includes(step.node.type) && state.run.nodes[step.node.id].status === 'waiting_review') { step.waitEnd?.(); continue; }
-        step.controller.abort(); if (step.session) { try { await this.app.interrupt(step.session.id); } catch {} } try { await step.prepared?.cleanup?.(); } catch {}
+        step.controller.abort(); if (step.session) { try { await this.app.interrupt(step.session.id); } catch {} } try { await this.cleanupSkill(step); } catch {}
         if (step.childStaging) { try { await step.childStaging; } catch { /* Interrupted copies are not replayed. */ } }
       }
       for (const id of state.running) Object.assign(state.run.nodes[id], { status: 'unknown', error: '应用关闭，执行结果未确认。', completedAt: now() });

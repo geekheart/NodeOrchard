@@ -49,7 +49,7 @@ _HISTORY_PRIVATE_KEYS = frozenset({"reasoning", "reasoningcontent", "reasoningte
                                     "chainofthought", "encryptedcontent", "codexreasoningitems", "codexmessageitems"})
 _HISTORY_SECRET_KEYS = frozenset({"apikey", "token", "accesstoken", "refreshtoken", "authorization", "cookie", "setcookie",
                                  "password", "secret", "credentials", "clientsecret", "privatekey"})
-OUTPUT_TYPES = frozenset({"any", "text", "number", "boolean", "object", "array", "fileRef"})
+OUTPUT_TYPES = frozenset({"any", "text", "number", "boolean", "object", "array", "fileRef", "image", "artifactRef", "artifactBundle", "folderRef"})
 _FORBIDDEN_FILES = frozenset({".env", "auth.json"})
 _BLOCK_MESSAGE = "Workbench execution mode does not permit skill_manage or modifying Skills."
 _NO_TOOLS_MESSAGE = "Workbench learning control sessions do not permit tool calls."
@@ -308,9 +308,11 @@ class _ReadOnlyMemorySnapshot:
 
 
 class WorkflowGateway:
-    def __init__(self, server, skill_commands, model_tools, tool_executor, *, workspace_root=None):
+    def __init__(self, server, skill_commands, model_tools, tool_executor, *, workspace_root=None, integrations=None):
         self.server, self.sc = server, skill_commands
         self.model_tools, self.tool_executor = model_tools, tool_executor
+        from workflow_integrations import WorkflowIntegrations
+        self.integrations = integrations or WorkflowIntegrations(model_tools)
         declared = workspace_root or os.environ.get("WORKBENCH_GATEWAY_WORKSPACE_ROOT") or os.environ.get("WORKBENCH_WORKSPACE_ROOT")
         self.workspace_root = Path(declared).expanduser().resolve() if declared else None
         self.runs = {}
@@ -346,6 +348,9 @@ class WorkflowGateway:
         self.server.register_method("workbench.skill.prepare", self.prepare_rpc)
         self.server.register_method("workbench.skill.input", self.input_rpc)
         self.server.register_method("workbench.skill.finish", self.finish_rpc)
+        self.server.register_method("workbench.tools.catalog", self.tools_catalog_rpc)
+        self.server.register_method("workbench.skill.create", self.skill_create_rpc)
+        self.server.register_method("workbench.image.provider", self.image_provider_rpc)
         self.server.register_method("workbench.learning.prepare", self.learning_prepare_rpc)
         self.server.register_method("workbench.assistant.prepare", self.assistant_prepare_rpc)
         self.server.register_method("workbench.assistant.images", self.assistant_images_rpc)
@@ -359,6 +364,7 @@ class WorkflowGateway:
         # not the original rpc_dispatch module's stale globals.
         self.server._LONG_HANDLERS = frozenset(self.server._LONG_HANDLERS) | {
             "workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish",
+            "workbench.tools.catalog", "workbench.skill.create", "workbench.image.provider",
             "workbench.learning.prepare",
             "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history", "workbench.assistant.diagnostics",
             "workbench.usage.history",
@@ -376,6 +382,49 @@ class WorkflowGateway:
             if identity in run["identities"]:
                 return run
         return None
+
+    def _integration_block(self, identities, name, args):
+        from workflow_integrations import external_tool
+        run = next((run for identity in identities if (run := self._run_for(identity))), None)
+        if run is None or not run.get('integration_scoped'):
+            return False
+        def denied(tool):
+            if not external_tool(tool): return False
+            if run['finished'] or tool not in run.get('tool_names', []): return True
+            try:
+                ids, names = self.integrations.required(run.get('required_toolsets', []), run.get('capability_revision'))
+                return ids != run.get('required_toolsets', []) or names != run.get('tool_names', [])
+            except (ValueError, OSError, ImportError): return True
+        if denied(name): return True
+        entries = args.get('calls', [args]) if name == 'tool_call' and isinstance(args, dict) else []
+        return isinstance(entries, list) and any(isinstance(row, dict) and denied(row.get('name', row.get('tool_name'))) for row in entries)
+
+    def _bind_integrations(self, agent, run):
+        from workflow_integrations import external_tool
+        identities = self.guarded_agents.get(agent)
+        if identities is not None:
+            run['identities'].update(identities)
+            self.guarded_agents[agent] = run['identities']
+        if not run.get('integration_scoped'):
+            # Old Skills inherit the native configured tools; this bridge adds
+            # no authority and must not silently remove their existing tools.
+            run['native_image_allowed'] = 'image_generate' in agent.valid_tool_names
+            return
+        ids, names = self.integrations.required(run.get('required_toolsets', []), run.get('capability_revision')) if not run['finished'] else ([], [])
+        if not run['finished'] and (ids != run.get('required_toolsets', []) or names != run.get('tool_names', [])):
+            raise WorkflowPolicyError('Required native tool identities changed; prepare a new attempt.')
+        definitions = self.integrations.definitions(ids, names) if ids else []
+        agent.tools = [row for row in agent.tools if not external_tool(row.get('function', {}).get('name'))] + definitions
+        agent.valid_tool_names = {name for name in agent.valid_tool_names if not external_tool(name)} | set(names)
+        if not getattr(agent, '_workbench_integration_turn_guard', False):
+            original = agent.run_conversation
+            def checked_turn(*args, **kwargs):
+                current = self._run_for(getattr(agent, 'session_id', None))
+                if current is not None:
+                    self._bind_integrations(agent, current)
+                return original(*args, **kwargs)
+            agent.run_conversation = checked_turn
+            agent._workbench_integration_turn_guard = True
 
     def _memory_binding(self, identities):
         return next((self.memory_sessions[identity] for identity in identities if identity in self.memory_sessions), None)
@@ -428,6 +477,8 @@ class WorkflowGateway:
                 return json.dumps({"error": _NO_TOOLS_MESSAGE, "code": "workbench_learning_tools_blocked"})
             if self._memory_call_blocked(self._memory_binding(identities), name, bound.arguments["function_args"]):
                 return json.dumps({"error": _READ_ONLY_MEMORY_MESSAGE, "code": "workbench_learning_memory_blocked"})
+            if self._integration_block(identities, name, bound.arguments['function_args']):
+                return json.dumps({'error': 'Native integration tool was not declared for this attempt.', 'code': 'workbench_integration_tool_blocked'})
             if any(self._is_guarded(identity) for identity in identities):
                 if name == "skill_manage":
                     return json.dumps({"error": _BLOCK_MESSAGE, "code": "workbench_skill_mutation_blocked"})
@@ -436,7 +487,18 @@ class WorkflowGateway:
                     tool_args = bound.arguments["function_args"] or {}
                     if run and tool_args.get("name") in run["aliases"]:
                         return self._frozen_view(run, tool_args.get("file_path"))
-            return execute(*args, **kwargs)
+            run = next((run for identity in identities if (run := self._run_for(identity))), None)
+            result = execute(*args, **kwargs)
+            if name == 'image_generate' and run and not run['finished']:
+                with self.lock:
+                    if run['finished']:
+                        return json.dumps({'error': 'Image result arrived after the attempt ended.', 'code': 'workbench_artifact_late'})
+                    try:
+                        self.integrations.import_image(run, result)
+                    except (OSError, ValueError, TypeError):
+                        run['artifact_error'] = 'Native image result could not be admitted as a bounded cached image.'
+                        return json.dumps({'error': run['artifact_error'], 'code': 'workbench_artifact_rejected'})
+            return result
 
         pre_tool = self.tool_executor._pre_tool_block
 
@@ -480,6 +542,8 @@ class WorkflowGateway:
                 return _NO_TOOLS_MESSAGE, ref.args
             if self._memory_call_blocked(memory or self._memory_binding((identity,)), ref.name, ref.args):
                 return _READ_ONLY_MEMORY_MESSAGE, ref.args
+            if self._integration_block((identity,), ref.name, ref.args):
+                return 'Native integration tool was not declared for this attempt.', ref.args
             if (identities is not None or self._is_guarded(identity)) and ref.name == "skill_manage":
                 return _BLOCK_MESSAGE, ref.args
             return pre_tool(agent, ref)
@@ -500,6 +564,8 @@ class WorkflowGateway:
                 return json.dumps({"error": _NO_TOOLS_MESSAGE, "code": "workbench_learning_tools_blocked"})
             if self._memory_call_blocked(self._memory_binding(identities), bound.arguments["function_name"], bound.arguments["function_args"]):
                 return json.dumps({"error": _READ_ONLY_MEMORY_MESSAGE, "code": "workbench_learning_memory_blocked"})
+            if self._integration_block(identities, bound.arguments['function_name'], bound.arguments['function_args']):
+                return json.dumps({'error': 'Native integration tool was not declared for this attempt.', 'code': 'workbench_integration_tool_blocked'})
             return handle(*args, **kwargs)
 
         self.model_tools.handle_function_call = guarded_handle
@@ -531,6 +597,10 @@ class WorkflowGateway:
                                          scope=binding, control=binding["control"])
             elif sid in self.tool_free_sessions or key in self.tool_free_sessions or known_agent:
                 self._guard_learning_agent({"agent": agent, "session_key": key}, sid)
+            run = self._run_for(sid) or self._run_for(key)
+            if run is not None and assistant is None and not (binding and binding['control']):
+                self._guard_agent({'agent': agent, 'session_key': key}, sid)
+                self._bind_integrations(agent, run)
             return wire(*args, **kwargs)
 
         self.server._wire_session_agent = guarded_wire
@@ -954,7 +1024,7 @@ class WorkflowGateway:
         return path
 
     def _validate(self, params):
-        if not isinstance(params, dict) or set(params) - {"session_id", "skill", "revision", "run_id", "input", "output_type", "candidate_content", "source_revision", "memory_scope_id"}:
+        if not isinstance(params, dict) or set(params) - {"session_id", "skill", "revision", "run_id", "input", "output_type", "candidate_content", "source_revision", "memory_scope_id", "required_toolsets", "capability_revision"}:
             raise WorkflowPolicyError("Unexpected workflow prepare parameters.")
         if not isinstance(params.get("session_id"), str) or not params["session_id"]:
             raise WorkflowPolicyError("A live session_id is required.")
@@ -988,6 +1058,12 @@ class WorkflowGateway:
             raise WorkflowPolicyError("Workflow input is required (null is allowed).")
         if "memory_scope_id" in params:
             _scope_id(params["memory_scope_id"])
+        from workflow_integrations import validate_toolsets
+        validate_toolsets(params.get('required_toolsets', []))
+        if params.get('required_toolsets') and not _valid_revision(params.get('capability_revision')):
+            raise WorkflowPolicyError('Required integrations need the current native capability revision.')
+        if 'capability_revision' in params and not _valid_revision(params['capability_revision']):
+            raise WorkflowPolicyError('Invalid native capability revision.')
         return _json(params["input"])
 
     def _freeze(self, workspace, run_id, files, directories):
@@ -1073,6 +1149,7 @@ class WorkflowGateway:
                 audit = self._audit(previous)
                 if not audit["unchanged"] or not audit["snapshotIntact"]:
                     raise WorkflowPolicyError("The prepared Skill bundle changed; refusing to reuse the run.")
+                self._bind_integrations(session['agent'], previous)
                 return previous["result"]
             # A successfully admitted planning Skill is also tool-free. Permit
             # only the exact request-key/audit-checked retry above, never a new
@@ -1096,6 +1173,9 @@ class WorkflowGateway:
                 if candidate and _frontmatter_prefix(params["candidate_content"]) != _frontmatter_prefix(files["SKILL.md"].decode("utf-8")):
                     raise WorkflowPolicyError("Candidate Skill frontmatter must remain identical to its installed source.")
                 no_tools = scope is not None and _declares_no_tools(files["SKILL.md"].decode("utf-8"))
+                required, tool_names = self.integrations.required(params.get('required_toolsets', []), params.get('capability_revision'))
+                if no_tools and required:
+                    raise WorkflowPolicyError('Tool-free learning Skills cannot request native integrations.')
                 if _under(workspace, source.resolve()):
                     raise WorkflowPolicyError("The working directory cannot be inside the installed Skill bundle.")
                 loaded = self.sc._load_skill_payload(str(source), task_id=session.get("session_key") or sid)
@@ -1133,6 +1213,9 @@ class WorkflowGateway:
                         "frozen_hash": frozen_hash, "request_key": request_key,
                         "aliases": {params["skill"], command, command.lstrip("/"), run_id},
                         "name": params["skill"], "finished": False,
+                        'workspace': str(workspace), 'run_id': run_id, 'required_toolsets': required, 'tool_names': tool_names,
+                        'integration_scoped': bool(required),
+                        'capability_revision': params.get('capability_revision'),
                         "loaded_payload": copy.deepcopy(loaded_payload), "output_type": params["output_type"],
                         "scaffold_session_id": session.get("session_key") or sid,
                         **({"memory_scope_id": scope["scope_id"]} if scope else {}),
@@ -1149,10 +1232,15 @@ class WorkflowGateway:
                         result["skill"]["sourceRevision"] = source_revision
                     if scope:
                         result["policy"].update(self._batch_policy(scope["scope_id"], control=no_tools))
+                    result['policy'].update(requiredToolsets=required, toolNames=tool_names)
+                    if required: result['policy']['capabilityRevision'] = params['capability_revision']
                     run.update(identities=identities, result=result)
                     self.runs[run_id] = run
+                    self._bind_integrations(session['agent'], run)
                     return result
                 except BaseException:
+                    if self.runs.get(run_id, {}).get('frozen') == frozen:
+                        self.runs.pop(run_id, None)
                     shutil.rmtree(frozen, ignore_errors=True)
                     raise
 
@@ -1160,6 +1248,11 @@ class WorkflowGateway:
     def _output_instruction(output_type):
         if output_type == "text":
             return "The output type is text: return the final plain text directly."
+        if output_type in {"image", "artifactRef", "artifactBundle", "folderRef", "fileRef"}:
+            shape = "a JSON array of reference objects" if output_type == "artifactBundle" else "a JSON reference object"
+            return ("Return " + shape + " with a path to each real existing output file or folder. "
+                    "For images return {\"path\":\"/real/absolute/image.png\"}. Never invent paths, use Markdown, "
+                    "or substitute a description for an actual file. Use the exact successful tool result path.")
         expected = {"object": "a JSON object", "array": "a JSON array", "number": "a finite JSON number",
                     "boolean": "a JSON boolean", "fileRef": "a JSON file reference object", "any": "one valid JSON value"}
         return "The output must be " + expected[output_type] + "."
@@ -1211,6 +1304,9 @@ class WorkflowGateway:
                 return error
             result = self._audit(run)
             run["finished"] = True
+            if run.get('artifacts'): result['artifacts'] = copy.deepcopy(run['artifacts'])
+            if run.get('artifact_error'): result['artifactError'] = run['artifact_error']
+            self._bind_integrations(session['agent'], run)
             return result
 
     def bind_input(self, params, rid=None):
@@ -1407,6 +1503,25 @@ class WorkflowGateway:
             return result if "jsonrpc" in result else self.server._ok(rid, result)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return self.server._err(rid, 4091, str(exc))
+
+    def tools_catalog_rpc(self, rid, params):
+        if params != {}:
+            return self.server._err(rid, 4103, 'Tool catalog accepts no parameters.')
+        try: return self.server._ok(rid, self.integrations.catalog())
+        except (OSError, ValueError, TypeError, ImportError):
+            return self.server._err(rid, 4103, 'Hermes native capability catalog is unavailable or incompatible.')
+
+    def skill_create_rpc(self, rid, params):
+        try:
+            with self.lock: return self.server._ok(rid, self.integrations.create_skill(params))
+        except (OSError, ValueError, TypeError, ImportError):
+            return self.server._err(rid, 4104, 'Could not create a new Skill; check its name, dependencies and native compatibility.')
+
+    def image_provider_rpc(self, rid, params):
+        try:
+            with self.lock: return self.server._ok(rid, self.integrations.image_provider(params))
+        except (OSError, ValueError, TypeError, ImportError):
+            return self.server._err(rid, 4105, 'Could not update the image provider; selection changed or native provider is unavailable.')
 
     def finish_rpc(self, rid, params):
         try:

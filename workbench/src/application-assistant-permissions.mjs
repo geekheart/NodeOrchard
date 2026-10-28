@@ -236,7 +236,7 @@ export class ApplicationAssistantPermissions {
       const document = context.document?.id === workflowId ? context.document : this.app.workflowLibrary.get(workflowId).document;
       context.documentView = await this.document(document, scope, { baseDocument: document });
     }
-    if (name === 'workbench.inspect' && scoped && !['models', 'schedules', 'statistics', 'examples'].includes(args.section)) fail('独立会话只可读取当前流程统计、定时任务、模型身份或公共示例目录。');
+    if (name === 'workbench.inspect' && scoped && !['models', 'schedules', 'statistics', 'examples', 'integrations'].includes(args.section)) fail('独立会话只可读取当前流程统计、定时任务、模型身份、工具依赖或公共示例目录。');
     if (name === 'workbench.inspect' && scoped && args.section === 'statistics' && !args.workflowId) fail('统计读取必须绑定当前工作流。');
     if (name === 'browser.capture' && scoped) {
       const route = args.route || context.page?.route || `/#/workflows/${scope.workflowId}`;

@@ -7,7 +7,8 @@ const LEARNING_TYPES = new Set(['evaluation', 'improvement']);
 
 export function requiresImageReview(node) {
   const capability = node.type === 'tool' && node.config.executionMode === 'tool' ? WORKFLOW_TOOLS.find(tool => tool.id === node.config.toolName) : null;
-  return node.config.reviewImages === true || capability?.reviewRequired === true || capability?.defaultConfig?.reviewImages === true;
+  return node.config.reviewImages === true || (node.type === 'skill' && node.config.requiredToolsets?.includes('image_gen'))
+    || capability?.reviewRequired === true || capability?.defaultConfig?.reviewImages === true;
 }
 
 export function assertImageReviewPaths(plan, producerId) {
@@ -84,6 +85,7 @@ export function planWorkflow(document) {
     if (operation.type === 'skill') {
       if (!operation.config.skillRef.trim()) fail('请先选择真实的 Hermes Skill。');
       if (!REVISION.test(operation.config.version)) fail('请先选择 Skill 的有效 sha256 版本。');
+      if (requiresImageReview(operation)) fail('图片生成需要第二版数据流与人工审核节点，请先升级工作流。');
     } else validateWorkflowToolConfig(operation);
   }
   if (edges.length !== nodes.length - 1) fail('所有业务节点和连线必须组成一条完整线性链。');

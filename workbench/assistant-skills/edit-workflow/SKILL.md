@@ -16,4 +16,6 @@ description: 搭建、配置或替换本应用工作流节点与连线，提出�
 
 节点派生：获准后用 `workbench.inspect` 的 `section: node-derivations` 读取直接父级与固定版本；父级未记录保持未知。登记及发布由界面核对来源，编辑候选保留 `origin`。详见 `docs/workflow-node-system.md`。
 
+图片及软件工具：先用 `workbench.inspect(section="integrations")` 核对真实就绪状态，再按 `node.describe("skill")` 准备已安装 Skill 的固定版本及 `requiredToolsets`。模型产图使用 `image_gen`，连接 human 审核再交付；MCP、浏览器和 Computer Use 只请求已配置的真实工具集。缺少 Skill 时说明人工新建入口，不以文字或文件名冒充新能力，不改提供商、连接、认证或权限。缺失状态、候选及真实执行分别报告，见 `docs/skill-integrations.md`。
+
 学习配置：`improvement.scope` 支持 `skills`、`tools`、`workflow`，分别限定 Skill 正文、指定工具核心配置或内部业务图；目标字段及冻结边界见 `docs/learning-protocol.md`。通过编辑候选准备支路，由用户在学习面板明确启动；保留评价、审核及来源，不能以诊断读取训练答案或自动应用最佳版本。
