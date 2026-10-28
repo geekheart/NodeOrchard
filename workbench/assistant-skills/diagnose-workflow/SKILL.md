@@ -19,6 +19,8 @@ description: 诊断本应用助手对话超时、工作流失败或结果异常�
 
 近似验证：只有总控目录已开放 `assistant.experiment` 时，才能绑定确切历史轮次与调用执行。它只发送按历史字符规模生成的合成文本，沿用已确认路由和推理配置，不恢复原始任务、不运行业务工具或工作流。人工额度限制输入字符规模，每个总控轮次最多一次应用调用；原生SDK内部重试单独记录。输出长度只是软约束，有真实模型用量。未知配置或超额度明确不可用，不静默缩小样本／切换模型；停止、权限变化或重启不重放。近似实验只检验规模与连接假设，不代表历史语义和Token规模一致，不证明历史唯一根因或问题已修复。
 
+源码定位：模型首字、输出空闲与取消首先查 `workbench/src/workflows/learning-model.mjs`（`scheduleTimeout`、`handleEvent`）；Node会话事件映射查 `workbench/src/application.mjs`（`onGatewayEvent`），协议行解码查 `workbench/src/hermes-adapter.mjs`（`handleLine`）。受保护会话和原生回调边界查 `workbench/python/workflow_gateway.py`（`_guard_assistant_agent`），HTTP/SSE观察查 `workbench/python/model_request_trace.py`。这些是入口，不是预定结论；按实际证据选相关项。目录已提供 `app.source.search` 时，先在相关文件用literal符号或事件名搜索取得行号，再读附近代码；已有路径不重复列目录。搜索结果含SHA和截断状态，范围未扫完不能当作代码不存在。安装的Hermes依赖实现若不在当前允许范围，明确该缺口，不能把仓库桥接代码当作全部上游实现。
+
 1. 先读取当前服务端角色、获准范围与已校验的诊断证据，明确所选旧运行、最新运行与当前草稿各自的身份和版本。独立会话只诊断绑定工作流；总控按当前权限定位其它工作流。缺少运行详情再读取 `workflow.run`；查看最新运行时使用其实际节点身份。没有工作流且目录广告 `workflows.list` 时再定位，多个候选影响结论时确认对象。
 2. 按证据缺口读取失败节点的错误、时序、尝试版本、stdout/stderr 与 partialText；partialText 只是可见过程。需要工具执行依据时用关联 sessionId 读取 `session.history`；已有产物用 `artifact.inspect` 按运行、节点和登记 ID 检查。独立只读检查可按协议合并请求，已取得的结果不重复查询；省略、过期或不可读的内容如实标注。
 3. 涉及节点能力时使用已提供的能力说明；缺少契约再读取 `node.describe` 或 `app.capabilities` 对应分区。注册工具与代码模式是两种实现路径，目录缺项不等于不能写业务代码。Python 依赖用 `runtime.inspect` 核对实际解释器及所需模块。

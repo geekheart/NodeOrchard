@@ -129,7 +129,7 @@ export class ApplicationCapabilities {
   }
   features(scope) {
     return structuredClone(FEATURES).map(feature => feature.id === 'application-source-reading'
-      ? { ...feature, status: this.sourceReadEnabled(scope) ? 'available' : 'unavailable', tools: this.sourceReadEnabled(scope) ? ['app.source.list', 'app.source.read'] : [] }
+      ? { ...feature, status: this.sourceReadEnabled(scope) ? 'available' : 'unavailable', tools: this.sourceReadEnabled(scope) ? ['app.source.list', 'app.source.search', 'app.source.read'] : [] }
       : feature.id === 'model-diagnostic-experiment'
         ? { ...feature, status: this.modelExperimentEnabled(scope) ? 'available' : 'unavailable', tools: this.modelExperimentEnabled(scope) ? ['assistant.experiment'] : [] }
       : feature.id === 'application-source-editing' && this.sourceRepairEnabled(scope)
@@ -139,7 +139,7 @@ export class ApplicationCapabilities {
   tools(scope) {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS).filter(tool => tool.name !== 'assistant.experiment' || this.modelExperimentEnabled(scope)),
-      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope))];
+      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.search', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope))];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }

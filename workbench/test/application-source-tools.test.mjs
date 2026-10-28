@@ -16,6 +16,7 @@ async function fixture(t) {
   app.sourceRepairs = { close: () => engine.close(),
     async list(args, context) { await context.authorize(); calls.push({ name: 'list', args, context }); return { files: [] }; },
     async read(args, context) { await context.authorize(); calls.push({ name: 'read', args, context }); return { path: args.path, hash: 'sha256:' + '1'.repeat(64), content: 'fixture' }; },
+    async search(args, context) { await context.authorize(); calls.push({ name: 'search', args, context }); return { matches: [], truncated: false, scannedFiles: 0, scannedBytes: 0 }; },
     async patch(args, context) { await context.authorize(); calls.push({ name: 'patch', args, context }); return { id: 'repair-one', status: 'applied', operationId: args.operationId }; },
     async test(args, context) { await context.authorize(); calls.push({ name: 'test', args, context }); return { repairId: args.repairId, status: 'pass', operationId: args.operationId }; },
     async history() { return { repairs: [{ id: 'repair-one', summary: 'fixture', status: 'applied', files: [], tests: [] }] }; },
@@ -49,8 +50,8 @@ test('default-disabled source tools are absent and rejected; only the enabled su
   await assert.rejects(owner.call('app.source.list', {}, { permissionScope: disabled, text: '修复软件' }), /权限/);
   enable(true);
   const enabled = await owner.permissions.bind({ role: 'supervisor' }), readonly = await owner.permissions.bind({ role: 'supervisor', readOnly: true });
-  assert.equal(owner.tools(enabled).filter(row => row.name.startsWith('app.source.')).length, 6);
-  assert.deepEqual(owner.tools(readonly).filter(row => row.name.startsWith('app.source.')).map(row => row.name), ['app.source.list', 'app.source.read']);
+  assert.equal(owner.tools(enabled).filter(row => row.name.startsWith('app.source.')).length, 7);
+  assert.deepEqual(owner.tools(readonly).filter(row => row.name.startsWith('app.source.')).map(row => row.name), ['app.source.list', 'app.source.read', 'app.source.search']);
   const workflow = await owner.permissions.bind({ role: 'workflow', workflowId: 'workflow-fixture' });
   assert.equal(owner.tools(workflow).some(row => row.name.startsWith('app.source.')), false);
   await assert.rejects(owner.call('app.source.list', {}, { permissionScope: workflow, role: 'supervisor' }), /权限/);
@@ -65,7 +66,7 @@ test('a human source-read grant exposes only registered source reads without sou
   enable({ sourceRead: true, sourceRepair: false });
   const scope = await owner.permissions.bind({ role: 'supervisor' }), readonly = await owner.permissions.bind({ role: 'supervisor', readOnly: true });
   for (const current of [scope, readonly]) {
-    assert.deepEqual(owner.tools(current).filter(row => row.name.startsWith('app.source.')).map(row => row.name), ['app.source.list', 'app.source.read']);
+    assert.deepEqual(owner.tools(current).filter(row => row.name.startsWith('app.source.')).map(row => row.name), ['app.source.list', 'app.source.read', 'app.source.search']);
     await owner.call('app.source.read', { path: 'workbench/src/fixture.mjs' }, { permissionScope: current, text: '仅查看源码', deadlineAt: null });
   }
   for (const tool of ['app.source.patch', 'app.source.test', 'app.source.rollback', 'app.source.history']) {
@@ -74,6 +75,24 @@ test('a human source-read grant exposes only registered source reads without sou
   assert.equal(calls.length, 2); assert(calls.every(call => call.context.sourceAccess === 'read' && call.context.allowSourceWrite === false));
   assert.equal(app.assistantPermissionSettings.get().supervisor.sourceRepair, false);
   assert.equal(app.store.db.prepare('SELECT count(*) count FROM source_repair_operations').get().count, 0);
+});
+
+test('source search uses the read grant and read-only scope without admitting regex, paths or wider authority', async t => {
+  const { app, enable, calls } = await fixture(t), owner = app.applicationAssistant;
+  enable({ sourceRead: true, sourceRepair: false });
+  const scope = await owner.permissions.bind({ role: 'supervisor', readOnly: true });
+  const args = { query: 'firstOutputAt', prefix: 'workbench/src', limit: 5 };
+  await owner.call('app.source.search', args, { permissionScope: scope, text: '只读查找源码', deadlineAt: null });
+  assert.equal(calls.length, 1); assert.equal(calls[0].name, 'search'); assert.equal(calls[0].context.sourceAccess, 'read');
+  assert.equal(calls[0].context.allowSourceWrite, false);
+  for (const extra of [{ regex: true }, { command: 'rg firstOutputAt' }, { path: '/outside' }, { limit: 21 }, { query: 'x'.repeat(121) }]) {
+    await assert.rejects(owner.call('app.source.search', { ...args, ...extra }, { permissionScope: scope }));
+  }
+  const workflow = await owner.permissions.bind({ role: 'workflow', workflowId: 'workflow-fixture' });
+  await assert.rejects(owner.call('app.source.search', args, { permissionScope: workflow }), /权限/);
+  enable({ sourceRead: false });
+  await assert.rejects(owner.call('app.source.search', args, { permissionScope: scope }), /权限已变化/);
+  assert.equal(calls.length, 1);
 });
 
 test('source dispatch strips forged human authority and protects against argument privilege injection', async t => {

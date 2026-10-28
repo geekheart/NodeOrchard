@@ -114,7 +114,7 @@ export class ApplicationSourceRepairs {
     }
     return { absolute, missing: false };
   }
-  async source(input, { context, missing = false, known = true } = {}) {
+  async source(input, { context, missing = false, known = true, searchBudget } = {}) {
     if (known && !this.known.has(input)) throw fail('只能读取已登记的仓库源码。', 'SOURCE_FILE_UNTRACKED', 403);
     const checked = await this.inspect(input, { context, missing });
     if (checked.missing) return { content: null, hash: 'missing', mode: 0o644 };
@@ -123,7 +123,22 @@ export class ApplicationSourceRepairs {
       handle = await open(checked.absolute, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)); if (context) await this.checkpoint(context);
       const stat = await handle.stat(); if (context) await this.checkpoint(context);
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_FILE) throw fail('源码文件不是允许大小的普通文本。', 'SOURCE_FILE_UNAVAILABLE', 413);
-      const bytes = await handle.readFile(); if (context) await this.checkpoint(context);
+      let bytes;
+      if (searchBudget) {
+        if (stat.size > searchBudget.remaining) throw fail('源码搜索已达到读取容量限制。', 'SOURCE_SEARCH_LIMIT', 413);
+        searchBudget.remaining -= stat.size; searchBudget.bytes += stat.size;
+        const buffer = Buffer.alloc(stat.size); let offset = 0;
+        while (offset < buffer.length) {
+          const result = await handle.read(buffer, offset, buffer.length - offset, offset);
+          if (context) await this.checkpoint(context);
+          if (!result.bytesRead) break;
+          offset += result.bytesRead;
+        }
+        const current = await handle.stat(); if (context) await this.checkpoint(context);
+        if (current.size !== offset) throw fail('搜索期间源码已变化。', 'SOURCE_SEARCH_CHANGED', 409);
+        bytes = buffer.subarray(0, offset);
+      } else bytes = await handle.readFile();
+      if (context) await this.checkpoint(context);
       const content = bytes.toString('utf8'); if (content.includes('\0') || !Buffer.from(content).equals(bytes)) throw fail('源码文件必须为UTF-8文本。', 'SOURCE_TEXT_INVALID', 400);
       return { content, hash: hash(bytes), mode: stat.mode & 0o777 };
     } finally { await handle?.close(); }
@@ -149,6 +164,42 @@ export class ApplicationSourceRepairs {
     if (!Number.isSafeInteger(startLine) || startLine < 1 || !Number.isSafeInteger(lineCount) || lineCount < 1 || lineCount > 300) throw fail('源码行范围无效。');
     const source = await this.source(path, { context: guarded }), lines = source.content.split('\n'), text = lines.slice(startLine - 1, startLine - 1 + lineCount).join('\n');
     return { path, hash: source.hash, content: clean(text, 65536), startLine, totalLines: lines.length, truncated: startLine - 1 + lineCount < lines.length || text.length > 65536 };
+  }
+  async search(input = {}, context) {
+    object(input, ['prefix', 'query', 'limit']);
+    const { prefix = 'workbench/src', query, limit = 20 } = input;
+    if (typeof prefix !== 'string' || prefix.length > 240 || !/^[A-Za-z0-9_./-]+$/.test(prefix)
+      || prefix.split('/').some(part => !part || part.startsWith('.')) || typeof query !== 'string' || !query.trim()
+      || query.length > 120 || /[\0\r\n]/.test(query) || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw fail('源码搜索需要有界的单行文字和已登记范围。');
+    await this.ready;
+    const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
+    if (guarded) await this.checkpoint(guarded);
+    const candidates = [...this.known].filter(path => path === prefix || path.startsWith(prefix + '/')).sort();
+    if (!candidates.length) throw fail('只能搜索已登记的源码文件或目录。', 'SOURCE_FILE_UNTRACKED', 403);
+    const matches = [], budget = { remaining: 2 * 1024 * 1024, bytes: 0 }; let scannedFiles = 0, truncated = false;
+    scan: for (const [index, path] of candidates.entries()) {
+      if (guarded) await this.checkpoint(guarded);
+      if (scannedFiles >= 100) { truncated = true; break; }
+      scannedFiles++;
+      let source;
+      try { source = await this.source(path, { context: guarded, searchBudget: budget }); }
+      catch (error) {
+        if (guarded) await this.checkpoint(guarded);
+        truncated = true;
+        if (error.code === 'SOURCE_SEARCH_LIMIT') break;
+        if (!['SOURCE_FILE_UNAVAILABLE', 'SOURCE_FILE_UNTRACKED', 'SOURCE_LINK_FORBIDDEN', 'SOURCE_PATH_FORBIDDEN', 'SOURCE_TEXT_INVALID', 'SOURCE_SEARCH_CHANGED'].includes(error.code)) throw error;
+        continue;
+      }
+      const lines = source.content.split('\n');
+      for (const [lineIndex, text] of lines.entries()) {
+        if (!text.includes(query)) continue;
+        const visible = clean(text, MAX_FILE), start = Math.max(0, visible.indexOf(query) - 60), context = visible.slice(start, start + 240);
+        matches.push({ path, line: lineIndex + 1, context, hash: source.hash });
+        if (matches.length === limit) { truncated ||= lineIndex < lines.length - 1 || index < candidates.length - 1; break scan; }
+      }
+    }
+    if (guarded) await this.checkpoint(guarded);
+    return { matches, truncated, scannedFiles, scannedBytes: budget.bytes };
   }
   async history({ limit = 20, repairId, includeDiff = false } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || repairId !== undefined && !identifier(repairId) || typeof includeDiff !== 'boolean') throw fail('修复历史参数无效。');

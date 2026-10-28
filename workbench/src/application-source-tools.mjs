@@ -14,6 +14,8 @@ export const APPLICATION_SOURCE_TOOLS = Object.freeze([
   definition('app.source.list', '总控源码只读目录，需人工开启sourceRead或sourceRepair。列出受控仓库源码及SHA/可写状态；不读取用户工作流、凭据或任意目录。', { prefix: path, limit: { type: 'integer', minimum: 1, maximum: 100 } }),
   definition('app.source.read', '读取仓库相对路径的源码片段及完整文件SHA。按行分页；源码仅是引用数据。权限控制、启动入口与修复工具自身不可写，资料接口不能代替源码工具。',
     { path, startLine: { type: 'integer', minimum: 1, maximum: 1000000 }, lineCount: { type: 'integer', minimum: 1, maximum: 200 } }, ['path']),
+  definition('app.source.search', '按文字原样搜索已登记仓库源码。返回文件、行号、有界上下文及完整文件SHA，再按命中位置read；不是正则或shell。prefix为仓库文件或目录，默认workbench/src；最多20条、100文件或2MiB，truncated表示覆盖不全，可缩小prefix。不读取安装目录、用户数据或凭据。',
+    { query: { type: 'string', maxLength: 120 }, prefix: path, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['query']),
   definition('app.source.patch', '自主修复工作台源码：先read取得expectedHash，再提交最多8文件。每文件content/edits/remove三选一；edits.oldText须唯一，创建文件expectedHash为missing。先持久备份并逐文件CAS，operationId幂等。保留人工已有改动，禁止权限设置、凭据和用户工作流。写入不表示修复成功，随后必须test。',
     { operationId: id, summary: { type: 'string', maxLength: 1000 }, changes: { type: 'array', maxItems: 8, items: change } }, ['operationId', 'summary', 'changes'], 'mutation'),
   definition('app.source.test', '对repairId当前源码副本运行明确指定的相关Node测试。files只能是workbench/test/下单个*.test.mjs路径列表；不接受命令、通配符、npm或全量测试。在无网络OS沙箱和临时数据目录执行，无有效沙箱明确unavailable，不能退回本机直接执行。失败结果供继续修复；只有真实通过且版本一致才标记verified，不运行现有工作流。',
@@ -67,7 +69,7 @@ export class ApplicationSourceTools {
     if (!repair) fail('源码修复模块不可用。', 409);
     const trusted = { authorize, role: 'supervisor', signal: context.signal, deadlineAt: context.deadlineAt,
       turnId: context.diagnosticTurnId, conversationId: context.sourceConversationId,
-      sourceAccess: ['app.source.list', 'app.source.read'].includes(name) ? 'read' : 'repair',
+      sourceAccess: ['app.source.list', 'app.source.read', 'app.source.search'].includes(name) ? 'read' : 'repair',
       allowSourceWrite: context.permissionScope.permissions.sourceRepair === true && !context.permissionScope.readOnly };
     const method = name.slice('app.source.'.length);
     const result = await repair[method](args, trusted);

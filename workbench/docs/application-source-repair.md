@@ -14,7 +14,7 @@
 
 | 工具 | 用途 |
 | --- | --- |
-| `app.source.list` / `app.source.read` | 发现允许的源码文件并读取当前内容、版本身份 |
+| `app.source.list` / `app.source.search` / `app.source.read` | 发现允许文件、按literal符号定位行号，再读取当前内容与版本身份 |
 | `app.source.patch` | 按预期 SHA 与稳定操作 ID 写入受限源码，保留修改前备份和回执 |
 | `app.source.test` | 在源码副本与临时数据中运行显式选择的相关 Node 测试 |
 | `app.source.history` | 读取修复、测试和回滚记录 |

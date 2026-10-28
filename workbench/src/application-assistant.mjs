@@ -378,7 +378,7 @@ export class ApplicationAssistant {
       }
       const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope, intent: decision?.intent }), activeSignal), permissionScope);
       check(activeSignal);
-      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.read', 'app.source.history']);
+      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.search', 'app.source.read', 'app.source.history']);
       const tools = this.tools(permissionScope).filter(tool => decision?.intent !== 'discuss' || discussionTools.has(tool.name));
       turn.admitCheckpoint(diagnosticScope({ selection: { ...selection, role, readOnly, sourceConversationId, permissionRevision: permissionScope.revision }, evidence, modelRoute, capabilities, config: this.app.config, tools }), checkpoint, evidence);
       const source = { userMessage: sanitizeDiagnosticText(text), selection: Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'document')),

@@ -15,8 +15,8 @@ const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
-const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
-const SOURCE_READ = new Set(['app.source.list', 'app.source.read']);
+const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.search', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
+const SOURCE_READ = new Set(['app.source.list', 'app.source.read', 'app.source.search']);
 const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment']);
 const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.trace', 'assistant.probe', 'assistant.experiment']);
 

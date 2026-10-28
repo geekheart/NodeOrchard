@@ -61,6 +61,71 @@ test('source-read revocation during a file check rejects the read without return
   assert.equal(await readFile(join(f.root, 'workbench/src/feature.mjs'), 'utf8'), 'export const value = 1;\n');
 });
 
+test('source search locates literal text and exact line numbers only in the registered source prefix', async t => {
+  const path = 'workbench/src/feature.mjs', content = 'before\nthis.firstOutputAt = Date.now();\na.*[b]\nafter\n';
+  const { root, service, context } = await fixture(t);
+  await writeFile(join(root, path), content);
+  await writeFile(join(root, 'workbench/src/unregistered.mjs'), 'firstOutputAt PRIVATE_UNREGISTERED');
+  await writeFile(join(root, 'workbench/test/feature.test.mjs'), 'firstOutputAt test-only');
+  const result = await service.search({ query: 'firstOutputAt', prefix: 'workbench/src' }, context);
+  assert.deepEqual(result.matches, [{ path, line: 2, context: 'this.firstOutputAt = Date.now();', hash: hash(content) }]);
+  assert.equal(result.scannedFiles, 1); assert.equal(result.scannedBytes, Buffer.byteLength(content)); assert.equal(result.truncated, false);
+  assert.deepEqual((await service.search({ query: 'a.*[b]', prefix: path }, context)).matches.map(row => row.line), [3]);
+  assert.deepEqual((await service.search({ query: 'firstOutput.*', prefix: path }, context)).matches, []);
+});
+
+test('source search never follows aliases into private files and reports incomplete coverage', async t => {
+  const paths = ['workbench/src/a-link.mjs', 'workbench/src/z-visible.mjs'];
+  const { root, service, context } = await fixture(t, { readGitState: async () => ({ tracked: paths, dirty: [] }) });
+  await writeFile(join(root, 'private.txt'), 'needle PRIVATE_MUST_NOT_LEAK');
+  await symlink(join(root, 'private.txt'), join(root, paths[0]));
+  await writeFile(join(root, paths[1]), 'needle');
+  const result = await service.search({ query: 'needle', limit: 1 }, context);
+  assert.deepEqual(result.matches.map(row => row.path), [paths[1]]); assert.equal(result.truncated, true);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_MUST_NOT_LEAK'), false);
+});
+
+test('source search redacts complete credential-like spans before cutting a matching context', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.root, 'workbench/src/feature.mjs'), 'const apiKey = "sk-' + 'A'.repeat(100) + '"; const needle = true;');
+  const result = await f.service.search({ query: 'needle' }, f.context);
+  assert.equal(result.matches.length, 1); assert.match(result.matches[0].context, /needle/);
+  assert.equal(result.matches[0].context.includes('A'.repeat(20)), false); assert.match(result.matches[0].context, /\[REDACTED\]/);
+});
+
+test('source search bounds result context, file count and total bytes without widening its prefix', async t => {
+  const paths = Array.from({ length: 101 }, (_, index) => `workbench/src/source-${String(index).padStart(3, '0')}.mjs`);
+  const f = await fixture(t, { readGitState: async () => ({ tracked: paths, dirty: [] }) });
+  await Promise.all(paths.map(path => writeFile(join(f.root, path), ('x'.repeat(300) + 'needle' + 'y'.repeat(300) + '\n').repeat(25))));
+  const matches = await f.service.search({ query: 'needle', limit: 20 }, f.context);
+  assert.equal(matches.matches.length, 20); assert.equal(matches.truncated, true);
+  assert(matches.matches.every(row => row.context.length <= 240 && row.context.includes('needle')));
+  const files = await f.service.search({ query: 'absent' }, f.context);
+  assert.equal(files.scannedFiles, 100); assert.equal(files.truncated, true); assert(files.scannedBytes <= 2 * 1024 * 1024);
+  for (const input of [{ query: '' }, { query: 'x'.repeat(121) }, { query: 'x\ny' }, { query: 'x\0y' }, { query: 'needle', limit: 21 },
+    { query: 'needle', prefix: '../workbench' }, { query: 'needle', prefix: 'workbench/.local' }, { query: 'needle', prefix: 'workbench/src/source-' }, { query: 'needle', regex: true }]) {
+    await assert.rejects(f.service.search(input, f.context));
+  }
+  const largePaths = Array.from({ length: 9 }, (_, index) => 'workbench/src/large-' + index + '.mjs');
+  const large = await fixture(t, { readGitState: async () => ({ tracked: largePaths, dirty: [] }) });
+  await Promise.all(largePaths.map(path => writeFile(join(large.root, path), 'x'.repeat(256 * 1024))));
+  const bytes = await large.service.search({ query: 'absent' }, large.context);
+  assert.equal(bytes.scannedBytes, 2 * 1024 * 1024); assert.equal(bytes.truncated, true); assert.equal(bytes.scannedFiles, 9);
+});
+
+test('source search stops on read-grant revocation or cancellation without returning partial source', async t => {
+  const f = await fixture(t); f.setEnabled(false); f.setSourceRead(true);
+  let checks = 0;
+  const context = { role: 'supervisor', authorize: async () => { if (++checks === 4) f.setSourceRead(false); return true; } };
+  await assert.rejects(f.service.search({ query: 'value' }, context), { code: 'SOURCE_REPAIR_FORBIDDEN' });
+  assert.equal(checks, 4);
+  f.setSourceRead(true); const controller = new AbortController(); checks = 0;
+  await assert.rejects(f.service.search({ query: 'value' }, { role: 'supervisor', signal: controller.signal,
+    authorize: async () => { if (++checks === 4) controller.abort(); return true; } }), { code: 'SOURCE_REPAIR_CANCELLED' });
+  assert.equal(checks, 4);
+  assert.equal((await f.service.history()).repairs.length, 0);
+});
+
 test('model experiment admission source remains readable but cannot be patched to raise its quota', async t => {
   const path = 'workbench/src/assistant-model-experiment.mjs', content = 'export const maxCallsPerTurn = 1;\n';
   const { root, service, context } = await fixture(t, { readGitState: async () => ({ tracked: [path], dirty: [] }) });
