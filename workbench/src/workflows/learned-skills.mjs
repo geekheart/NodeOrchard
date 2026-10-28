@@ -28,6 +28,7 @@ export class LearnedSkills {
     if (!row) throw fail('学习 Skill 版本不存在。', 404);
     const skill = JSON.parse(row.value);
     if (skill.name !== name || skill.ref !== name || skillRevision(skill.content) !== skill.revision) throw fail('学习 Skill 版本完整性检查失败。', 409);
+    if (skill.deletedAt) throw fail('学习 Skill 已删除，历史证据仍保留。', 404);
     return skill;
   }
   async resolve(name) {
@@ -53,8 +54,14 @@ export class LearnedSkills {
     return structuredClone(result);
   }
   list() {
-    return this.db.prepare("SELECT value FROM learned_skills WHERE json_extract(value,'$.published')=1 ORDER BY rowid DESC LIMIT 200").all()
+    return this.db.prepare("SELECT value FROM learned_skills WHERE json_extract(value,'$.published')=1 AND json_extract(value,'$.deletedAt') IS NULL ORDER BY rowid DESC LIMIT 200").all()
       .map(row => { const { content, ...metadata } = JSON.parse(row.value); return metadata; });
+  }
+  remove(name, expectedRevision) {
+    const skill = this.get(name);
+    if (skill.revision !== expectedRevision) throw fail('Skill 版本已变化，请刷新后再删除。', 409);
+    this.write.run(name, JSON.stringify({ ...skill, published: false, deletedAt: new Date().toISOString() }));
+    return { deleted: true, name, archived: true };
   }
   async publish(document, { beforePublish } = {}) {
     const selected = [];

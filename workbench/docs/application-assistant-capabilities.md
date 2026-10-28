@@ -19,6 +19,7 @@
 | `src/workflows/workflow-examples.mjs` | 固定示例目录、默认输入、学习配置及实际 Skill 指纹 | `workbench.inspect` 可读目录元数据；载入是界面入口，依赖未就绪时返回明确条件，见[示例目录](#示例目录) |
 | `workflow-learning-scope.mjs` 与学习编排／优化器 | Skill、指定工具及内部业务图的候选范围、评估和应用 | 前后端共用范围与快照守卫；训练证据用于优化，完整训练／验证用于评估，见[学习范围](#学习范围) |
 | `src/application-assistant-skills.mjs` 与 `assistant-skills/` | 内部 Skill 的固定目录及如何组合、选择和解释已有接口 | 由注册表发现并按需读取，不扫描用户业务 Skill，不把说明文字视为新增工具授权 |
+| Skill 来源与 `workbench.inspect(section="skills")` | 原生／工作台内置／生成来源和删除资格的有界元数据 | 正文及学习证据不展开，人工删除复核来源、版本与引用；管理内部指令不作为工作流节点，见[来源与删除](skill-integrations.md#来源与删除) |
 | `shared/keyboard-shortcuts.mjs` 与偏好设置 | 用户快捷键操作、生效范围、组合与冲突规则 | 设置表、聊天、编辑器共用；助手只读当前偏好，不提供改键或扩大执行权限的工具 |
 | 节点规划、执行、文件与审核模块 | 实际参数、类型、产物和状态语义 | 接口变更同时回写能力契约及相关说明 |
 

@@ -11,6 +11,7 @@ import { ApplicationLogEvents } from './application-log-events.mjs';
 import { assertHermesPolicy } from './route-policy.mjs';
 import { HermesModels } from './hermes-models.mjs';
 import { SkillIntegrations } from './skill-integrations.mjs';
+import { listManagedBuiltins, readManagedBuiltin } from './skill-management.mjs';
 import { validatePreferences } from './preferences.mjs';
 import { initializeWorkspace } from './workspace-layout.mjs';
 import { readSkillCatalog, readSkill, readSkillLabels, applySkillLabel } from './catalog.mjs';
@@ -242,22 +243,28 @@ export class Application extends EventEmitter {
     }
   }
 
-  async skills() {
-    if (this.closed || this.adapter.state !== 'ready') return { connected: false, skills: [] };
+  async skills({ view } = {}) {
+    const connected = !this.closed && this.adapter.state === 'ready', management = view === 'management';
+    if (!connected && !management) return { connected: false, skills: [] };
     try {
-      const [catalog, labels] = await Promise.all([readSkillCatalog(this.adapter), readSkillLabels(this.config.appRoot)]);
-      return { connected: true, skills: [...catalog, ...this.learnedSkills.list()].map(skill => applySkillLabel(skill, labels)) };
+      const [catalog, labels] = await Promise.all([connected ? readSkillCatalog(this.adapter) : [], readSkillLabels(this.config.appRoot)]);
+      const skills = [...catalog, ...this.learnedSkills.list()].map(skill => applySkillLabel(this.skillIntegrations?.project(skill) || skill, labels));
+      return { connected, skills: management ? [...skills, ...await listManagedBuiltins(this.config.appRoot, skills)] : skills.filter(skill => skill.enabled !== false) };
     }
-    catch (error) { return { connected: this.adapter.state === 'ready', skills: [], error: redact(error.message) }; }
+    catch (error) { return { connected, skills: management ? await listManagedBuiltins(this.config.appRoot) : [], error: redact(error.message) }; }
   }
 
-  async skill(name) {
+  async readSkillForManagement(name) { return readSkill(this.adapter, name, { includeDisabled: true }); }
+  async skill(name, { view } = {}) {
+    if (view === 'management' && typeof name === 'string' && name.startsWith('workbench:')) return readManagedBuiltin(this.config.appRoot, name);
+    this.skillIntegrations?.assertBindable(name);
     if (this.closed || this.adapter.state !== 'ready') throw Object.assign(new Error('请先连接 Hermes，再查看 Skill。'), { httpStatus: 409 });
     const [skill, labels] = await Promise.all([
-      this.learnedSkills.has(name) ? this.learnedSkills.resolve(name) : readSkill(this.adapter, name),
+      this.learnedSkills.has(name) ? this.learnedSkills.resolve(name) : readSkill(this.adapter, name, { includeDisabled: view === 'management' }),
       readSkillLabels(this.config.appRoot),
     ]);
-    return applySkillLabel(skill, labels);
+    this.skillIntegrations?.assertBindable(name);
+    return applySkillLabel(this.skillIntegrations?.project(skill) || skill, labels);
   }
 
   async connect() {

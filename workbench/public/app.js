@@ -17,13 +17,14 @@ import { ConversationHubUI } from './conversation-hub-ui.js';
 import { WorkflowPackageUI } from './workflow-package-ui.js';
 import { WorkflowExamplesUI } from './workflow-examples-ui.js';
 import { SkillAuthoringUI } from './skill-authoring-ui.js';
+import { SkillLibraryUI, skillSource, workflowReferencesSkill, propertyDraftReferencesSkill } from './skill-library-ui.js';
 import { openAttachmentInput } from './workflow-attachment-input.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
 import { WORKFLOW_AUTOSAVE_DEFAULTS, workflowAutosavePolicy } from '../shared/workflow/workflow-autosave.mjs';
 
 const $ = (id) => document.getElementById(id);
-let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, applicationConversationSelection, conversationHub, routeLoad = 0;
+let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, applicationConversationSelection, conversationHub, skillLibrary, routeLoad = 0;
 const diagnosticCapture = new URLSearchParams(location.search).get('diagnosticCapture') === 'readonly';
 const sidebarMedia = matchMedia('(max-width:720px)');
 let sidebarCollapsed = false, sidebarMobileOpen = false;
@@ -36,7 +37,7 @@ const state = {
   refreshing: false, connecting: false, creating: false, resuming: false, posting: new Set(),
   interrupting: new Set(), replying: new Set(), messageDrafts: new Map(),
   source: null, reconnectTimer: null, retry: 0, transport: 'starting', closed: false,
-  newTaskError: '', skills: null, skillDetails: new Map(), skillsLoading: false, skillLoading: null,
+  newTaskError: '', skills: null, skillDetails: new Map(), skillsLoading: false, skillLoading: null, skillsGeneration: 0,
   stats: new Map(), statsPending: new Set(), settings: null, settingsLoading: false, settingsRevision: 0, saving: false, settingsDirty: false,
   eventRevision: 0, sessionRevision: new Map(), turnRevision: new Map(), messageRevision: new Map(), requestsRevision: 0, backendRevision: 0, lastEventId: null,
 };
@@ -180,6 +181,7 @@ async function routeChanged() {
   }
 }
 function renderShell() {
+  if (state.route.page !== 'skills') skillLibrary?.deactivate();
   const route = state.route || { page: 'board' }; const parent = route.page === 'task' ? 'board' : route.page;
   document.body.classList.toggle('workflow-active', route.page === 'workflows');
   document.body.classList.toggle('board-active', route.page === 'board');
@@ -518,13 +520,27 @@ function renderSettings() {
 }
 function renderSkills() {
   $('create-skill').disabled = diagnosticCapture;
-  const data = state.skills; $('refresh-skills').disabled = state.skillsLoading; const search = $('skill-search').value.trim().toLowerCase(); const skills = (data?.skills || []).filter((skill) => !search || `${skillDisplayName(skill)} ${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(search)); $('skills-count').textContent = data ? `${skills.length} 项技能` : '';
+  const data = state.skills; $('refresh-skills').disabled = state.skillsLoading; const search = $('skill-search').value.trim().toLowerCase(); const skills = (data?.skills || []).filter((skill) => !search || `${skillDisplayName(skill)} ${skill.name} ${skill.description} ${skillSource(skill).label}`.toLowerCase().includes(search)); $('skills-count').textContent = data ? `${skills.length} 项技能` : '';
   const list = $('skill-list'); const detail = $('skill-detail');
   if (state.skillsLoading && !data) { list.replaceChildren(empty('正在读取 Skills…', '', 'sparkles')); detail.replaceChildren(); return; }
-  if (data && !data.connected) { list.replaceChildren(empty('尚未连接 Hermes', '', 'sparkles', button('连接 Hermes', connectBackend, 'button quiet small'))); detail.replaceChildren(empty('技能说明', '', 'sparkles')); return; }
+  if (data && !data.connected && !data.skills?.length) { skillLibrary?.deactivate(); list.replaceChildren(empty('尚未连接 Hermes', '', 'sparkles', button('连接 Hermes', connectBackend, 'button quiet small'))); detail.replaceChildren(empty('技能说明', '', 'sparkles')); return; }
   if (data?.error) { list.replaceChildren(empty('Skills 暂时无法读取', data.error, 'sparkles', button('重试', () => loadSkills(true), 'button quiet small'))); detail.replaceChildren(); return; }
-  const fragment = document.createDocumentFragment(); for (const skill of skills) { const item = link(`#/skills/${encodeURIComponent(skill.name)}`, '', `skill-item${state.route.name === skill.name ? ' selected' : ''}`); const title = element('h3'); title.append(icon('sparkles'), document.createTextNode(safeText(skillDisplayName(skill)))); item.append(title, element('p', '', skill.description || '未提供说明'), element('span', 'skill-source', [`${skill.enabled === true ? '已启用 · ' : skill.enabled === false ? '未启用 · ' : ''}${skill.source || 'Hermes'}`, skillVersionLabel(skill)].filter(Boolean).join(' · '))); fragment.append(item); } if (!skills.length) fragment.append(empty(data ? '没有匹配的技能' : '正在读取 Skills…', '', 'search')); list.replaceChildren(fragment);
-  const selected = state.skillDetails.get(state.route.name); if (!state.route.name) detail.replaceChildren(empty('选择一项技能', '', 'sparkles')); else if (!selected) detail.replaceChildren(empty('正在读取技能内容…', '', 'sparkles')); else if (selected.error) detail.replaceChildren(empty('无法读取技能内容', selected.error, 'sparkles')); else detail.replaceChildren(element('h2', '', skillDisplayName(selected)), element('span', 'skill-source mono', [selected.source || 'Hermes', skillVersionLabel(selected), skillDisplayName(selected) !== selected.name ? selected.name : ''].filter(Boolean).join(' · ')), element('p', '', selected.description || ''), element('pre', 'skill-content', selected.content || '这项技能未提供正文。'));
+  skillLibrary ||= new SkillLibraryUI({ list, detail, api, readOnly: diagnosticCapture,
+    draftReferenceReason: name => {
+      const documents = [workflowEditor?.nodeLibrary?.rootDocument, workflowEditor?.documentLoaded !== false ? workflowEditor?.doc : null,
+        ...[...(workflowLibraryClient?.slots?.values() || [])].flatMap(slot => [slot.draft, slot.queued])];
+      const drafts = [workflowEditor?.propertyDrafts?.values(), ...[...(workflowLibraryClient?.states?.values() || [])].map(value => value.propertyDrafts)];
+      return documents.some(document => workflowReferencesSkill(document, name)) || drafts.some(values => propertyDraftReferencesSkill(values, name))
+        ? '当前编辑草稿仍在使用此 Skill，请先移除引用并保存。' : '';
+    },
+    onDeleted: async result => {
+      state.skillDetails.delete(result.name);
+      if (state.skills) state.skills = { ...state.skills, skills: state.skills.skills.filter(skill => skill.name !== result.name) };
+      if (state.route.page === 'skills' && state.route.name === result.name) navigate('#/skills');
+      await loadSkills(true);
+    },
+  });
+  skillLibrary.render({ skills, selectedName: state.route.name, selected: state.skillDetails.get(state.route.name), loading: state.skillsLoading });
 }
 let statisticsDashboard, statisticsRefreshTimer;
 const statisticsHistory = { loading: false, status: '', error: false };
@@ -559,8 +575,20 @@ async function loadHistory(id, { quiet = false } = {}) {
 }
 async function loadRuns(id) { if (!id) return; try { const result = await api(`/api/sessions/${encodeURIComponent(id)}/runs`); state.runs.set(id, result.runs || []); if (id === state.selectedId) renderTaskRuns(); } catch (error) { if (id === state.selectedId) $('task-runs').replaceChildren(empty('无法读取执行记录', error.message, 'clock')); } }
 async function loadSettings() { if (state.settingsLoading) return; const revision = state.settingsRevision; state.settingsLoading = true; try { const settings = await api('/api/settings'); if (revision !== state.settingsRevision) return; state.settings = settings; applyPreferences(preferences()); if (state.route.page === 'settings') renderSettings(); renderNewTaskState(); } catch (error) { if (revision === state.settingsRevision && state.route.page === 'settings') $('preferences-status').textContent = `设置读取失败：${error.message}`; } finally { state.settingsLoading = false; } }
-async function loadSkills(force = false) { if (state.skillsLoading || state.skills && !force) return; state.skillsLoading = true; renderSkills(); try { state.skills = await api('/api/skills'); } catch (error) { state.skills = { connected: state.backend.state === 'ready', skills: [], error: error.message }; } finally { state.skillsLoading = false; if (state.route.page === 'skills') renderSkills(); } }
-async function loadSkillDetail(name) { if (!name || state.skillDetails.has(name) || state.skillLoading === name) return; state.skillLoading = name; try { state.skillDetails.set(name, await api(`/api/skills/${encodeURIComponent(name)}`)); } catch (error) { state.skillDetails.set(name, { error: error.message }); } finally { state.skillLoading = null; if (state.route.page === 'skills' && state.route.name === name) renderSkills(); } }
+async function loadSkills(force = false) {
+  if (!force && (state.skillsLoading || state.skills)) return;
+  const generation = ++state.skillsGeneration; state.skillsLoading = true; renderSkills();
+  try { const data = await api('/api/skills?view=management'); if (generation === state.skillsGeneration) state.skills = data; }
+  catch (error) { if (generation === state.skillsGeneration) state.skills = { connected: state.backend.state === 'ready', skills: [], error: error.message }; }
+  finally { if (generation === state.skillsGeneration) { state.skillsLoading = false; if (state.route.page === 'skills') renderSkills(); } }
+}
+async function loadSkillDetail(name) {
+  if (!name || state.skillDetails.has(name) || state.skillLoading?.name === name && state.skillLoading.generation === state.skillsGeneration) return;
+  const generation = state.skillsGeneration, request = { name, generation }; state.skillLoading = request;
+  try { const detail = await api(`/api/skills/${encodeURIComponent(name)}?view=management`); if (generation === state.skillsGeneration) state.skillDetails.set(name, detail); }
+  catch (error) { if (generation === state.skillsGeneration) state.skillDetails.set(name, { error: error.message }); }
+  finally { if (state.skillLoading === request) state.skillLoading = null; if (state.route.page === 'skills' && state.route.name === name) renderSkills(); }
+}
 async function loadStatistics(force = false) { const days = $('statistics-period').value; if (state.statsPending.has(days) || state.stats.has(days) && !force) return; state.statsPending.add(days); renderStatistics(); try { state.stats.set(days, await api(`/api/statistics?days=${days}`)); } catch (error) { state.stats.set(days, { error: error.message }); } finally { state.statsPending.delete(days); if (state.route.page === 'statistics') renderStatistics(); } }
 async function loadRouteData() {
   const load = ++routeLoad, route = { ...state.route };
@@ -634,6 +662,7 @@ function receiveEvent(event) {
   switch (event.type) {
     case 'backend.status': state.backend = { ...state.backend, ...(payload.backend || payload) }; if (['stopped', 'disconnected', 'error'].includes(state.backend.state)) { state.streams.clear(); state.tools.clear(); state.posting.clear(); if (state.route.page === 'task') renderMessages(); } renderBackend(); if (state.route.page === 'settings') renderSettings(); break;
     case 'models.updated': void hermesModels.refresh({ preserveSelection: hermesModels.nodes.dialog.open }); break;
+    case 'skills.updated': state.skills = null; state.skillDetails.clear(); if (state.route.page === 'skills') void loadSkills(true).then(() => loadSkillDetail(state.route.name)); break;
     case 'backend.error': state.backend = { ...state.backend, state: 'error', lastError: payload.error || payload.message || '后端发生错误。' }; renderBackend(); break;
     case 'settings.updated': if (payload.preferences) { state.settingsRevision++; state.settings = { ...(state.settings || {}), preferences: payload.preferences }; applyPreferences(preferences()); renderNewTaskState(); if (state.route.page === 'settings' && !state.saving) renderSettings(); } break;
     case 'session.updated': upsertSession(payload.session || payload); updateSessionViews(); break;
@@ -700,7 +729,7 @@ for (const tab of $('inspector-tabs').querySelectorAll('button')) tab.addEventLi
 $('skill-search').addEventListener('input', renderSkills);
 $('refresh-skills').addEventListener('click', () => { state.skillDetails.clear(); void loadSkills(true).then(() => loadSkillDetail(state.route.name)); });
 $('create-skill').addEventListener('click', () => void skillAuthoring.open({ onCreated: async (skill, { isCurrent }) => {
-  state.skillDetails.set(skill.name, skill); await loadSkills(true); if (isCurrent()) location.hash = `#/skills/${encodeURIComponent(skill.name)}`;
+  state.skillDetails.delete(skill.name); await loadSkills(true); if (isCurrent()) { location.hash = `#/skills/${encodeURIComponent(skill.name)}`; await loadSkillDetail(skill.name); }
 } }));
 $('statistics-period').addEventListener('change', () => { renderStatistics(); void loadStatistics(); });
 $('preferences-form').addEventListener('input', () => { state.settingsDirty = true; $('preferences-status').textContent = '有未保存的更改'; $('setting-workflow-autosave-interval').disabled = !$('setting-workflow-autosave-enabled').checked; });

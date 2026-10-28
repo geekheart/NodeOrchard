@@ -1,0 +1,9 @@
+.skill-source-heading { display:flex; align-items:center; justify-content:space-between; padding:11px 17px; border-bottom:1px solid var(--line); color:var(--secondary); font-size:11px; background:var(--surface); }
+.skill-source-group + .skill-source-group { border-top:1px solid var(--strong-line); }
+.skill-detail-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+.skill-badge { flex-shrink:0; padding:1px 6px; border:1px solid var(--line); border-radius:4px; font-size:10px; font-weight:400; color:var(--muted); }
+.skill-delete-button { padding:7px; color:var(--red); }
+.skill-delete-button svg { width:16px; height:16px; }
+.skill-empty { padding:17px; }
+.skill-delete-dialog { max-width:440px; }
+.skill-delete-dialog > p { margin-top:12px; }

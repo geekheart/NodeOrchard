@@ -27,6 +27,22 @@ function application(t) {
   return { app, assistant, capabilities: assistant.capabilities };
 }
 
+test('skill source discovery is bounded metadata and grants no delete or content access to the assistant', async t => {
+  const f = application(t); let reads = 0;
+  f.app.skills = async options => {
+    reads++; assert.deepEqual(options, { view: 'management' });
+    return { connected: true, skills: Array.from({ length: 105 }, (_, index) => ({ name: 'skill-' + index, source: 'local',
+      origin: { kind: index ? 'generated' : 'workbench-builtin', canDelete: true }, revision: 'sha256:' + 'a'.repeat(64),
+      assignable: true, content: 'PRIVATE_BODY', learningId: 'PRIVATE_TRAINING', apiKey: 'PRIVATE_CREDENTIAL' })) };
+  };
+  const scope = await f.assistant.permissions.bind({ role: 'workflow', workflowId: 'workflow-a' });
+  const value = await f.assistant.call('workbench.inspect', { section: 'skills' }, { permissionScope: scope });
+  assert.equal(reads, 1); assert.equal(value.skills.length, 100); assert.equal(value.total, 105); assert.equal(value.truncated, true);
+  assert.equal(value.skills[0].origin.canDelete, false); assert.equal(JSON.stringify(value).includes('PRIVATE_'), false);
+  assert.equal(f.capabilities.features(scope).find(feature => feature.id === 'generated-skill-removal').status, 'ui-only');
+  assert.equal(f.assistant.tools(scope).some(tool => /skill.*delete|skill.*remove/.test(tool.name)), false);
+});
+
 test('node capability discovery covers every real node and derives configuration keys from the model', () => {
   for (const schemaVersion of [1, 2]) {
     const manifest = workflowCapabilityManifest({ schemaVersion, section: 'nodes' });

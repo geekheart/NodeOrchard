@@ -349,7 +349,9 @@ class WorkflowGateway:
         self.server.register_method("workbench.skill.input", self.input_rpc)
         self.server.register_method("workbench.skill.finish", self.finish_rpc)
         self.server.register_method("workbench.tools.catalog", self.tools_catalog_rpc)
+        self.server.register_method("workbench.skills.catalog", self.skills_catalog_rpc)
         self.server.register_method("workbench.skill.create", self.skill_create_rpc)
+        self.server.register_method("workbench.skill.delete", self.skill_delete_rpc)
         self.server.register_method("workbench.image.provider", self.image_provider_rpc)
         self.server.register_method("workbench.learning.prepare", self.learning_prepare_rpc)
         self.server.register_method("workbench.assistant.prepare", self.assistant_prepare_rpc)
@@ -364,7 +366,7 @@ class WorkflowGateway:
         # not the original rpc_dispatch module's stale globals.
         self.server._LONG_HANDLERS = frozenset(self.server._LONG_HANDLERS) | {
             "workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish",
-            "workbench.tools.catalog", "workbench.skill.create", "workbench.image.provider",
+            "workbench.tools.catalog", "workbench.skills.catalog", "workbench.skill.create", "workbench.skill.delete", "workbench.image.provider",
             "workbench.learning.prepare",
             "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history", "workbench.assistant.diagnostics",
             "workbench.usage.history",
@@ -1516,6 +1518,23 @@ class WorkflowGateway:
             with self.lock: return self.server._ok(rid, self.integrations.create_skill(params))
         except (OSError, ValueError, TypeError, ImportError):
             return self.server._err(rid, 4104, 'Could not create a new Skill; check its name, dependencies and native compatibility.')
+
+    def skills_catalog_rpc(self, rid, params):
+        if params != {}:
+            return self.server._err(rid, 4106, 'Skill catalog accepts no parameters.')
+        try:
+            with self.lock: return self.server._ok(rid, self.integrations.skills_catalog())
+        except (OSError, ValueError, TypeError, ImportError):
+            return self.server._err(rid, 4106, 'Native Skill provenance is unavailable or incompatible.')
+
+    def skill_delete_rpc(self, rid, params):
+        try:
+            with self.lock:
+                if not isinstance(params, dict) or any(run.get('name') == params.get('name') and not run.get('finished') for run in self.runs.values()):
+                    raise ValueError('A prepared Skill attempt is still active.')
+                return self.server._ok(rid, self.integrations.delete_skill(params))
+        except (OSError, ValueError, TypeError, ImportError):
+            return self.server._err(rid, 4107, 'Could not delete the Skill; its generated identity, content or active attempt changed.')
 
     def image_provider_rpc(self, rid, params):
         try:

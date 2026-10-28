@@ -7,7 +7,7 @@ test('learning versions preserve metadata, source identity and immutable parent 
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   const base = { name: 'sample', content: '---\nname: sample\n---\nOriginal instructions.\n', source: 'bundled' };
   base.revision = skillRevision(base.content);
-  const adapter = { request: async method => method === 'skills.manage' ? { skills: { general: ['sample'] } }
+  const adapter = { request: async method => method === 'workbench.skills.catalog' ? { skills: [{ name: 'sample', source: 'bundled' }] } : method === 'skills.manage' ? { skills: { general: ['sample'] } }
     : method === 'commands.catalog' ? {} : { ok: true, kind: 'skill', content: base.content } };
   const repo = new LearnedSkills({ store: { db }, adapter });
   const learned = repo.create(base, { content: '---\nname: sample\n---\nImproved instructions.\n', learningId: 'study', nodeId: 'node' });

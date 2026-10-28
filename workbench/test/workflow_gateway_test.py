@@ -352,10 +352,27 @@ class WorkflowGatewayTests(unittest.TestCase):
         self.assertEqual(set(self.server.methods), {"workbench.skill.prepare", "workbench.skill.input", "workbench.skill.finish", "workbench.learning.prepare",
                                                    "workbench.assistant.prepare", "workbench.assistant.images", "workbench.assistant.history", "workbench.assistant.diagnostics",
                                                    "workbench.usage.history",
-                                                   'workbench.tools.catalog', 'workbench.skill.create', 'workbench.image.provider',
+                                                   'workbench.tools.catalog', 'workbench.skills.catalog', 'workbench.skill.create', 'workbench.skill.delete', 'workbench.image.provider',
                                                    "workbench.learning.memory.capture", "workbench.learning.memory.release", "workbench.learning.memory.restore"})
         self.assertIn("workbench.skill.prepare", self.server._LONG_HANDLERS)
         self.assertTrue(self.server.scopes)
+
+    def test_skill_catalog_rpc_is_readonly_and_deletion_waits_until_the_prepared_attempt_finishes(self):
+        calls = []
+        self.bridge.integrations.skills_catalog = lambda: {'skills': []}
+        self.bridge.integrations.delete_skill = lambda params: calls.append(params) or {'deleted': True}
+        self.assertIn('error', self.bridge.skills_catalog_rpc(1, {'unexpected': True}))
+        self.assertEqual(self.bridge.skills_catalog_rpc(2, {})['result'], {'skills': []})
+        self.bridge.prepare(self.params)
+        request = {'name': self.params['skill'], 'creation_id': str(uuid.uuid4()), 'expected_revision': self.params['revision'],
+                   'expected_bundle_revision': self.params['revision'], 'operation_id': str(uuid.uuid4())}
+        self.assertIn('error', self.bridge.skill_delete_rpc(3, request))
+        self.assertEqual(calls, [])
+        self.bridge.finish({'session_id': self.params['session_id'], 'run_id': self.params['run_id']})
+        self.assertEqual(self.bridge.skill_delete_rpc(4, request)['result'], {'deleted': True})
+        self.assertEqual(calls, [request])
+        self.assertNotIn('workbench.skill.delete', self.agent.valid_tool_names)
+        self.assertNotIn('workbench.skills.catalog', self.agent.valid_tool_names)
 
     def test_late_dispatch_denies_even_if_deferred_schema_refresh_readds_skill_manage(self):
         self.bridge.prepare(self.params)

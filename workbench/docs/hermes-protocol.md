@@ -41,7 +41,7 @@ SQLite 只保存应用元数据和运行结果。对话历史通过 `session.his
 
 ## 最小业务接口
 
-Skill 工具扩展还提供受限 `workbench.tools.catalog`、`workbench.skill.create` 与 `workbench.image.provider` RPC，分别用于只读依赖目录、人工创建和人工图片服务选择。它们不进入模型工具目录；准备／结束沿原 Skill RPC 绑定能力版本和可信图片回执，见[Skill 图片与外部工具](skill-integrations.md)。
+Skill 工具扩展提供 `workbench.tools.catalog`、`workbench.skills.catalog`、`workbench.skill.create`／`workbench.skill.delete` 与 `workbench.image.provider`，分别用于只读依赖／来源目录、人工创建／归档删除和图片服务选择。它们不进入模型工具目录；生成回执与删除身份见[来源与删除](skill-integrations.md#来源与删除)，准备／结束仍绑定能力版本和可信图片回执。
 
 | 应用 API | 执行关系 |
 | --- | --- |
@@ -58,8 +58,10 @@ Skill 工具扩展还提供受限 `workbench.tools.catalog`、`workbench.skill.c
 | `GET /api/settings` | 工作台本地偏好、受限环境信息；已连接时读取审批模式 |
 | `POST /api/settings` | 仅保存白名单中的工作台偏好到本地 SQLite |
 | `GET /api/statistics?days=7\|30` | 应用本地运行记录统计；不调用模型或读取账户用量 |
-| `GET /api/skills` | `skills.manage(action=list)` 与 `commands.catalog` 的受限投影 |
+| `GET /api/skills` | 优先读取 `workbench.skills.catalog` 的可信来源；旧网关退回受保护目录，不开放删除 |
 | `GET /api/skills/:name` | 确认名称属于技能清单后读取 `learning.detail`，要求 `kind=skill` |
+| `GET /api/skills?view=management` | 增加固定只读工作台模板／内部助手说明，不作为可执行节点 |
+| `POST /api/skills/:name/delete` | 人工、CSRF、版本和引用核对；生成包受控归档，学习版本保留删除标记 |
 | `POST /api/workflow-runs` | 接收 `{document,input}`，校验并准备全链，启动首个能力后返回运行快照；不等待整链或长代码进程结束 |
 | `GET /api/workflow-runs?workflowId=…` | 从本地 SQLite 读取最近 20 次运行，可按工作流筛选 |
 | `GET /api/workflow-runs/:id` | 读取流程、Skill 元数据、逐节点 I/O、runtime 与日志快照 |

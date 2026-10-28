@@ -24,6 +24,8 @@
 
 聊天文件同步失败记录 `workflow.conversation.persistence.failed`，恢复成功记录 `.synced`，相同失败状态去重；仅含工作流、修订、状态及固定错误分类，不记录文件路径、对话或上下文正文。独立的待同步元数据不改变已完成的模型回复，导出会等待成功刷盘。
 
+Skill 创建、提供商选择及删除通过 `skill.integration.*` 记录操作身份、阶段、耗时和结果。删除区分预检拒绝、确认完成与结果未知；不记录 Skill 正文、包内路径、生成提示词或认证。结果未知不因日志或刷新自动重放，来源与删除边界见[Skill 管理](skill-integrations.md#来源与删除)。
+
 助手模型新增 `assistant.model.state` 事件，保存会话身份、阶段、调用总耗时、等待／输出耗时、字符数量和超时分类；流块不逐块持久。对应 `application_model_calls` 保存数字调用快照，供按归属聚合诊断，旧快照的 running 不证明重启后仍在执行。`assistant.probe.started/completed/failed` 记录固定短探测结果；不保存探测正文。`assistant.turn.state.durationMs` 为轮次时长，原 `elapsedMs` 为进度观察值，不能用最后阶段耗时推算全轮。
 
 Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: hermes`、固定枚举 `source/status/code` 与协议数量 `count`。它区分显式环境保留、系统静态代理采用及未采用原因，不保存代理地址、绕过列表、PAC 内容或凭据。该记录说明启动环境的来源，不证明网络、认证或模型任务成功；继承规则见[代理继承](hermes-protocol.md#代理继承)。

@@ -41,6 +41,7 @@ flowchart LR
 | `shared/workflow/workflow-capability-contract.mjs`、`src/application-capabilities.mjs` | 共享真实能力契约、当前可用性、节点与运行时说明 | 以提示词代替处理器、虚构依赖就绪或扩大执行权限 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
 | 工作流文件夹、便携包与 ZIP 模块 | 目录归集、迁移、包校验与原子导入；目录为完整可携副本，数据库保留运行索引 | 打包全局认证、重跑导入历史或改写原审核 |
+| Skill 来源、管理视图与原生生成记录 | 可信来源投影、固定内置目录、引用检查与人工归档删除 | 从名称／前言推断可删，删除内置或改写历史；详见[来源与删除](skill-integrations.md#来源与删除) |
 | `workflow-conversation-context.mjs` | 完整聊天文件、版本绑定的可携历史上下文和有界历史检索 | 恢复模型内部状态、旧动作或授权；把全文塞入分类阶段 |
 | `workflow-attachments.mjs`、`assistant-attachments.mjs` 与聊天素材控件 | 工作流内素材登记、SHA 校验、消息引用、文本投影与图像输入绑定 | 任意路径读取、执行附件内容或自动运行工作流 |
 | `shared/workflow/` | 纯模型、端口、规划、校验、数据集、时间及协议 | Node/DOM、数据库、网络或文件副作用 |

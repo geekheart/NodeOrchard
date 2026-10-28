@@ -160,13 +160,25 @@ export function createWorkbenchServer(config, application = new Application(conf
         if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return json(res, 400, { error: '历史补齐不接受自定义会话或路径。' });
         return json(res, 200, await application.backfillHistoricalUsage());
       }
-      if (req.method === 'GET' && path === '/api/skills') return json(res, 200, await application.skills());
+      const skillView = () => {
+        if ([...requestURL.searchParams.keys()].some(key => key !== 'view') || requestURL.searchParams.getAll('view').length > 1
+          || requestURL.searchParams.has('view') && requestURL.searchParams.get('view') !== 'management') throw Object.assign(new Error('Skill 视图参数无效。'), { httpStatus: 400 });
+        return requestURL.searchParams.get('view') || undefined;
+      };
+      if (req.method === 'GET' && path === '/api/skills') return json(res, 200, await application.skills({ view: skillView() }));
       if (req.method === 'POST' && path === '/api/skills') return json(res, 201, await application.skillIntegrations.create(await readJson(req, 64000), { human: true }));
       if (req.method === 'GET' && path === '/api/skill-integrations') return json(res, 200, await application.skillIntegrations.inspect());
       if (req.method === 'POST' && path === '/api/skill-integrations/image-provider') return json(res, 200,
         await application.skillIntegrations.selectImageProvider(await readJson(req, 4096), { human: true }));
       const skillMatch = path.match(/^\/api\/skills\/([^/]+)$/);
-      if (req.method === 'GET' && skillMatch) return json(res, 200, await application.skill(decodeURIComponent(skillMatch[1])));
+      if (req.method === 'GET' && skillMatch) return json(res, 200, await application.skill(decodeURIComponent(skillMatch[1]), { view: skillView() }));
+      const skillDelete = path.match(/^\/api\/skills\/([^/]+)\/delete$/);
+      if (req.method === 'POST' && skillDelete) {
+        if (requestURL.search) return json(res, 400, { error: 'Skill 删除不接受查询参数。' });
+        const input = await readJson(req, 4096);
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['expectedRevision', 'expectedCreationId', 'operationId'].includes(key))) return json(res, 400, { error: 'Skill 删除参数无效。' });
+        return json(res, 200, await application.skillIntegrations.remove({ ...input, name: decodeURIComponent(skillDelete[1]) }, { human: true }));
+      }
       if (req.method === 'GET' && path === '/api/events') {
         const cursor = req.headers['last-event-id'] ?? requestURL.searchParams.get('after');
         const hasCursor = cursor !== null && cursor !== undefined;
@@ -457,6 +469,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-editor.css': ['workflow-editor.css', 'text/css'],
         '/workflow-runtime-ui.js': ['workflow-runtime-ui.js', 'text/javascript'],
         '/skill-authoring-ui.js': ['skill-authoring-ui.js', 'text/javascript'],
+        '/skill-library-ui.js': ['skill-library-ui.js', 'text/javascript'],
+        '/skill-library-ui.css': ['skill-library-ui.css', 'text/css'],
         '/workflow-runtime-ui.css': ['workflow-runtime-ui.css', 'text/css'],
         '/workflow-learning-ui.js': ['workflow-learning-ui.js', 'text/javascript'],
         '/workflow-learning-ui.css': ['workflow-learning-ui.css', 'text/css'],

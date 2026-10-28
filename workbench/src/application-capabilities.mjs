@@ -9,6 +9,7 @@ import { ASSISTANT_MODEL_TOOLS } from './assistant-model-tools.mjs';
 import { APPLICATION_SOURCE_TOOLS } from './application-source-tools.mjs';
 import { resolveAssistantAttachments } from './assistant-attachments.mjs';
 import { readConversationHistory } from './workflows/workflow-conversation-context.mjs';
+import { skillOrigin } from './catalog.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -28,8 +29,8 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
-  definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录、示例、统计及Skill图片/浏览器/桌面/MCP工具的真实就绪状态。独立助手限定当前工作流，不读取认证或修改连接。', {
-    section: { enum: ['settings', 'models', 'schedules', 'node-derivations', 'node-presets', 'statistics', 'examples', 'integrations'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
+  definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录、示例、统计、Skill来源元数据及图片/浏览器/桌面/MCP工具的真实就绪状态。独立助手限定当前工作流，不读取认证或修改连接。', {
+    section: { enum: ['settings', 'models', 'schedules', 'node-derivations', 'node-presets', 'statistics', 'examples', 'integrations', 'skills'] }, workflowId: text, days: { type: 'integer', enum: [7, 30] } }),
   definition('page.inspect', '读取发消息时当前页面的界面状态与脱敏操作、错误记录。', {}),
   definition('environment.probe', '检查固定工具版本，或检查 GitHub HTTPS 连接；代码解释器和库请使用 runtime.inspect。', { target: { enum: ['dependencies', 'github'] } }),
   definition('browser.capture', '在专用只读浏览器中真实截图或短录制，附复现步骤与错误；不会采集当前用户标签页或桌面。', {
@@ -53,6 +54,8 @@ const FEATURES = [
   { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
   { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
   { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置，认证继续由Hermes管理。创建全局可执行资源保留人工入口，业务Skill和应用助手均无skill_manage或配置写工具。' },
+  { id: 'skill-provenance', status: 'available', tools: ['workbench.inspect'], note: 'skills分区只读发现Hermes自带、工作台内置、后续生成及来源待确认的元数据；内置和未知来源受保护，管理视图中的内部助手指令不作为工作流Skill。' },
+  { id: 'generated-skill-removal', status: 'ui-only', tools: [], note: '用户在Skills页确认删除可验证归属的生成Skill；后端复核版本、生成身份及在用引用，普通包受控归档，学习版本保留证据并停止新引用。全局可执行资源删除不向助手或业务Skill开放。' },
   { id: 'workflow-property-inspector', status: 'ui-only', tools: [], note: '属性面板随当前视图的有效节点或连线选择打开，取消选择后自动关闭；未应用的节点属性草稿保留。此为本地界面选择状态，不提供助手操作工具。' },
   { id: 'workflow-canvas-view', status: 'ui-only', tools: [], note: '画布平移、缩放及窗口尺寸变化只更新临时视角，不触发工作流保存；保存使用适应画布的视角，重新打开时按当前可见区域适应画布。节点坐标、连线和属性编辑仍正常保存。视角为本地界面状态，不提供助手写工具。' },
   { id: 'workflow-autosave', status: 'ui-only', tools: [], note: '工作流编辑默认每10分钟保存有改动的内容；设置页可调整为1–1440分钟或关闭。编辑器Ctrl+S/⌘S及保存按钮立即保存；切页和关闭仅保留本地恢复草稿。对话及运行记录即时持久化，导出等明确操作仍保存所需快照。助手可读取当前偏好，没有偏好写工具。' },
@@ -192,6 +195,15 @@ export class ApplicationCapabilities {
     if (section === 'settings') { const settings = await this.app.settings(); return { section, preferences: settings.preferences, approvalMode: settings.approvalMode }; }
     if (section === 'models') return { section, ...(await this.app.modelOptions()) };
     if (section === 'integrations') return { section, ...(await this.app.skillIntegrations.inspect()) };
+    if (section === 'skills') {
+      const catalog = await this.app.skills({ view: 'management' }), skills = catalog.skills || [];
+      return { section, connected: catalog.connected === true, total: skills.length, truncated: skills.length > 100,
+        ...(catalog.error ? { error: '技能来源目录暂不可用。' } : {}),
+        skills: skills.slice(0, 100).map(skill => ({ name: skill.name, ...(skill.displayName ? { displayName: skill.displayName } : {}),
+          description: typeof skill.description === 'string' ? skill.description.slice(0, 512) : '', origin: skillOrigin(skill.origin),
+          enabled: skill.enabled !== false, assignable: skill.assignable === true, usage: skill.usage === 'assistant' ? 'assistant' : 'workflow',
+          ...(typeof skill.revision === 'string' ? { revision: skill.revision } : {}) })) };
+    }
     if (section === 'schedules') return { section, schedules: this.app.schedules.list(workflowId).slice(0, 100).map(row =>
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };

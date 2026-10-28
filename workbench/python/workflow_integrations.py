@@ -14,6 +14,8 @@ import re
 import stat
 import uuid
 
+from skill_provenance import SkillProvenance, read_skill_bundle
+
 LABELS = {'image_gen': '图片生成', 'browser': '浏览器', 'computer_use': '桌面操作'}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_IMAGES = 16
@@ -41,6 +43,32 @@ def _real_parents(path, root):
         if stat.S_ISLNK(info.st_mode):
             raise ValueError('Image paths cannot contain symlinks.')
     return current
+
+
+def _check_native_provenance_files(root):
+    # Native readers deliberately fall back to empty sets on I/O/parse errors.
+    # A deletion gate must distinguish that fallback from absent metadata.
+    for relative in ('.bundled_manifest', '.curator_suppressed', '.hub/lock.json'):
+        path = root / relative
+        if '/' in relative and path.parent.is_symlink():
+            raise ValueError('Native Skill provenance metadata is unsafe.')
+        if not path.exists() and not path.is_symlink():
+            continue
+        _real_parents(path, root)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 512 * 1024:
+            raise ValueError('Native Skill provenance metadata is unsafe.')
+        with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)), 'rb') as stream:
+            opened = os.fstat(stream.fileno()); data = stream.read(512 * 1024 + 1); after = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or len(data) > 512 * 1024 or (opened.st_mtime_ns, opened.st_size) != (after.st_mtime_ns, after.st_size):
+            raise ValueError('Native Skill provenance metadata changed while reading it.')
+        text = data.decode('utf-8-sig')
+        if '\0' in text:
+            raise ValueError('Native Skill provenance metadata is invalid.')
+        if relative.endswith('.json'):
+            value = json.loads(text)
+            if not isinstance(value, dict) or not isinstance(value.get('installed', {}), dict):
+                raise ValueError('Native Skill provenance metadata is invalid.')
 
 
 def _read_image(path, root):
@@ -105,7 +133,108 @@ class WorkflowIntegrations:
         if name == 'resolve_skill_dir':
             from tools.skill_manager_tool import _resolve_skill_dir
             return _resolve_skill_dir
+        if name == 'skill_lock':
+            from tools.skill_manager_tool import _skill_mutation_lock
+            return _skill_mutation_lock
+        if name == 'skill_entries':
+            from agent.skill_commands import scan_skill_commands
+            from tools.skills_tool import _find_all_skills
+            def entries():
+                commands = list(scan_skill_commands().values())
+                result = []
+                for row in _find_all_skills():
+                    matches = [item for item in commands if item.get('name') == row.get('name')]
+                    result.append(dict(row, path=matches[0].get('skill_dir') if len(matches) == 1 else None))
+                return result
+            return entries
+        if name == 'skill_sources':
+            from tools.skill_usage import _read_bundled_names, _read_hub_installed_names, PROTECTED_BUILTIN_SKILLS
+            from agent.skill_utils import ESSENTIAL_SKILLS
+            def sources():
+                _check_native_provenance_files(Path(self._native('skills_root')()))
+                return {'bundled': _read_bundled_names(), 'hub': _read_hub_installed_names(),
+                        'protected': set(PROTECTED_BUILTIN_SKILLS) | set(ESSENTIAL_SKILLS)}
+            return sources
+        if name == 'workbench_skills_root':
+            return lambda: Path(__file__).resolve().parents[1] / 'skills'
         raise ValueError('Unsupported native integration interface.')
+
+    def _skill_protection(self):
+        sources = self._native('skill_sources')()
+        if not isinstance(sources, dict) or any(not isinstance(sources.get(key), (set, list, tuple))
+                or any(not isinstance(value, str) for value in sources[key]) for key in ('bundled', 'hub')):
+            raise ValueError('Native Skill provenance is unavailable.')
+        protected = sources.get('protected', ())
+        if not isinstance(protected, (set, list, tuple, frozenset)) or any(not isinstance(value, str) for value in protected):
+            raise ValueError('Native Skill protected names are unavailable.')
+        templates = set()
+        root = Path(self._native('workbench_skills_root')())
+        if root.is_symlink() or not root.is_dir() or root.resolve() != root:
+            raise ValueError('Workbench Skill source directory is unavailable.')
+        for path in sorted(root.iterdir()):
+            if not path.is_dir() or path.is_symlink():
+                continue
+            if (path/'SKILL.md').is_file():
+                templates.add(read_skill_bundle(path)['bundleRevision'])
+        return {'bundled': set(sources['bundled']), 'hub': set(sources['hub']), 'templates': templates, 'protected': set(protected)}
+
+    def _builtin_origin(self, name, path, bundle, protection):
+        root = Path(self._native('skills_root')())
+        if bundle and bundle['bundleRevision'] in protection['templates']:
+            return {'kind': 'workbench-builtin', 'label': '工作台内置', 'canDelete': False}
+        # A same-named project/external Skill is not the manifest's installed
+        # package. Keep it read-only without inventing native builtin provenance.
+        if name in protection['bundled'] and path and root.resolve() == root and path.resolve() == path and root in path.parents:
+            return {'kind': 'hermes-builtin', 'label': 'Hermes 内置', 'canDelete': False}
+        return None
+
+    def _provenance(self):
+        def protected(name, path, bundle):
+            protection = self._skill_protection()
+            return bool(self._builtin_origin(name, path, bundle, protection)) or name in protection['bundled'] or name in protection['hub'] or name in protection['protected']
+        return SkillProvenance(Path(self._native('skills_root')()), builtin_guard=protected)
+
+    def skills_catalog(self):
+        protection = self._skill_protection()
+        entries = self._native('skill_entries')()
+        if not isinstance(entries, list) or len(entries) > 5000:
+            raise ValueError('Native Skill directory is unavailable.')
+        repo, result, seen = self._provenance(), [], set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError('Native Skill entry is invalid.')
+            name = entry.get('name')
+            if not isinstance(name, str) or not name or len(name) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in name) or name in seen:
+                continue
+            seen.add(name)
+            source = 'hub' if name in protection['hub'] else 'bundled' if name in protection['bundled'] else 'local'
+            description = entry.get('description') if isinstance(entry.get('description'), str) else ''
+            category = entry.get('category') if isinstance(entry.get('category'), str) and entry['category'] else 'general'
+            row = {'name': name, 'description': description[:2000], 'category': category[:120],
+                   'enabled': entry.get('enabled', True) is True, 'source': source,
+                   'origin': {'kind': 'unknown', 'label': '其他已安装', 'canDelete': False, 'reason': '此 Skill 没有本版本的生成回执。'}}
+            try:
+                path = Path(entry['path']) if isinstance(entry.get('path'), str) else None
+                bundle = read_skill_bundle(path) if path and path.is_absolute() else None
+                origin = self._builtin_origin(name, path, bundle, protection)
+                if origin:
+                    row['origin'] = origin
+                elif bundle:
+                    owned = repo.inspect_owned(name, path, bundle)
+                    if owned:
+                        row.update(owned)
+                if bundle:
+                    row['revision'], row['bundleRevision'] = bundle['revision'], bundle['bundleRevision']
+            except (OSError, ValueError, TypeError):
+                row['origin'] = {'kind': 'unknown', 'label': '其他已安装', 'canDelete': False, 'reason': '当前包身份或来源无法安全确认。'}
+            result.append(row)
+        return {'skills': sorted(result, key=lambda row: row['name'])}
+
+    def delete_skill(self, params):
+        if not isinstance(params, dict) or not isinstance(params.get('name'), str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', params['name']):
+            raise ValueError('A generated Skill name is required.')
+        with self._native('skill_lock')(params['name']):
+            return self._provenance().delete(params)
 
     def catalog(self):
         try:
@@ -220,9 +349,18 @@ class WorkflowIntegrations:
         return artifact
 
     def create_skill(self, params):
+        if not isinstance(params, dict) or not isinstance(params.get('name'), str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', params['name']):
+            raise ValueError('A new lowercase Skill slug is required.')
+        with self._native('skill_lock')(params['name']):
+            return self._create_skill_locked(params)
+
+    def _create_skill_locked(self, params):
         if not isinstance(params, dict) or set(params) - {'name', 'description', 'instructions', 'required_toolsets', 'operation_id'}:
             raise ValueError('Unexpected Skill creation parameters.')
         name, description, instructions = (params.get(key) for key in ('name', 'description', 'instructions'))
+        operation_id = params.get('operation_id')
+        if not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', operation_id):
+            raise ValueError('A Skill creation operation identity is required.')
         if not isinstance(name, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', name):
             raise ValueError('A new lowercase Skill slug is required.')
         if not isinstance(description, str) or not description.strip() or len(description.encode('utf-8')) > 2048 or '\0' in description:
@@ -236,6 +374,9 @@ class WorkflowIntegrations:
         target = Path(self._native('resolve_skill_dir')(name, None))
         if root.resolve() != root or target != root/name or target.exists() or target.is_symlink():
             raise ValueError('Skill target exists or is outside the native Skill root.')
+        protection = self._skill_protection()
+        if name in protection['bundled'] or name in protection['hub'] or name in protection['protected']:
+            raise ValueError('A protected installed Skill name cannot become a generated Skill.')
         content = ('---\nname: ' + json.dumps(name) + '\ndescription: ' + json.dumps(description.strip(), ensure_ascii=False)
                    + '\nrequired-toolsets: ' + json.dumps(required) + '\n---\n\n' + instructions.strip() + '\n')
         result = self._native('create_skill')(name=name, content=content, category=None)
@@ -251,8 +392,9 @@ class WorkflowIntegrations:
             data = stream.read(256 * 1024 + 1)
         if data != content.encode('utf-8'):
             raise ValueError('Created Skill content did not match the submitted instructions.')
+        ownership = self._provenance().record_create(name, operation_id)
         return {'created': True, 'skill': {'name': name, 'description': description.strip(), 'content': content,
-                'revision': 'sha256:' + hashlib.sha256(data).hexdigest(), 'requiredToolsets': required}}
+                'revision': 'sha256:' + hashlib.sha256(data).hexdigest(), 'requiredToolsets': required, **ownership}}
 
     def image_provider(self, params):
         if not isinstance(params, dict) or set(params) - {'provider', 'expected_provider'} or ('expected_provider' in params and 'provider' not in params):

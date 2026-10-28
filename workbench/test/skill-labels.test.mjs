@@ -82,5 +82,5 @@ test('Application lists and resolves base and published learned Skills with labe
   await save('malformed labels');
   assert.equal((await app.skill(learned.ref)).content, learned.content);
   assert.equal(Object.hasOwn(await app.skill(learned.ref), 'displayName'), false);
-  assert.ok(requests.every(([method]) => ['skills.manage', 'commands.catalog', 'learning.detail'].includes(method)));
+  assert.ok(requests.every(([method]) => ['workbench.skills.catalog', 'skills.manage', 'commands.catalog', 'learning.detail'].includes(method)));
 });
