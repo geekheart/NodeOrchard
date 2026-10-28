@@ -60,7 +60,7 @@ class SSECounterTests(unittest.TestCase):
 
 
 @contextmanager
-def synthetic_server(payload=None, encoding=None):
+def synthetic_server(payload=None, encoding=None, content_type='text/event-stream'):
     payload = payload if payload is not None else (b'event: response.created\r\ndata: PRIVATE_BODY\r\n\r\n'
                b'event: response.reasoning_text.delta\ndata: PRIVATE_THINKING\n\n'
                b'event: PRIVATE_EVENT\ndata: PRIVATE_SECRET\n\n'
@@ -71,7 +71,7 @@ def synthetic_server(payload=None, encoding=None):
         def do_POST(self):
             self.rfile.read(int(self.headers.get('content-length', '0')))
             self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
+            if content_type is not None: self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(wire_payload)))
             if encoding: self.send_header('Content-Encoding', encoding)
             self.send_header('x-request-id', 'synthetic-request-123')
@@ -420,6 +420,66 @@ class HttpTraceTests(unittest.TestCase):
         self.assertIsNone(events[-1]['sse']['unavailableReason'])
         self.assertEqual(events[-1]['status'], 'complete')
         self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_installed_sdk_consumes_missing_mime_sse_and_observer_detects_only_framing(self):
+        try:
+            from openai import OpenAI
+        except ImportError:
+            self.skipTest('existing Hermes OpenAI SDK dependency is required')
+        payload = (b'event: response.reasoning_text.delta\ndata: {"type":"response.reasoning_text.delta","delta":"PRIVATE_THINK"}\n\n'
+                   b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"PRIVATE_RESULT"}\n\n'
+                   b'data: [DONE]\n\n')
+        events = []; tracer = self.tracer(events)
+        with synthetic_server(payload, content_type=None) as (url, _), httpx.Client(trust_env=False, timeout=3) as transport:
+            with OpenAI(api_key='synthetic-not-a-real-key', base_url=url.rsplit('/responses', 1)[0] + '/',
+                        http_client=transport, max_retries=0) as sdk:
+                tracer.attach_agent(SimpleNamespace(client=sdk))
+                with tracer.turn():
+                    result = list(sdk.responses.create(model='synthetic-model', input='PRIVATE_PROMPT', stream=True))
+                self.assertEqual([event.delta for event in result], ['PRIVATE_THINK', 'PRIVATE_RESULT'])
+        final = events[-1]
+        self.assertEqual(final['http']['responseFormat'], 'unknown')
+        self.assertEqual(final['http']['contentEncoding'], 'identity')
+        self.assertEqual(final['observability']['sse'], 'observed')
+        self.assertEqual(final['sse']['events'], {'response.reasoning_text.delta': 1, 'response.output_text.delta': 1, 'message': 1})
+        self.assertIsNone(final['sse']['unavailableReason'])
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_missing_mime_non_sse_bytes_remain_unknown_and_declared_json_is_not_probed(self):
+        for headers, expected in [({}, b'{"PRIVATE_BODY":"PRIVATE_VALUE"}'),
+                                  ({'Content-Type': 'application/json'}, b'event: response.created\ndata: PRIVATE\n\n')]:
+            with self.subTest(declared_json=bool(headers)):
+                events = []; tracer = self.tracer(events)
+                with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+                        200, headers=headers, stream=httpx.ByteStream(expected)))) as client:
+                    tracer.attach_http_client(client)
+                    with tracer.turn(): self.assertEqual(client.post('https://private.invalid/v1/responses').content, expected)
+                final = events[-1]
+                self.assertEqual(final['observability']['sse'], 'unavailable')
+                self.assertEqual(final['sse']['events'], {})
+                self.assertEqual(final['sse']['unavailableReason'], 'not-event-stream' if headers else 'unknown')
+                self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_missing_mime_probe_recognizes_only_decoder_flush_tail_and_keeps_quota(self):
+        for limit in (128, 1):
+            with self.subTest(limit=limit):
+                events = []; tracer = self.tracer(events)
+                first, tail = b':keepalive\n\n', b'event: response.completed\ndata: PRIVATE\n\n'
+                def handler(request):
+                    response = httpx.Response(200, stream=httpx.ByteStream(b'PRIVATE_RAW'))
+                    response._get_content_decoder = lambda: SimpleNamespace(decode=lambda chunk: first, flush=lambda: tail)
+                    return response
+                with patch.object(trace_module, 'MAX_SSE_OBSERVED_BYTES', limit), httpx.Client(transport=httpx.MockTransport(handler)) as client:
+                    tracer.attach_http_client(client)
+                    with tracer.turn(): self.assertEqual(client.post('https://private.invalid/v1/responses').content, first + tail)
+                final = events[-1]
+                self.assertTrue(final['bodyComplete'])
+                self.assertEqual(final['http']['responseFormat'], 'unknown')
+                self.assertEqual(final['observability']['sse'], 'observed' if limit == 128 else 'unavailable')
+                self.assertEqual(final['sse']['events'], {'response.completed': 1} if limit == 128 else {})
+                self.assertEqual(final['sse']['unavailableReason'], None if limit == 128 else 'observation-limit')
+                self.assertEqual(sum(event['status'] == 'complete' for event in events), 1)
+                self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_unrecognized_private_sdk_protocol_is_explicitly_unavailable_without_recording_path(self):
         events = []; tracer = self.tracer(events)

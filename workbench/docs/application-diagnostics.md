@@ -88,7 +88,7 @@
 
 `assistant.experiment` 必须指定已登记历史turnId与callIndex；先核对目标归属、已确认模型／提供商／推理配置和字符规模，仅发送固定合成内容。超过人工输入额度、历史规模过小或配置未知则明确不可用，不缩小样本或读原始提示词。新会话准备后再次核对实际推理配置，不一致时不提交模型请求。它没有业务工具，不生成或运行工作流；真实模型用量仍会发生，输出长度只靠固定短JSON指令软约束，不能声称有Token／费用硬上限。比较结果只检验路由与字符规模，不能替代原任务语义和真实Token分布，不能证明历史唯一根因。实验默认无本地时间截止，可手动停止；权限改变立即结束，已有准入不会自动续发。
 
-请求格式枚举仅表示头部声明的MIME与编码，不检查或保留正文，不能保证上游未错标。SSE不可观测原因分别标为not-event-stream、decoded-stream-unobserved、observation-limit、parser-error或unknown；旧记录没有这些字段保持unknown／null。源码只读提供有界literal搜索 `app.source.search`，用于先定位符号行号再分页读取，避免反复列目录耗尽诊断额度。
+请求格式枚举仅表示头部声明的MIME与编码，不能保证上游未错标。缺少MIME时，在同一观察额度内检查解码流的SSE帧边界，遇到完整事件帧才启用计数；格式枚举仍为unknown，不保存data内容。明确声明JSON／其它格式时不探测。SSE不可观测原因分别标为not-event-stream、decoded-stream-unobserved、observation-limit、parser-error或unknown；旧记录没有这些字段保持unknown／null。源码只读提供有界literal搜索 `app.source.search`，用于先定位符号行号再分页读取，避免反复列目录耗尽诊断额度。
 
 ## 截图与录制
 

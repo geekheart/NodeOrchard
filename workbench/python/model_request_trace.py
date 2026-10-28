@@ -66,6 +66,7 @@ class SSECounter:
     """Parse framing only. data: bytes are discarded without buffering payloads."""
     def __init__(self):
         self.events, self.other = {}, 0
+        self.framed = False
         self.truncated = False
         self._prefix, self._event_value = bytearray(), bytearray()
         self._mode, self._event, self._data, self._line_seen = 'prefix', None, False, False
@@ -105,6 +106,7 @@ class SSECounter:
     def _end_line(self):
         if not self._line_seen:
             if self._data:
+                self.framed = True
                 event = self._event or 'message'
                 if event in SSE_TYPES:
                     count = self.events.get(event, 0)
@@ -138,7 +140,7 @@ class _Request:
         self.http = {'status': None, 'requestId': None, 'requestIdHeader': None, 'retryAfterSeconds': None,
                      'responseFormat': 'unknown', 'contentEncoding': None}
         self.error = {'source': None, 'type': None}
-        self.counter, self.sse, self.phases = SSECounter(), False, {}
+        self.counter, self.sse, self.sse_probe, self.phases = SSECounter(), False, False, {}
         self.sse_unavailable_reason = 'unknown'
         self.decoded_started, self.decoded_active, self.final_pending = False, False, False
         self.sse_bytes, self.sse_exhausted = 0, False
@@ -191,6 +193,7 @@ class _Request:
             encoding = response.headers.get('content-encoding', '').strip().lower() or 'identity'
             self.http['contentEncoding'] = encoding if encoding in {'identity', 'gzip', 'deflate', 'br', 'zstd'} else 'other'
             self.sse = self.http['responseFormat'] == 'event-stream'
+            self.sse_probe = self.http['responseFormat'] == 'unknown'
             self.sse_unavailable_reason = ('decoded-stream-unobserved' if self.sse else
                                           'unknown' if self.http['responseFormat'] == 'unknown' else 'not-event-stream')
             if status is not None and status >= 400: self.error = {'source': 'http', 'type': 'HTTPStatusError'}
@@ -218,7 +221,7 @@ class _Request:
 
     def decoded_body(self, chunk):
         with self.lock:
-            if not self.sse or self.sse_exhausted or self.done and not self.final_pending or not chunk: return
+            if not (self.sse or self.sse_probe) or self.sse_exhausted or self.done and not self.final_pending or not chunk: return
             first = self.sse_bytes == 0
             if len(chunk) > MAX_SSE_OBSERVED_BYTES - self.sse_bytes:
                 # Do not scan, copy, buffer or decompress an oversized chunk.
@@ -228,7 +231,14 @@ class _Request:
             else:
                 self.sse_bytes += len(chunk)
                 self.counter.feed(chunk)
-                publish = first or time.monotonic() - self.last_emit >= 5
+                detected = self.sse_probe and self.counter.framed
+                if detected:
+                    # Some real Responses endpoints omit Content-Type. Observe
+                    # complete SSE framing, never infer it from status/EOF/body
+                    # content, and keep the missing header classification unknown.
+                    self.sse, self.sse_probe = True, False
+                    self.observable['sse'], self.sse_unavailable_reason = 'observed', None
+                publish = first or detected or time.monotonic() - self.last_emit >= 5
             publish = publish and not self.final_pending
         if publish: self.emit()
 
@@ -265,7 +275,7 @@ class _Request:
                 self.status = 'error' if self.error['source'] == 'http' else 'complete'
             # iter_bytes flushes its existing decoder after iter_raw reaches EOF.
             # Defer that single terminal snapshot until the decoded tail is seen.
-            self.final_pending = bool(complete and self.decoded_active and self.sse)
+            self.final_pending = bool(complete and self.decoded_active and (self.sse or self.sse_probe))
             publish = not self.final_pending
         if publish: self.emit(final=True)
 
