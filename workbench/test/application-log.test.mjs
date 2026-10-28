@@ -12,6 +12,15 @@ function fixture(t, options = {}) {
 }
 const rows = db => db.prepare('SELECT * FROM application_logs ORDER BY id').all();
 
+test('source repair logs retain repair correlation and counts without source bodies', t => {
+  const { logger } = fixture(t);
+  logger.info('source.repair.patch', { component: 'source-repair', repairId: 'repair-one', operationId: 'operation-one', fileCount: 2,
+    status: 'applied', code: 'SOURCE_PATCH_APPLIED', content: 'PRIVATE_SOURCE_BODY', before: 'PRIVATE_BACKUP_BODY' });
+  const entries = logger.read({ repairId: 'repair-one' }).entries;
+  assert.equal(entries.length, 1); assert.equal(entries[0].context.repairId, 'repair-one'); assert.equal(entries[0].context.fileCount, 2);
+  assert.equal(JSON.stringify(entries).includes('PRIVATE_'), false);
+});
+
 test('the five levels have a stable threshold and preserve only admitted metadata', t => {
   const { logger } = fixture(t);
   assert.deepEqual(APPLICATION_LOG_LEVELS, ['debug', 'info', 'warn', 'error', 'fatal']);

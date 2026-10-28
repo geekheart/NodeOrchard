@@ -12,6 +12,7 @@ import { HermesModelUI } from './hermes-model-ui.js';
 import { createAppDiagnosticClient } from './app-diagnostic-client.js';
 import { ApplicationConversationUI } from './application-conversation-ui.js';
 import { AssistantPermissionsUI } from './assistant-permissions-ui.js';
+import { SourceRepairUI } from './source-repair-ui.js';
 import { ConversationHubUI } from './conversation-hub-ui.js';
 import { WorkflowPackageUI } from './workflow-package-ui.js';
 import { WorkflowExamplesUI } from './workflow-examples-ui.js';
@@ -115,6 +116,7 @@ const hermesModels = new HermesModelUI({
   changed: (_data, { applied = false } = {}) => { renderNewTaskState(); if (state.route?.page === 'settings') renderSettings(); if (applied) void Promise.allSettled([synchronize(), loadSettings()]); },
 });
 const assistantPermissions = new AssistantPermissionsUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
+const sourceRepairs = new SourceRepairUI({ api, context: () => ({ csrfToken: state.csrfToken }), readOnly: diagnosticCapture });
 const shortcutSettings = new ShortcutSettingsUI({ api, readOnly: diagnosticCapture,
   onSaved: settings => { state.settingsRevision++; state.settings = settings; applyPreferences(preferences()); if (state.route?.page === 'settings') renderSettings(); },
 }).mount($('shortcut-settings-root'));
@@ -590,7 +592,7 @@ async function loadRouteData() {
   else if (route.page === 'task') await Promise.allSettled([loadHistory(state.selectedId), loadRuns(state.selectedId)]);
   else if (route.page === 'skills') { await loadSkills(); await loadSkillDetail(route.name); }
   else if (route.page === 'statistics') await loadStatistics();
-  else if (route.page === 'settings') await Promise.allSettled([loadSettings(), assistantPermissions.refresh()]);
+  else if (route.page === 'settings') await Promise.allSettled([loadSettings(), assistantPermissions.refresh(), sourceRepairs.refresh()]);
 }
 async function synchronize() {
   if (state.refreshing) return false; state.refreshing = true; renderBackend();
@@ -680,7 +682,7 @@ $('sidebar-connect').addEventListener('click', () => state.backend.state === 're
 $('notice-close').addEventListener('click', () => notify(''));
 $('connect-button').addEventListener('click', connectBackend);
 $('new-task-connect').addEventListener('click', connectBackend);
-$('refresh-button').addEventListener('click', async () => { const ok = await synchronize(); await Promise.allSettled([loadSettings(), assistantPermissions.refresh(), hermesModels.refresh({ preserveSelection: true })]); if (ok && !state.source) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; openEvents(); } });
+$('refresh-button').addEventListener('click', async () => { const ok = await synchronize(); await Promise.allSettled([loadSettings(), assistantPermissions.refresh(), sourceRepairs.refresh(), hermesModels.refresh({ preserveSelection: true })]); if (ok && !state.source) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; openEvents(); } });
 $('details-button').addEventListener('click', () => setTaskQuery({ panel: state.route.panel ? '' : 'execution' }));
 $('close-inspector').addEventListener('click', () => setTaskQuery({ panel: '' }));
 for (const tab of $('inspector-tabs').querySelectorAll('button')) tab.addEventListener('click', () => setTaskQuery({ panel: tab.dataset.inspector }));

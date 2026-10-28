@@ -6,6 +6,7 @@ import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-hub.mjs';
 import { ASSISTANT_MODEL_TOOLS } from './assistant-model-tools.mjs';
+import { APPLICATION_SOURCE_TOOLS } from './application-source-tools.mjs';
 import { resolveAssistantAttachments } from './assistant-attachments.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
@@ -82,7 +83,8 @@ const FEATURES = [
     note: '聊天支持用户粘贴、拖放与选择图片/文件，素材在所属工作流目录保存且可配置为输入。AI可读获准素材的路径及有界文本，本轮选中图片通过原生图像输入分析；不自动执行素材。' },
   { id: 'node-presets', status: 'ui-only', inspect: 'workbench.inspect', note: '节点派生以基础节点或固定派生版本为父级；node-derivations读取目录，兼容node-presets。创建及发布使用界面，已有实例和未知历史来源保留。' },
   { id: 'learning', status: 'proposal-only', requiresUserConfirmation: true, tools: [], note: '学习改进支持指定Skill、指定工具或整个流程；聊天可准备配置，界面明确启动。工具和流程候选调整业务代码或内部图，固定输入输出、评价和审核边界；最佳版本审阅后应用，训练和验证材料不开放给诊断助手。' },
-  { id: 'application-source-editing', status: 'unavailable', tools: [], note: '没有任意终端、源码补丁或任意文件读写工具。' },
+  { id: 'application-source-editing', status: 'unavailable', experimental: true, defaultEnabled: false, requiredPermission: 'supervisor.sourceRepair', tools: [],
+    note: '人工开启后仅总控可用受控源码读取、版本补丁、隔离相关测试、记录和冲突回滚。权限控制、凭据与用户工作流数据保持保护，没有任意shell或权限设置写工具。' },
 ];
 
 function argsObject(args, allowed) {
@@ -95,22 +97,33 @@ function argsObject(args, allowed) {
 
 export class ApplicationCapabilities {
   constructor(app, { skills = new ApplicationAssistantSkills(app.config?.appRoot) } = {}) { this.app = app; this.skills = skills; }
-  tools() {
+  sourceRepairEnabled(scope) {
+    if (scope) return scope.role === 'supervisor' && !scope.readOnly && scope.permissions?.sourceRepair === true;
+    return this.app.assistantPermissionSettings?.get?.()?.supervisor?.sourceRepair === true;
+  }
+  features(scope) {
+    return structuredClone(FEATURES).map(feature => feature.id === 'application-source-editing' && this.sourceRepairEnabled(scope)
+      ? { ...feature, status: 'available', tools: APPLICATION_SOURCE_TOOLS.map(tool => tool.name) } : feature.id === 'application-source-editing'
+        ? { id: feature.id, status: 'unavailable', defaultEnabled: false, tools: [] } : feature);
+  }
+  tools(scope) {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS)];
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS), ...(this.sourceRepairEnabled(scope) ? structuredClone(APPLICATION_SOURCE_TOOLS) : [])];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }
   handles(name) { return INSPECTION_NAMES.has(name); }
-  async bootstrap(userText = '', { schemaVersion = 2 } = {}) {
-    const manifest = await this.skills.list(), selected = [];
+  async bootstrap(userText = '', { schemaVersion = 2, permissionScope } = {}) {
+    const sourceRepair = this.sourceRepairEnabled(permissionScope);
+    const manifest = (await this.skills.list()).filter(skill => sourceRepair || skill.name !== 'repair-application'), selected = [];
     const names = new Set();
+    if (sourceRepair) names.add('repair-application');
     if (/(?:失败|报错|异常|超时|修复|诊断|不工作|为什么|为啥)/i.test(userText)) names.add('diagnose-workflow');
     if (/(?:python|javascript|\bjs\b|代码|脚本|工具节点)/i.test(userText)) { names.add('author-code-node'); names.add('edit-workflow'); }
     else if (/(?:搭建|修改|替换|节点|连线|流程|默认值)/i.test(userText)) names.add('edit-workflow');
     if (/(?:文件|产物|导出|excel|xlsx|验收|验证结果)/i.test(userText)) names.add('verify-result');
     for (const name of [...names].slice(0, 4)) selected.push(await this.skills.read(name));
-    return { contractVersion: 1, workbench: workflowCapabilityManifest({ schemaVersion }), features: structuredClone(FEATURES),
+    return { contractVersion: 1, workbench: workflowCapabilityManifest({ schemaVersion }), features: this.features(permissionScope).filter(feature => sourceRepair || feature.id !== 'application-source-editing'),
       skillManifest: manifest, loadedSkills: selected };
   }
   async read(name, args = {}, context = {}) {
@@ -142,7 +155,7 @@ export class ApplicationCapabilities {
     if (name === 'node.describe') return workflowNodeContract(args.type, { schemaVersion: args.schemaVersion ?? context.document?.schemaVersion ?? 2 });
     const schemaVersion = args.schemaVersion ?? context.document?.schemaVersion ?? 2, section = args.section || 'overview';
     if (section === 'skills') return { skills: await this.skills.list() };
-    if (section === 'interfaces') return { contractVersion: 1, tools: this.tools(), features: structuredClone(FEATURES),
+    if (section === 'interfaces') return { contractVersion: 1, tools: this.tools(context.permissionScope), features: this.features(context.permissionScope),
       protocol: { current: 'internal-broker', externalMcpServerAvailable: false, reuse: 'MCP适配器须复用相同schema、调度器及权限，不复制业务执行逻辑。',
         conversationIssues: { projection: 'read-only', retryLink: 'retryOfTurnId', controls: 'conversation-command-and-ui',
           resolutionLink: 'replyToTurnId', resolutionCommands: ['这个问题解决了', '不用处理了'], resolutionRouting: 'local-command',
@@ -152,7 +165,7 @@ export class ApplicationCapabilities {
           stageProgress: true, persistedCheckpoints: true, automaticReplay: false,
           defaultToolRequests: ASSISTANT_DIAGNOSTIC_LIMITS.toolRequests, defaultDurationMs: ASSISTANT_DIAGNOSTIC_LIMITS.durationMs } } };
     return { contractVersion: 1, ...workflowCapabilityManifest({ schemaVersion, section }),
-      ...(section === 'tools' ? { assistantTools: this.tools(), codeModeRequiresRegistration: false } : {}),
+      ...(section === 'tools' ? { assistantTools: this.tools(context.permissionScope), codeModeRequiresRegistration: false } : {}),
       ...(section === 'overview' ? { features: structuredClone(FEATURES), skills: await this.skills.list(), next: ['node.describe', 'runtime.inspect', 'assistant.skills.read'] } : {}) };
   }
   async inspectWorkbench({ section, workflowId, days = 7 }) {

@@ -25,7 +25,7 @@ export const APPLICATION_SUPERVISOR_TOOLS = Object.freeze([
       afterId: { type: 'integer', minimum: 0 }, minLevel: { type: 'string', enum: [...APPLICATION_LOG_LEVELS] },
       component: { type: 'string', maxLength: 64, pattern: '^[a-z][a-z0-9.-]{0,63}$' },
       workflowId: identifier, runId: identifier, nodeId: identifier, sessionId: identifier, conversationId: identifier,
-      turnId: identifier, requestId: identifier, operationId: identifier,
+      turnId: identifier, requestId: identifier, operationId: identifier, repairId: identifier,
       from: { type: 'string', format: 'date-time', maxLength: 40 }, to: { type: 'string', format: 'date-time', maxLength: 40 },
     }, additionalProperties: false }, effect: 'read-only', readOnly: true,
     availability: 'available', roles: ['supervisor'],

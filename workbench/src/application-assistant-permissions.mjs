@@ -9,13 +9,14 @@ const inside = (root, target) => { const part = relative(root, target); return !
 const DEFAULT_WORKFLOW = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true };
 export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
   workflow: Object.freeze({ ...DEFAULT_WORKFLOW }),
-  supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true }),
+  supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRepair: false }),
 });
 const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
-const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.probe']);
+const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
+const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.probe']);
 
 // Resolve even a not-yet-created path through its existing parent. A lexical
 // prefix alone admits symlinks and is insufficient for an assistant folder.
@@ -39,8 +40,9 @@ function settingsValue(value) {
   if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0) fail('助手权限配置不可用，已停止调用。', 409);
   const result = { revision: value.revision };
   for (const role of ['workflow', 'supervisor']) {
-    if (!value[role] || Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).some(key => typeof value[role][key] !== 'boolean')) fail('助手权限配置不完整，已停止调用。', 409);
-    result[role] = Object.fromEntries(Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).map(key => [key, value[role][key]]));
+    if (!value[role] || Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).some(key => typeof value[role][key] !== 'boolean'
+      && !(role === 'supervisor' && key === 'sourceRepair' && value[role][key] === undefined))) fail('助手权限配置不完整，已停止调用。', 409);
+    result[role] = Object.fromEntries(Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).map(key => [key, key === 'sourceRepair' ? value[role][key] === true : value[role][key]]));
   }
   return result;
 }
@@ -88,6 +90,7 @@ export class ApplicationAssistantPermissions {
   allowed(name, scope) {
     this.check(scope); const p = scope.permissions;
     if (!KNOWN.has(name)) return false;
+    if (SOURCE.has(name)) return scope.role === 'supervisor' && p.sourceRepair === true && !scope.readOnly;
     if (scope.readOnly && (MANAGE.has(name) || ['workflow.propose', 'conversation.delegate', 'assistant.probe'].includes(name))) return false;
     if (CONVERSATIONS.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.crossWorkflowRead
       && (name !== 'conversation.delegate' || p.manageWorkflows);

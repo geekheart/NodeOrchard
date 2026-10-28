@@ -30,6 +30,7 @@ import { WorkflowConversations } from './workflows/workflow-conversations.mjs';
 import { AppDiagnostics } from './app-diagnostics.mjs';
 import { ApplicationAssistant } from './application-assistant.mjs';
 import { AssistantPermissionSettings } from './assistant-permission-settings.mjs';
+import { ApplicationSourceRepairs } from './application-source-repairs.mjs';
 import { createAppDiagnosticBrowser } from './app-diagnostic-browser.mjs';
 
 const REASONING_EFFORTS = new Set(['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
@@ -144,6 +145,7 @@ export class Application extends EventEmitter {
     this.diagnostics = new AppDiagnostics(this);
     this.diagnosticBrowser = createAppDiagnosticBrowser({ dataDir: config.dataDir, chromePath: config.diagnosticChromePath, ffmpegPath: config.diagnosticFfmpegPath });
     this.assistantPermissionSettings = new AssistantPermissionSettings(this);
+    this.sourceRepairs = new ApplicationSourceRepairs(this);
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
     this.workflowPackages = new WorkflowPackages(this);
@@ -666,6 +668,7 @@ export class Application extends EventEmitter {
     this.historicalUsage?.close?.();
     await this.conversations.close();
     await this.applicationAssistant.close();
+    await this.sourceRepairs.close();
     await this.assistantModel.close();
     await this.diagnosticBrowser.close?.();
     await this.schedules.close();

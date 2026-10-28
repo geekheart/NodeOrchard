@@ -97,7 +97,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));
   assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS].map(row => row.name));
-  assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 4);
+  assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 5);
   assert.match((await f.capabilities.read('assistant.skills.read', { name: 'author-code-node' })).instructions, /node.describe/);
 });
 

@@ -30,6 +30,7 @@
 | `workflow.propose` | 生成经过编辑器命令校验的业务流程修改候选，在原聊天中应用 |
 | `workflow.copy` / `workflow.create-test` / `workflow.delete` | 总控在明确授权下复制、创建测试草稿或移入可恢复回收站，不自动运行 |
 | `app.logs` | 总控按权限读取持久分级软件日志；当前进程 Hermes 窗口单独标识 |
+| `app.source.list` / `app.source.read` / `app.source.patch` / `app.source.test` / `app.source.history` / `app.source.rollback` | 人工开启实验性总控源码修复后，受限读取、版本绑定修改、隔离相关测试与记录回滚，见[总控源码自修复](application-source-repair.md) |
 | `conversations.list` | 总控读取工作流独立会话的有界目录摘要，不合并历史 |
 | `conversation.inspect` | 按工作流读取有界脱敏消息和待处理元数据，不附带学习材料、节点代码配置或检查点 |
 | `conversation.delegate` | 在明确授权和目标版本下提交只读诊断，返回任务身份后按需检查进度，不运行工作流 |

@@ -97,7 +97,7 @@ test('initial context omits repeated long code and logs with explicit on-demand 
   const doc = { id: 'wf', nodes: [{ id: 'code', type: 'tool', config: { code: 'PRIVATE_LONG_CODE_'.repeat(2000) } }], edges: [] };
   f.app.diagnostics.snapshot = async () => ({ workflow: { document: doc }, run: { id: 'run', document: doc, outputText: 'LONG_OUTPUT_'.repeat(3000), nodes: [{ id: 'code', error: 'FETCH_FAILED', logs: { stderr: 'LONG_LOG_'.repeat(3000) } }] } });
   await f.assistant.plan({ text: '为什么失败', document: doc });
-  assert.ok(f.prompts[0].length < 18000, f.prompts[0].length);
+  assert.ok(f.prompts[0].length < 18000, `prompt characters: ${f.prompts[0].length}`);
   assert.equal(f.prompts[0].includes('PRIVATE_LONG_CODE_'), false);
   assert.match(f.prompts[0], /FETCH_FAILED/); assert.match(f.prompts[0], /按需|省略/);
 });

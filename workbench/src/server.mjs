@@ -135,6 +135,18 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.method === 'POST' && path === '/api/settings') return json(res, 200, await application.saveSettings(await readJson(req)));
       if (req.method === 'GET' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.get());
       if (req.method === 'PUT' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.save(await readJson(req, 4096)));
+      if (path === '/api/source-repairs') {
+        if (requestURL.search) return json(res, 400, { error: '源码修复记录不接受任意查询参数。' });
+        if (req.method === 'GET') return json(res, 200, await application.sourceRepairs.history({ limit: 20 }));
+      }
+      const sourceRollback = path.match(/^\/api\/source-repairs\/([A-Za-z0-9_-]+)\/rollback$/);
+      if (req.method === 'POST' && sourceRollback) {
+        if (requestURL.search) return json(res, 400, { error: '回滚请求不接受查询参数。' });
+        const input = await readJson(req, 4096);
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'operationId')
+          || typeof input.operationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.operationId)) return json(res, 400, { error: '源码回滚身份无效。' });
+        return json(res, 200, await application.sourceRepairs.rollback({ ...input, repairId: sourceRollback[1] }, { human: true, role: 'human', authorize: async () => {} }));
+      }
       if (req.method === 'GET' && path === '/api/models') return json(res, 200, await application.modelOptions());
       if (req.method === 'POST' && path === '/api/models') return json(res, 200, await application.selectModel(await readJson(req, 4096)));
       if (req.method === 'GET' && path === '/api/statistics') {
@@ -418,6 +430,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
+        '/source-repair-ui.js': ['source-repair-ui.js', 'text/javascript'],
         '/shortcut-settings-ui.js': ['shortcut-settings-ui.js', 'text/javascript'],
         '/keyboard-shortcuts.js': ['keyboard-shortcuts.js', 'text/javascript'],
         '/conversation-hub-ui.js': ['conversation-hub-ui.js', 'text/javascript'],

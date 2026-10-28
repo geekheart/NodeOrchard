@@ -82,7 +82,7 @@ test('capability GET exposes real nodes, interfaces and internal Skill metadata 
   const names = interfaces.body.tools.map(tool => tool.name);
   for (const name of ['node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workflow.propose', 'workflow.run']) assert(names.includes(name));
   for (const name of ['workflow.start', 'workflow.retry', 'replace-node', 'terminal', 'source.patch']) assert.equal(names.includes(name), false);
-  const skills = await f.request('/api/app-capabilities?section=skills'); assert.equal(skills.body.skills.length, 4);
+  const skills = await f.request('/api/app-capabilities?section=skills'); assert.equal(skills.body.skills.length, 5);
   assert(skills.body.skills.every(skill => /^sha256:[a-f0-9]{64}$/.test(skill.revision) && !Object.hasOwn(skill, 'instructions')));
   for (const query of ['section=source', 'section=nodes&section=skills', 'schemaVersion=3', 'path=../skills']) assert.equal((await f.request('/api/app-capabilities?' + query)).status, 400);
   assert.equal((await f.request('/api/app-capabilities', undefined, { Origin: 'http://untrusted.invalid' })).status, 403);

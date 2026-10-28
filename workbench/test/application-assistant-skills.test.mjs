@@ -20,7 +20,7 @@ async function fixture(t) {
 
 test('bundled internal Skills are discoverable without leaking instructions into the catalog', async () => {
   const skills = new ApplicationAssistantSkills(), catalog = await skills.list();
-  assert.deepEqual(catalog.map(skill => skill.name), ['diagnose-workflow', 'edit-workflow', 'author-code-node', 'verify-result']);
+  assert.deepEqual(catalog.map(skill => skill.name), ['diagnose-workflow', 'edit-workflow', 'author-code-node', 'verify-result', 'repair-application']);
   assert(catalog.every(skill => skill.description && /^sha256:[a-f0-9]{64}$/.test(skill.revision)));
   assert(catalog.every(skill => !Object.hasOwn(skill, 'instructions') && !Object.hasOwn(skill, 'path')));
   for (const metadata of catalog) {

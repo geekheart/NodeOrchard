@@ -2,10 +2,10 @@ import { resolve } from 'node:path';
 
 export const ASSISTANT_PERMISSION_KEYS = Object.freeze({
   workflow: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture']),
-  supervisor: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture', 'crossWorkflowRead', 'manageWorkflows', 'appLogs']),
+  supervisor: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture', 'crossWorkflowRead', 'manageWorkflows', 'appLogs', 'sourceRepair']),
 });
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
-const defaults = () => Object.fromEntries(Object.entries(ASSISTANT_PERMISSION_KEYS).map(([role, keys]) => [role, Object.fromEntries(keys.map(key => [key, true]))]));
+const defaults = () => Object.fromEntries(Object.entries(ASSISTANT_PERMISSION_KEYS).map(([role, keys]) => [role, Object.fromEntries(keys.map(key => [key, key !== 'sourceRepair']))]));
 
 // This store is deliberately absent from the assistant tool dispatcher. Only
 // the authenticated settings form's HTTP handler can call save().
@@ -17,9 +17,15 @@ export class AssistantPermissionSettings {
   }
   get() {
     const row = this.db.prepare('SELECT revision,value FROM assistant_permission_settings WHERE id=1').get();
-    return { revision: row.revision, ...JSON.parse(row.value), protection: 'human-only',
+    const value = JSON.parse(row.value);
+    // Older human settings stay byte-for-byte intact until an explicit save.
+    // A missing experimental permission is a read-only disabled projection.
+    if (value.supervisor && typeof value.supervisor === 'object' && !Array.isArray(value.supervisor) && !Object.hasOwn(value.supervisor, 'sourceRepair')) {
+      value.supervisor = { ...value.supervisor, sourceRepair: false };
+    }
+    return { revision: row.revision, ...value, protection: 'human-only',
       workspaceRoot: resolve(this.app.config.workspaceRoot, this.app.preferences?.defaultWorkspace || '.'),
-      immutable: { applicationSourceWrite: false, shell: false, permissionWrite: false, workflowCrossScope: false } };
+      immutable: { unrestrictedSourceWrite: false, shell: false, permissionWrite: false, workflowCrossScope: false } };
   }
   save(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)

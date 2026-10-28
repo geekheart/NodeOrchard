@@ -10,6 +10,7 @@ export const APPLICATION_ASSISTANT_SKILL_MANIFEST = Object.freeze([
   { name: 'edit-workflow', description: '搭建、配置或替换本应用工作流节点与连线，提出可应用的最小修改。' },
   { name: 'author-code-node', description: '编写或修改本应用的 Python 与 JavaScript 代码节点，处理数据或生成文件。' },
   { name: 'verify-result', description: '核验本应用运行状态、真实交付文件及修复验证结果。' },
+  { name: 'repair-application', description: '人工开启总控源码自修复后，定位并修改允许的应用源码，运行隔离相关测试，核对修复记录或按版本回滚。' },
 ].map(value => Object.freeze(value)));
 const manifest = new Map(APPLICATION_ASSISTANT_SKILL_MANIFEST.map(value => [value.name, value]));
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };

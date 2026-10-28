@@ -11,6 +11,7 @@ const GROUPS = [
     ['crossWorkflowRead', '跨工作流读取', '任意工作流的状态与日志'],
     ['manageWorkflows', '管理工作流', '复制、测试草稿、回收站、只读诊断委派'],
     ['appLogs', '读取软件日志', '脱敏诊断日志'],
+    ['sourceRepair', '源码自修复（实验性）', '修改工作台源码并运行隔离相关测试，保留修复记录和回滚入口；不修改或运行用户工作流'],
   ]],
 ];
 const clone = value => JSON.parse(JSON.stringify(value));

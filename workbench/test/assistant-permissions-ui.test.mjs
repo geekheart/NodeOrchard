@@ -11,7 +11,7 @@ class Element {
 }
 function config(revision = 1) {
   const workflow = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true };
-  return { revision, workflow, supervisor: { ...workflow, crossWorkflowRead: true, manageWorkflows: true, appLogs: true } };
+  return { revision, workflow, supervisor: { ...workflow, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRepair: false } };
 }
 function fixture(t, api, { readOnly = false } = {}) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document'), nodes = new Map();
@@ -25,8 +25,25 @@ test('permissions remain disabled until a complete versioned configuration is re
   const calls = [], { ui } = fixture(t, async (path, options) => { calls.push({ path, options }); return config(); });
   assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs.values()].every(input => input.disabled));
   await ui.refresh(); assert.deepEqual(calls, [{ path: '/api/assistant-permissions', options: undefined }]);
-  assert.equal(ui.inputs.size, 13); assert.equal(ui.inputs.has('workflow.manageWorkflows'), false);
-  assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs.values()].every(input => input.checked && !input.disabled));
+  assert.equal(ui.inputs.size, 14); assert.equal(ui.inputs.has('workflow.manageWorkflows'), false); assert.equal(ui.inputs.has('workflow.sourceRepair'), false);
+  assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs].every(([key, input]) => input.checked === (key !== 'supervisor.sourceRepair') && !input.disabled));
+});
+
+test('experimental source repair is unchecked until a person explicitly selects it and saves the complete permission payload', async t => {
+  const calls = [], { ui } = fixture(t, async (path, options) => {
+    calls.push({ path, options }); return options ? { revision: 2, workflow: options.body.workflow, supervisor: options.body.supervisor } : config();
+  });
+  await ui.refresh(); const control = ui.inputs.get('supervisor.sourceRepair'); assert.ok(control); assert.equal(control.checked, false);
+  assert.equal(control.attributes['aria-label'], '总控助手：源码自修复（实验性）'); assert.equal(ui.inputs.has('workflow.sourceRepair'), false);
+  control.change(true); assert.equal(ui.draft.supervisor.sourceRepair, true); assert.equal(calls.length, 1);
+  await ui.save(); assert.equal(calls[1].options.body.supervisor.sourceRepair, true); assert.equal(calls[1].options.body.expectedRevision, 1);
+  assert.deepEqual(calls[1].options.body.workflow, config().workflow); assert.equal(ui.data.supervisor.sourceRepair, true);
+});
+
+test('a legacy UI response without an explicit source repair flag fails closed', async t => {
+  const legacy = config(); delete legacy.supervisor.sourceRepair;
+  const { ui } = fixture(t, async () => legacy); await ui.refresh();
+  assert.equal(ui.data, null); assert.equal(ui.nodes.save.disabled, true); assert.match(ui.nodes.status.textContent, /权限配置不完整/);
 });
 
 test('manual save sends only version and explicitly assigned role flags', async t => {
