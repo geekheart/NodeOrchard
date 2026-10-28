@@ -69,7 +69,7 @@ const FEATURES = [
     note: '用户明确说“这个问题解决了”或“不用处理了”，由本地会话指令结束明确关联或唯一的聊天事项；歧义时按原对话编号选择。此入口不调用模型，不改变运行或人工审核。' },
   { id: 'workflow-editing', status: 'proposal-only', channel: 'conversation-request', tools: ['node.describe', 'workflow.propose'],
     note: '固定代码或工具的审核修改通过版本绑定的revisionRequest进入同一对话；AI先分类，仅生成代码或配置候选，沿用原权限。',
-    apply: '用户在同一聊天点击应用；保存版本和草稿指纹防冲突。新增节点后自动按依赖布局，纯属性修改保持原布局；布局不启动运行。应用后需明确新建运行，旧运行与产物保持冻结。' },
+    apply: '用户在同一聊天点击应用；保存版本和草稿指纹防冲突。新增节点后自动按依赖布局，连线新增、删除或改接后也自动重排；纯属性修改和手动移动保持原布局。布局不启动运行。应用后需明确新建运行，旧运行与产物保持冻结。' },
   { id: 'business-code', status: 'proposal-only', tools: ['node.describe', 'runtime.inspect', 'workflow.propose'], note: 'Python/JavaScript代码可写入业务节点候选，不需要注册固定工具；应用草稿后明确新建运行，不改写旧运行代码。' },
   { id: 'execution', status: 'ui-only', tools: [], note: '界面运行按钮/编辑器中明确的“运行”命令使用现有执行器；后台助手没有自动start/retry工具。workflow.run只读历史。' },
   { id: 'human-review', status: 'ui-only', requiresUserConfirmation: true, tools: [],

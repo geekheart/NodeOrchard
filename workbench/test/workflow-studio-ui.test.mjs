@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocument, createNode, connectNodes } from '../shared/workflow/workflow-model.mjs';
-import { structuredInput, valuesFromInput, layoutPositions, runArtifacts, portCompatible, shortVersion, inputEntries, vacantNodePosition, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, nodeThumbnailArtifact, canRerunNode, nodeInspectionVersions, reviewTargetNodes, INPUT_FIELD_PRESETS, mergeInputFields } from '../shared/workflow/workflow-studio-utils.mjs';
+import { structuredInput, valuesFromInput, layoutPositions, needsAutoLayout, runArtifacts, portCompatible, shortVersion, inputEntries, vacantNodePosition, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, nodeThumbnailArtifact, canRerunNode, nodeInspectionVersions, reviewTargetNodes, INPUT_FIELD_PRESETS, mergeInputFields } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WorkflowStudioUI, inlineInputFields, nodePreviewArtifacts, nodeShowsCanvasPreview } from '../public/workflow-studio-ui.js';
 import { WorkflowRuntimeUI, workflowSnapshotChanged, mergeSkillSelectionDraft } from '../public/workflow-runtime-ui.js';
 import { WorkflowEditor } from '../public/workflow-editor.js';
@@ -51,6 +51,20 @@ test('saving a new workflow version copies prepared input values under remapped 
 test('dependency layout keeps independent tasks parallel and puts learning below business nodes', () => {
   const doc = { nodes: [{ id: 'input' }, { id: 'cad' }, { id: 'pinout' }, { id: 'join' }, { id: 'review', type: 'evaluation' }, { id: 'improve', type: 'improvement' }], edges: [{ sourceNode: 'input', targetNode: 'cad' }, { sourceNode: 'input', targetNode: 'pinout' }, { sourceNode: 'cad', targetNode: 'join' }, { sourceNode: 'pinout', targetNode: 'join' }, { sourceNode: 'join', targetNode: 'review' }, { sourceNode: 'review', targetNode: 'improve' }] };
   const layout = layoutPositions(doc); assert.equal(layout.get('cad').x, layout.get('pinout').x); assert.notEqual(layout.get('cad').y, layout.get('pinout').y); assert.ok(layout.get('join').x > layout.get('cad').x); assert.ok(layout.get('review').y > layout.get('pinout').y);
+});
+
+test('automatic layout detects changed connections but ignores manual positions and edge identities', () => {
+  let before = createDocument({ schemaVersion: 2 }); before.nodes = [createNode('input', {}, { id: 'input', config: { outputType: 'object' } }), createNode('tool', {}, { id: 'tool' }), createNode('output', {}, { id: 'output' })];
+  before = connectNodes(before, { sourceNode: 'input', sourcePort: 'out', targetNode: 'tool', targetPort: 'in' });
+  const added = connectNodes(before, { sourceNode: 'tool', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+  assert.equal(needsAutoLayout(before, added), true); assert.equal(needsAutoLayout(added, before), true);
+  assert.equal(needsAutoLayout(before, { ...before, edges: [{ ...before.edges[0], targetNode: 'output' }] }), true);
+  assert.equal(needsAutoLayout(before, { ...before, edges: [{ ...before.edges[0], targetPort: 'named-input' }] }), true);
+  assert.equal(needsAutoLayout(added, { ...added, edges: added.edges.map(edge => ({ ...edge, id: 'new-' + edge.id })).reverse() }), false);
+  const moved = structuredClone(before); moved.nodes[0].x = 1700; moved.nodes[1].y = 1300; moved.title = '仅改配置与位置';
+  assert.equal(needsAutoLayout(before, moved), false);
+  assert.equal(needsAutoLayout(before, { ...added, id: 'opened-workflow' }), false);
+  assert.equal(needsAutoLayout(before, { ...before, nodes: [...before.nodes, createNode('input', {}, { id: 'new-node' })] }), true);
 });
 
 test('automatic layout separates unconnected learning nodes so mouse hits cannot reach the wrong overlaid port', () => {

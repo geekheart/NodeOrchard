@@ -55,6 +55,12 @@ export function hasGeneratedNodes(before, next) {
   const ids = new Set(before.nodes.map(node => node.id));
   return before.id === next.id && next.nodes.some(node => !ids.has(node.id));
 }
+export function needsAutoLayout(before, next) {
+  if (before.id !== next.id) return false;
+  if (hasGeneratedNodes(before, next)) return true;
+  const connections = document => document.edges.map(edge => JSON.stringify([edge.sourceNode, edge.sourcePort, edge.targetNode, edge.targetPort])).sort();
+  return JSON.stringify(connections(before)) !== JSON.stringify(connections(next));
+}
 export function runArtifacts(run) {
   const items = [...(run?.artifacts || []), ...Object.values(run?.nodes || {}).flatMap(node => node.artifacts || [])], seen = new Set(), content = new Map(), result = [];
   const order = new Map((run?.nodeOrder || []).map((id, index) => [id, index]));

@@ -343,7 +343,7 @@ test('generated-node receipts allow only current-layer layout changes after exac
   assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
 });
 
-test('a non-generating proposal cannot use the layout exception to alter node positions', async t => {
+test('a title-only proposal cannot use the layout exception to alter node positions', async t => {
   const f = await fixture(t), document = graph(), operations = [{ op: 'set-title', title: '只修改标题' }];
   f.app.conversations.planner = async () => ({ text: '仅改名', operations, baseFingerprint: documentFingerprint(document) });
   const { turn } = await settledMessage(f, document.id, message(document, '修改标题', { intent: 'workflow' }));
@@ -352,6 +352,40 @@ test('a non-generating proposal cannot use the layout exception to alter node po
   await assert.rejects(f.app.conversations.action(document.id, turn.id, { ...body, document: actual }), /画布内容/);
   assert.equal((await f.app.conversations.action(document.id, turn.id, { ...body, document: expected })).turn.outcome.status, 'complete');
   assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('edge-only add, remove and reconnect receipts admit layout but retain exact business and topology validation', async t => {
+  for (const kind of ['add', 'remove', 'reconnect']) {
+    const f = await fixture(t), document = graph(), edge = document.edges.at(-1);
+    if (kind === 'add') document.edges.pop();
+    const operations = kind === 'add' ? [{ op: 'connect', sourceNode: 'trim', sourcePort: 'out', targetNode: 'output', targetPort: 'in' }]
+      : [{ op: 'remove-edge', edgeId: edge.id }, ...(kind === 'reconnect' ? [{ op: 'connect', sourceNode: 'input', sourcePort: 'out', targetNode: 'output', targetPort: 'in' }] : [])];
+    f.app.conversations.planner = async () => ({ text: '仅调整连线', operations, baseFingerprint: documentFingerprint(document) });
+    const { turn } = await settledMessage(f, document.id, message(document, '调整连线 ' + kind, { intent: 'workflow' }));
+    let generated = 0; const expected = applyWorkflowOperations(document, operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` }).document;
+    const validation = await f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint });
+    assert.equal(validation.resultFingerprint, documentFingerprint(expected)); assert.deepEqual(expected.nodes, document.nodes);
+    const actual = copy(expected); actual.nodes = actual.nodes.map((node, index) => ({ ...node, x: 64 + index * 340, y: 80 }));
+    const receipt = value => ({ action: 'mark-applied', actionId: turn.actions[0].id, planFingerprint: turn.assistant.baseFingerprint, document: value });
+    const wrongCode = copy(actual); wrongCode.nodes[1].config.toolName = 'text.uppercase';
+    await assert.rejects(f.app.conversations.action(document.id, turn.id, receipt(wrongCode)), /画布内容/);
+    const wrongEdges = copy(actual); wrongEdges.edges = copy(document.edges);
+    await assert.rejects(f.app.conversations.action(document.id, turn.id, receipt(wrongEdges)), /画布内容/);
+    const done = await f.app.conversations.action(document.id, turn.id, receipt(actual));
+    assert.equal(done.turn.outcome.status, 'complete'); assert.equal(done.turn.outcome.documentFingerprint, documentFingerprint(actual));
+    assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+  }
+});
+
+test('pure position proposals require the exact requested positions and cannot silently apply automatic layout', async t => {
+  const f = await fixture(t), document = graph(), operations = [{ op: 'update-node', nodeId: 'trim', x: 111, y: 222 }];
+  f.app.conversations.planner = async () => ({ text: '仅移动节点', operations, baseFingerprint: documentFingerprint(document) });
+  const { turn } = await settledMessage(f, document.id, message(document, '移动节点', { intent: 'workflow' }));
+  const expected = applyWorkflowOperations(document, operations).document, moved = copy(expected); moved.nodes[1].x = 64;
+  const body = { action: 'mark-applied', actionId: turn.actions[0].id, planFingerprint: turn.assistant.baseFingerprint };
+  await assert.rejects(f.app.conversations.action(document.id, turn.id, { ...body, document: moved }), /画布内容/);
+  assert.equal((await f.app.conversations.action(document.id, turn.id, { ...body, document: expected })).turn.outcome.status, 'complete');
+  assert.deepEqual(f.adapter.calls, []);
 });
 
 test('planning excludes learning runs and restart interrupts unfinished turns without replay', async t => {

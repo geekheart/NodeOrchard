@@ -49,7 +49,7 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
-// Only current-layer layout may differ after a generated-node edit.
+// Only current-layer layout may differ after an edit that rearranges the graph.
 export function sameDocumentContent(left, right) {
   const project = document => {
     const clean = validateDocument(jsonCopy(document, '工作流'));

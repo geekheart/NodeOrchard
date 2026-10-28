@@ -5,7 +5,7 @@ import { redact } from '../shared/diagnostics.mjs';
 import { planWorkflowConversation } from './workflows/workflow-conversation-planner.mjs';
 import { sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from './app-diagnostics.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
-import { hasGeneratedNodes, layoutDocument } from '../shared/workflow/workflow-studio-utils.mjs';
+import { needsAutoLayout, layoutDocument } from '../shared/workflow/workflow-studio-utils.mjs';
 import { ApplicationCapabilities } from './application-capabilities.mjs';
 import { ApplicationAssistantPermissions } from './application-assistant-permissions.mjs';
 import { ApplicationSupervisorTools } from './application-supervisor-tools.mjs';
@@ -252,7 +252,7 @@ export class ApplicationAssistant {
       const saved = this.app.workflowLibrary.get(turn.assistant.targetWorkflowId);
       if (saved.revision !== turn.assistant.expectedRevision || documentFingerprint(saved.document) !== turn.assistant.baseFingerprint) fail('工作流已变化，请重新生成修复建议。', 409);
       const applied = applyWorkflowOperations(saved.document, turn.assistant.operations);
-      const document = hasGeneratedNodes(saved.document, applied.document) ? layoutDocument(applied.document) : applied.document;
+      const document = needsAutoLayout(saved.document, applied.document) ? layoutDocument(applied.document) : applied.document;
       const permissionScope = await this.permissions.bind({ role: 'supervisor', workflowId: saved.id, document: saved.document });
       await this.permissions.admit('workflow.propose', { workflowId: saved.id }, permissionScope, { document: saved.document });
       await this.permissions.document(document, permissionScope, { baseDocument: saved.document });

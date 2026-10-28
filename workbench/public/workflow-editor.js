@@ -10,7 +10,7 @@ import { mainChainSkillNodes, mainChainToolNodes } from './workflow-learning-ui.
 import { mergeLearningCandidate } from '../shared/workflow/workflow-learning-scope.mjs';
 import { WorkflowStudioUI } from './workflow-studio-ui.js';
 import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
-import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS, layoutDocument, hasGeneratedNodes } from '../shared/workflow/workflow-studio-utils.mjs';
+import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS, layoutDocument, needsAutoLayout } from '../shared/workflow/workflow-studio-utils.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { SHORTCUT_ACTIONS, matchesShortcut, shortcutLabel } from '../shared/keyboard-shortcuts.mjs';
@@ -848,9 +848,9 @@ export class WorkflowEditor {
     let clean = validateDocument(next);
     if (new Blob([serializeDocument(clean)]).size > MAX_FILE_BYTES) throw new Error('草稿不能超过 2 MB，请减少节点内容。');
     if (JSON.stringify(clean) === JSON.stringify(before)) return;
-    const generated = autoLayout && hasGeneratedNodes(this.doc, clean);
-    if (generated) {
-      // Measure the newly rendered cards before recording one atomic edit.
+    const rearrange = autoLayout && needsAutoLayout(before, clean);
+    if (rearrange) {
+      // Measure the current cards before recording the edit and layout together.
       const current = this.doc;
       try {
         this.doc = clean; this.renderGraph(); this.measurePorts();
@@ -867,7 +867,7 @@ export class WorkflowEditor {
     }
     this.future = [];
     this.doc = clean; this.pruneSelection(); this.renderGraph(); this.renderProperties(); this.scheduleSave();
-    if (generated) {
+    if (rearrange) {
       const committed = this.doc;
       globalThis.requestAnimationFrame?.(() => { if (this.doc === committed && this.active !== false && this.documentLoaded !== false && !this.settings.canvasClosed) this.fit(); });
     }

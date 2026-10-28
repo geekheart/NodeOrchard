@@ -121,6 +121,39 @@ test('ordinary node edits and explicit document restores preserve manual positio
   assert.deepEqual(instance.doc.nodes, imported.nodes);
 });
 
+test('adding, deleting and reconnecting edges lays out the same nodes with one undoable edit', () => {
+  const base = createDocument({ schemaVersion: 2 });
+  base.nodes = [createNode('input', { x: 1700, y: 1200 }, { id: 'input', config: { outputType: 'object' } }), createNode('tool', { x: 900, y: 750 }, { id: 'tool' }), createNode('output', { x: -500, y: 90 }, { id: 'output' })];
+  const connected = connectNodes(base, { sourceNode: 'input', sourcePort: 'out', targetNode: 'tool', targetPort: 'in' });
+  const reconnected = connectNodes({ ...connected, edges: [] }, { sourceNode: 'input', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+  for (const [before, next, downstream] of [[base, connected, 'tool'], [connected, base, null], [connected, reconnected, 'output']]) {
+    const instance = editor(before); let measurements = 0, saves = 0;
+    instance.measurePorts = () => measurements++; instance.scheduleSave = () => saves++;
+    instance.commit(next, '修改连线'); const arranged = structuredClone(instance.doc);
+    const source = arranged.nodes.find(node => node.id === 'input');
+    assert.equal(arranged.nodes.length, before.nodes.length); assert.deepEqual(arranged.edges, next.edges);
+    if (downstream) assert.ok(arranged.nodes.find(node => node.id === downstream).x > source.x);
+    else assert.equal(new Set(arranged.nodes.map(node => node.x)).size, 1, 'removing the dependency restores a single independent column');
+    assert.equal(measurements, 1); assert.equal(saves, 1); assert.equal(instance.history.length, 1);
+    instance.undo(); assert.deepEqual(instance.doc.nodes, before.nodes); assert.deepEqual(instance.doc.edges, before.edges);
+    instance.undo(true); assert.deepEqual(instance.doc.nodes, arranged.nodes); assert.deepEqual(instance.doc.edges, arranged.edges);
+  }
+});
+
+test('dragging a connected node retains its drop position without rearranging or fitting the graph', t => {
+  let doc = createDocument({ schemaVersion: 2 }); doc.nodes = [createNode('input', { x: 64, y: 80 }, { id: 'input' }), createNode('output', { x: 404, y: 80 }, { id: 'output' })];
+  doc = connectNodes(doc, { sourceNode: 'input', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+  const instance = editor(doc), before = structuredClone(doc);
+  instance.measurePorts = () => assert.fail('a manual drag must not request layout');
+  globalValue(t, 'requestAnimationFrame', () => assert.fail('a manual drag must not schedule fit'));
+  instance.doc.nodes[1].x = 688; instance.doc.nodes[1].y = 432;
+  instance.gesture = { kind: 'nodes', pointerId: 17, before, dragged: true }; instance.onPointerUp({ pointerId: 17 });
+  assert.deepEqual(instance.doc.nodes[0], before.nodes[0]); assert.deepEqual([instance.doc.nodes[1].x, instance.doc.nodes[1].y], [688, 432]);
+  assert.deepEqual(instance.doc.edges, before.edges); assert.equal(instance.history.length, 1);
+  instance.undo(); assert.deepEqual(instance.doc.nodes, before.nodes);
+  instance.undo(true); assert.deepEqual([instance.doc.nodes[1].x, instance.doc.nodes[1].y], [688, 432]);
+});
+
 test('a failed generated layout leaves the previous document and undo history untouched', () => {
   const instance = editor(), before = structuredClone(instance.doc); let restored = false;
   instance.renderGraph = () => { restored = instance.doc.nodes.length === 1; };

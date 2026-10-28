@@ -221,6 +221,32 @@ test('supervisor application lays out newly generated nodes once without running
   assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
 });
 
+test('supervisor lays out edge-only topology changes while preserving explicit moves and edge identity-only rewrites', async t => {
+  for (const kind of ['add', 'remove', 'reconnect', 'move', 'edge-identity']) {
+    const f = await setup(t); let document = createDocument({ schemaVersion: 2, title: '总控连线布局 ' + kind });
+    document.nodes = [createNode('input', { x: 1700, y: 1300 }, { id: 'input', config: { outputType: 'object' } }), createNode('transform', { x: 1900, y: 1300 }, { id: 'middle' }), createNode('output', { x: 2100, y: 1300 }, { id: 'output' })];
+    document = connectNodes(document, { sourceNode: 'input', sourcePort: 'out', targetNode: 'middle', targetPort: 'in' });
+    document = connectNodes(document, { sourceNode: 'middle', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+    const edge = document.edges.at(-1); if (kind === 'add') document.edges.pop();
+    const operations = kind === 'move' ? [{ op: 'update-node', nodeId: 'middle', x: 111, y: 222 }]
+      : kind === 'add' ? [{ op: 'connect', sourceNode: 'middle', sourcePort: 'out', targetNode: 'output', targetPort: 'in' }]
+        : [{ op: 'remove-edge', edgeId: edge.id }, ...(['reconnect', 'edge-identity'].includes(kind) ? [{ op: 'connect', sourceNode: kind === 'reconnect' ? 'input' : 'middle', sourcePort: 'out', targetNode: 'output', targetPort: 'in' }] : [])];
+    const original = f.app.workflowLibrary.save({ document, expectedRevision: 0 }); f.classificationIntent = 'workflow'; f.app.skills = async () => ({ connected: true, skills: [] });
+    let step = 0; f.respond = () => step++ === 0 ? { tool: 'workflow.propose', arguments: { workflowId: document.id, request: '调整连线或位置' } } : { text: '调整图结构或位置。', operations };
+    await f.request('/api/app-assistant/messages', { clientMessageId: 'edge-layout-' + kind, text: '调整连线或位置 ' + kind });
+    const turn = await f.finished('/api/app-assistant'); assert.equal(turn.status, 'proposed');
+    const path = `/api/app-assistant/turns/${turn.id}/action`, applied = await f.request(path, { action: 'mark-applied' }); assert.equal(applied.status, 200);
+    const saved = f.app.workflowLibrary.get(document.id); assert.equal(saved.document.nodes.length, document.nodes.length); assert.equal(saved.revision, original.revision + 1);
+    if (kind === 'move' || kind === 'edge-identity') {
+      assert.deepEqual(saved.document.nodes.map(({ id, x, y }) => ({ id, x, y })), document.nodes.map(node => ({ id: node.id, x: kind === 'move' && node.id === 'middle' ? 111 : node.x, y: kind === 'move' && node.id === 'middle' ? 222 : node.y })));
+    } else {
+      const positions = layoutPositions(saved.document); for (const node of saved.document.nodes) assert.deepEqual({ x: node.x, y: node.y }, positions.get(node.id));
+    }
+    await f.request(path, { action: 'mark-applied' }); assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+    assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+  }
+});
+
 test('HTTP stop prevents a late model tool request and duplicate delivery cannot replay it', async t => {
   const f = await setup(t); let release;
   f.respond = () => new Promise(resolve => { release = resolve; });
