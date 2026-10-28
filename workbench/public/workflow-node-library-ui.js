@@ -221,7 +221,7 @@ export class WorkflowNodeLibraryUI {
     try {
       const parent = this.flushNodeDrafts(), node = parent.nodes.find(item => item.id === id); if (!node?.config.document) throw new Error('此节点尚未保存子流程快照。');
       if (this.nestedStack.length >= 7) throw new Error('最多进入 7 层内部编辑。');
-      clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection();
+      if (editor.cancelAutosave) editor.cancelAutosave(); else clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection();
       this.nestedStack.push({ parent, nodeId: id, state: editor.captureDocumentState(), runStates: editor.runStates, validationDraftErrors: editor.validationDraftErrors, unsaved: editor.unsaved, storageKey: editor.storageKey, storageValue: editor.storageValue, studioView: editor.studio.view, pendingFitDocumentId: editor.pendingFitDocumentId });
       editor.doc = validateDocument(copy(node.config.document)); editor.history = []; editor.future = []; editor.selection.clear(); editor.selectedEdge = null; editor.propertyDrafts.clear(); editor.validationDraftErrors = new Map(); editor.runStates = {}; editor.titleDraft = null; editor.unsaved = false; editor.pendingFitDocumentId = null;
       editor.studio.setView('edit'); this.paintNested();
@@ -230,7 +230,7 @@ export class WorkflowNodeLibraryUI {
     } catch (error) { editor.toast(error.message, true); }
   }
   restoreParent(session) {
-    const editor = this.editor; clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection(); editor.doc = session.parent; editor.history = copy(session.state.history); editor.future = copy(session.state.future); editor.selection = new Set(session.state.selection); editor.selectedEdge = session.state.selectedEdge; editor.propertyDrafts = new Map(copy(session.state.propertyDrafts)); editor.validationDraftErrors = session.validationDraftErrors; editor.runStates = session.runStates; editor.unsaved = session.unsaved; editor.titleDraft = null; editor.storageKey = session.storageKey; editor.storageValue = session.storageValue; editor.pendingFitDocumentId = session.pendingFitDocumentId;
+    const editor = this.editor; if (editor.cancelAutosave) editor.cancelAutosave(); else clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection(); editor.doc = session.parent; editor.history = copy(session.state.history); editor.future = copy(session.state.future); editor.selection = new Set(session.state.selection); editor.selectedEdge = session.state.selectedEdge; editor.propertyDrafts = new Map(copy(session.state.propertyDrafts)); editor.validationDraftErrors = session.validationDraftErrors; editor.runStates = session.runStates; editor.unsaved = session.unsaved; editor.titleDraft = null; editor.storageKey = session.storageKey; editor.storageValue = session.storageValue; editor.pendingFitDocumentId = session.pendingFitDocumentId;
   }
   async applyNested() {
     const session = this.nested; if (!session) return;

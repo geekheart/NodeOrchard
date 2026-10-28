@@ -1,4 +1,5 @@
 import { createDocument, validateDocument } from '../shared/workflow/workflow-model.mjs';
+import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 
 const ACK_KEY = 'workbench.workflow-library-ack.v1';
 const DRAFT_PREFIX = 'workbench.workflow-document.v1:';
@@ -21,13 +22,30 @@ export class WorkflowLibraryClient {
     editor.onPersist = document => this.queue(document);
   }
   slot(id) {
-    if (!this.slots.has(id)) this.slots.set(id, { revision: 0, saved: null, queued: null, pending: null, error: '', lifecycle: 'active', epoch: 0, refreshRequired: false });
+    if (!this.slots.has(id)) this.slots.set(id, { revision: 0, saved: null, queued: null, draft: null, pending: null, error: '', lifecycle: 'active', epoch: 0, refreshRequired: false });
     return this.slots.get(id);
   }
   documentId() { return this.editor.documentLoaded === false ? null : this.editor.nodeLibrary?.rootDocument?.id || this.editor.doc?.id || null; }
   persistenceDocument(document) { return this.editor.persistenceDocument?.(document) || validateDocument(document); }
+  publicationState(document, pending) {
+    const key = DRAFT_PREFIX + document.id;
+    try {
+      const raw = localStorage.getItem(key), cached = raw && JSON.parse(raw);
+      if (!cached || cached.version !== 1 || cached.document?.id !== document.id) return true;
+      const fingerprint = documentFingerprint(document);
+      if (!pending && (!cached.publicationPending || (cached.publicationFingerprint
+        ? cached.publicationFingerprint !== fingerprint : signature(cached.document) !== signature(document)))) return true;
+      if (cached.publicationPending === pending && (!pending || cached.publicationFingerprint === fingerprint)) return true;
+      const next = JSON.stringify({ ...cached, publicationPending: pending, publicationFingerprint: pending ? fingerprint : null }); localStorage.setItem(key, next);
+      if (this.editor.storageKey === key && this.editor.storageValue === raw) this.editor.storageValue = next;
+      if (!pending && cached.publicationPending && !cached.dirty && !this.editor.titleDraft && this.editor.doc?.id === document.id
+        && signature(this.editor.doc) === signature(document)) { this.editor.unsaved = false; this.editor.cancelAutosave?.({ reset: true }); }
+      return true;
+    } catch { return false; }
+  }
   unload({ preserveNavigation = false } = {}) {
     const changed = this.currentId !== null || this.editor.documentLoaded !== false;
+    if (changed && this.editor.documentLoaded !== false && (this.editor.unsaved || this.editor.titleDraft)) this.editor.cacheDraft?.();
     this.unloadEpoch++;
     if (!preserveNavigation) { this.generation++; this.openRequest = null; this.hasLeftEditor = true; }
     this.currentId = null; this.initialDraft = null;
@@ -40,10 +58,12 @@ export class WorkflowLibraryClient {
     const slot = this.slot(record.id);
     if (record.revision < slot.revision) return record;
     slot.revision = record.revision; slot.saved = signature(record.document); slot.error = ''; slot.lifecycle = lifecycle(record);
+    this.publicationState(record.document, false);
     if (slot.lifecycle !== 'active') slot.queued = null;
     // Startup may have queued a draft before writes were ready. An exact server
     // acknowledgement satisfies that draft; a different local draft stays queued.
     if (slot.queued && signature(slot.queued) === slot.saved) slot.queued = null;
+    if (slot.draft && signature(slot.draft) === slot.saved && !this.cachedState(record.id)) slot.draft = null;
     this.acknowledgements[record.id] = record.revision;
     try { localStorage.setItem(ACK_KEY, JSON.stringify(this.acknowledgements)); } catch { /* Browser cache is optional after a database acknowledgement. */ }
     return record;
@@ -87,7 +107,7 @@ export class WorkflowLibraryClient {
     const slot = this.slots.get(this.documentId());
     this.editor.libraryError = slot?.error || '';
     this.editor.libraryStatus = slot?.lifecycle !== undefined && slot.lifecycle !== 'active' ? '只读 · 本地未同步草稿保留'
-      : slot?.refreshRequired ? '正在读取恢复后的最新版本…' : slot?.error ? '看板保存失败 · 本地保留' : slot?.queued || slot?.pending ? '正在同步到看板…' : slot?.saved ? '已保存 · 工作流看板' : '';
+      : slot?.refreshRequired ? '正在读取恢复后的最新版本…' : slot?.error ? '看板保存失败 · 本地保留' : slot?.queued || slot?.pending ? '正在同步到看板…' : slot?.draft ? '尚未保存 · 本地草稿' : slot?.saved ? '已保存 · 工作流看板' : '';
     this.editor.renderHeader();
   }
   queue(document) {
@@ -97,6 +117,7 @@ export class WorkflowLibraryClient {
     const slot = this.slot(document.id), next = signature(document);
     if (slot.lifecycle !== 'active' || slot.refreshRequired || (this.editor.doc.id === document.id && this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active')) { slot.queued = null; this.status(); return; }
     this.currentId = document.id;
+    slot.draft = null;
     if (next === slot.saved && !slot.queued) { this.status(); return; }
     slot.queued = copy(document);
     this.onDocumentChange(document.id);
@@ -115,6 +136,7 @@ export class WorkflowLibraryClient {
         const document = slot.queued; slot.queued = null;
         const epoch = slot.epoch;
         try {
+          if (!this.publicationState(document, true)) throw new Error('无法记录本地保存请求，尚未提交；请手动保存或导出。');
           const record = unwrap(await this.api('/api/workflow-library', { method: 'POST', body: { document, expectedRevision: slot.revision } }));
           if (epoch !== slot.epoch || record.revision < slot.revision || slot.lifecycle !== 'active' || slot.refreshRequired) continue;
           this.adopt(record); this.onSaved(record);
@@ -133,6 +155,10 @@ export class WorkflowLibraryClient {
       this.status();
     });
     this.status(); return slot.pending;
+  }
+  flushPending(id = this.documentId()) {
+    const slot = this.slots.get(id);
+    return slot?.error ? slot.pending || Promise.resolve() : this.flush(id);
   }
   async initialize() {
     if (this.initializing) return this.initializing;
@@ -170,22 +196,47 @@ export class WorkflowLibraryClient {
       return document;
     } catch { throw new Error('这条流程的本地草稿无法读取，已保留原始数据，请先备份本地草稿。'); }
   }
+  cachedState(id) {
+    try {
+      const record = JSON.parse(localStorage.getItem(DRAFT_PREFIX + id) || 'null');
+      return record?.version === 1 && record.document?.id === id && (record.dirty === true || record.publicationPending === true)
+        ? { unsaved: true, ...(record.publicationPending ? { publicationPending: true } : {}), ...(record.titleDraft ? { titleDraft: copy(record.titleDraft) } : {}) } : null;
+    } catch { return null; }
+  }
   async reconcile(document, record, acknowledgement) {
     if (record && lifecycle(record) !== 'active') {
       this.adopt(record); this.slot(record.id).wasInactive = true;
       return null;
     }
     document = this.persistenceDocument(document);
+    const currentDirty = this.editor.doc?.id === document.id && (this.editor.unsaved === true || !!this.editor.titleDraft);
+    const deferred = currentDirty || !!this.slot(document.id).draft || !!this.cachedState(document.id) || this.editor.autosavePolicy?.enabled === false;
     if (!record || record.origin === 'history' || content(record.document) === content(document) || acknowledgement === record.revision) {
       if (record) this.adopt(record);
       if (!record || record.origin === 'history' || signature(record.document) !== signature(document)) {
-        this.slot(document.id).queued = copy(document); await this.flush(document.id);
+        if (deferred) this.slot(document.id).draft = copy(document);
+        else { this.slot(document.id).queued = copy(document); await this.flush(document.id); }
       }
       return document;
     }
     // Save a divergent draft separately before replacing any browser cache.
     this.adopt(record);
     const recovered = { ...document, id: createDocument().id, title: `${document.title.slice(0, 112)}（本地恢复）` };
+    if (deferred) {
+      // Keep a divergent recovery in browser storage until the user's chosen
+      // save policy permits publication. Never use a newer acknowledgement to
+      // overwrite the original workflow with its older cached draft.
+      const state = currentDirty ? this.editor.captureDocumentState() : this.states.get(document.id) || this.cachedState(document.id) || {};
+      const recoveredState = { ...copy(state), unsaved: true,
+        ...(state.titleDraft ? { titleDraft: { ...state.titleDraft, documentId: recovered.id } } : {}) };
+      localStorage.setItem(DRAFT_PREFIX + recovered.id, JSON.stringify({ version: 1, document: recovered, dirty: true,
+        titleDraft: recoveredState.titleDraft || null, savedAt: new Date().toISOString() }));
+      this.slot(recovered.id).draft = copy(recovered); this.states.set(recovered.id, recoveredState);
+      this.slot(document.id).draft = null;
+      try { localStorage.setItem(DRAFT_PREFIX + record.id, JSON.stringify({ version: 1, document: record.document, savedAt: new Date().toISOString() })); } catch { /* The separate recovery remains available. */ }
+      this.editor.toast('发现不同的已保存版本，已保留独立的本地恢复草稿，尚未保存到工作流看板。');
+      return recovered;
+    }
     this.slot(recovered.id).queued = recovered; await this.flush(recovered.id);
     try { localStorage.setItem(DRAFT_PREFIX + record.id, JSON.stringify({ version: 1, document: record.document, savedAt: new Date().toISOString() })); } catch { /* The recovered copy is already durable in SQLite. */ }
     this.editor.toast('发现不同的已保存版本，本地草稿已保留为独立恢复副本。');
@@ -195,7 +246,10 @@ export class WorkflowLibraryClient {
     if (!document || this.slot(document.id).lifecycle !== 'active') { this.unload(); return false; }
     this.suppressed = true;
     this.setEditorLifecycle(this.slot(document.id).lifecycle);
-    try { this.editor.useDocument(document, state, { persist: persist && this.slot(document.id).lifecycle === 'active' }); } finally { this.suppressed = false; }
+    const cachedState = persist ? this.cachedState(document.id) : null, deferred = persist ? this.slot(document.id).draft : null;
+    const restored = cachedState || deferred ? { ...state, ...cachedState, unsaved: true } : state;
+    try { this.editor.useDocument(document, restored, { persist: persist && !deferred && !cachedState && this.slot(document.id).lifecycle === 'active' }); } finally { this.suppressed = false; }
+    if (cachedState?.publicationPending) { this.slot(document.id).error ||= '上次保存尚未确认，请手动保存或重新读取。'; this.editor.cancelAutosave?.({ reset: true }); }
     this.currentId = document.id; this.status();
     return true;
   }
@@ -210,9 +264,12 @@ export class WorkflowLibraryClient {
     this.editor.nodeLibrary?.cancelNestedForExternalChange?.();
     this.editor.cancelGesture(); this.editor.cancelConnection();
     const slot = this.slot(this.editor.doc.id);
-    if (slot.lifecycle === 'active' && !slot.refreshRequired && (this.editor.unsaved !== false || this.editor.titleDraft) && this.editor.persist() === false) {
-      const slot = this.slot(this.editor.doc.id);
-      slot.queued = this.persistenceDocument(this.editor.doc); slot.error ||= '本地缓存尚未确认，当前编辑已保留，请保存或导出。';
+    if (slot.lifecycle === 'active' && !slot.refreshRequired && (this.editor.unsaved !== false || this.editor.titleDraft)) {
+      const cached = this.editor.cacheDraft?.();
+      slot.draft = this.persistenceDocument(this.editor.doc);
+      // Never let a failed earlier request publish a newer, merely cached edit
+      // when navigation drains the already-authorized save queue.
+      if (cached === false) slot.error ||= '本地缓存尚未确认，当前编辑已保留，请保存或导出。';
     }
     this.states.set(this.editor.doc.id, this.editor.captureDocumentState());
   }
@@ -225,7 +282,7 @@ export class WorkflowLibraryClient {
       const same = this.currentId === id && this.editor.doc?.id === id;
       if (this.currentId && !same) {
         this.rememberCurrent();
-        try { await this.flush(this.editor.doc.id); }
+        try { await this.flushPending(this.editor.doc.id); }
         catch { this.editor.toast('这条流程尚未同步，本地草稿已保留；切回后可继续编辑或导出。', true); }
       }
       if (generation !== this.generation) return false;
@@ -257,13 +314,18 @@ export class WorkflowLibraryClient {
           this.adopt(record); local.refreshRequired = false; local.wasInactive = false;
           this.use(record.document, undefined, { persist: false }); return true;
         }
-        if (local.queued && local.error) { this.use(copy(local.queued), this.states.get(id)); return true; }
+        let confirmedReceipt = false;
+        if (local.queued && local.error) {
+          if (record && signature(record.document) === signature(local.queued)) { this.adopt(record); confirmedReceipt = true; }
+          else if (same && (this.editor.unsaved || this.editor.titleDraft)) { this.rememberCurrent(); this.editor.requestDocumentFit?.(); this.status(); return true; }
+          else { this.use(copy(local.draft || local.queued), this.states.get(id)); return true; }
+        }
         if (same && record && record.revision === local.revision) { this.editor.requestDocumentFit?.(); this.status(); return true; }
-        const cached = same ? copy(this.editor.doc) : this.cached(id);
-        const document = cached ? await this.reconcile(cached, record, acknowledgement) : this.adopt(record).document;
+        const cached = same ? copy(this.editor.doc) : copy(local.draft) || this.cached(id);
+        const document = cached ? await this.reconcile(cached, record, confirmedReceipt ? record.revision : acknowledgement) : this.adopt(record).document;
         if (generation !== this.generation) return false;
         if (epoch !== local.epoch) continue;
-        return this.use(document, this.states.get(id));
+        return this.use(document, this.states.get(document.id) || this.states.get(id));
       }
       throw new Error('工作流状态在打开期间持续变化，请点击重试或回看板重新打开；本地草稿已保留。');
     } finally {

@@ -47,6 +47,7 @@ test('saved preferences and the Hermes default survive restart without a local m
   const { app, create, config } = await setup(t);
   const expected = {
     theme: 'dark', density: 'compact', defaultWorkspace: 'research', defaultModel: '', shortcuts: DEFAULT_SHORTCUTS,
+    workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 10,
   };
   await app.connect();
   assert.deepEqual((await app.saveSettings({ preferences: expected })).preferences, expected);
@@ -105,6 +106,59 @@ test('legacy preferences and malformed persisted shortcut maps fall back without
   assert.equal(loaded.theme, 'dark'); assert.equal(loaded.density, 'compact'); assert.deepEqual(loaded.shortcuts, DEFAULT_SHORTCUTS);
   restarted.store.savePreferences({ theme: 'light', density: 'comfortable', defaultWorkspace: '.' }); await restarted.close();
   const legacy = create(); assert.deepEqual(legacy.preferences.shortcuts, DEFAULT_SHORTCUTS); assert.equal(legacy.preferences.theme, 'light');
+  assert.equal(legacy.preferences.workflowAutosaveEnabled, true); assert.equal(legacy.preferences.workflowAutosaveIntervalMinutes, 10);
+});
+
+test('workflow autosave preferences persist independently across restart without starting Hermes', async t => {
+  const { app, create } = await setup(t);
+  const defaults = (await app.settings()).preferences;
+  assert.equal(defaults.workflowAutosaveEnabled, true); assert.equal(defaults.workflowAutosaveIntervalMinutes, 10);
+  await app.saveSettings({ preferences: { workflowAutosaveEnabled: false, workflowAutosaveIntervalMinutes: 1 } });
+  await app.saveSettings({ preferences: { theme: 'dark' } });
+  const expected = (await app.settings()).preferences;
+  assert.equal(expected.workflowAutosaveEnabled, false); assert.equal(expected.workflowAutosaveIntervalMinutes, 1);
+  assert.equal(app.adapter.state, 'stopped'); await app.close();
+  const restarted = create(); assert.deepEqual((await restarted.settings()).preferences, expected);
+  await restarted.saveSettings({ preferences: { workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 1440 } });
+  assert.equal((await restarted.settings()).preferences.workflowAutosaveIntervalMinutes, 1440);
+  assert.equal(restarted.adapter.state, 'stopped');
+});
+
+test('invalid persisted autosave fields fall back independently without rewriting the saved preferences', async t => {
+  const { app, create } = await setup(t);
+  const saved = { theme: 'dark', workflowAutosaveEnabled: false, workflowAutosaveIntervalMinutes: '25' };
+  app.store.savePreferences(saved); await app.close();
+  const restarted = create(), loaded = (await restarted.settings()).preferences;
+  assert.equal(loaded.theme, 'dark'); assert.equal(loaded.workflowAutosaveEnabled, false);
+  assert.equal(loaded.workflowAutosaveIntervalMinutes, 10);
+  assert.deepEqual(restarted.store.preferences(), saved);
+  assert.equal(restarted.adapter.state, 'stopped');
+});
+
+test('settings HTTP validates autosave atomically and serves the shared policy and settings controls', async t => {
+  const { app, config } = await setup(t), bridge = createWorkbenchServer({ ...config, port: 0 }, app), origin = await bridge.listen();
+  t.after(() => bridge.close());
+  const boot = await (await fetch(origin + '/api/bootstrap')).json(), initial = (await app.settings()).preferences;
+  const save = preferences => fetch(origin + '/api/settings', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Workbench-Token': boot.csrfToken }, body: JSON.stringify({ preferences }) });
+  for (const fields of [
+    { workflowAutosaveEnabled: 'false' }, { workflowAutosaveEnabled: 0 }, { workflowAutosaveEnabled: null },
+    ...[0, -1, 1441, 1.5, '10', null].map(workflowAutosaveIntervalMinutes => ({ workflowAutosaveIntervalMinutes })),
+  ]) {
+    const response = await save({ theme: 'dark', ...fields });
+    assert.equal(response.status, 400); assert.match((await response.json()).error, /自动保存/);
+    assert.deepEqual((await app.settings()).preferences, initial);
+  }
+  const accepted = await save({ workflowAutosaveEnabled: false, workflowAutosaveIntervalMinutes: 25 });
+  assert.equal(accepted.status, 200); const preferences = (await accepted.json()).preferences;
+  assert.equal(preferences.workflowAutosaveEnabled, false); assert.equal(preferences.workflowAutosaveIntervalMinutes, 25);
+  const script = await fetch(origin + '/shared/workflow/workflow-autosave.mjs');
+  assert.equal(script.status, 200); assert.match(script.headers.get('content-type'), /javascript/);
+  assert.match(await script.text(), /workflowAutosavePolicy/);
+  const page = await (await fetch(origin + '/')).text();
+  assert.match(page, /id="setting-workflow-autosave-enabled"[^>]*type="checkbox"/);
+  assert.match(page, /id="setting-workflow-autosave-interval"[^>]*type="number"[^>]*min="1"[^>]*max="1440"/);
+  assert.equal(app.adapter.state, 'stopped');
 });
 
 test('a new installation starts sessions directly in its workspace root', async t => {

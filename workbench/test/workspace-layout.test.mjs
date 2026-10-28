@@ -51,7 +51,8 @@ test('the former default preference migrates once without moving historical file
   const session = state.create({ title: 'history', cwd: oldWorkspace, storedSessionId: 'history', runtimeSessionId: null });
 
   const preferences = initializeWorkspace(config, state);
-  assert.deepEqual(preferences, { theme: 'dark', density: 'compact', defaultModel: '', defaultWorkspace: '.', shortcuts: DEFAULT_SHORTCUTS });
+  assert.deepEqual(preferences, { theme: 'dark', density: 'compact', defaultModel: '', defaultWorkspace: '.', shortcuts: DEFAULT_SHORTCUTS,
+    workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 10 });
   assert.deepEqual(state.preferences(), preferences);
   assert.equal(state.get(session.id).cwd, oldWorkspace);
   assert.equal(await readFile(oldArtifact, 'utf8'), 'previous immutable result');

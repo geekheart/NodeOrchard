@@ -94,6 +94,18 @@ test('archiving the loaded workflow unloads it and a later restore event does no
   assert.equal(api.posts.length, 0);
 });
 
+test('unloading a workflow before its autosave deadline preserves the latest dirty draft without publishing it', async t => {
+  const { values } = storage(t), original = doc('dirty-unload'), instance = editor(doc('placeholder'));
+  instance.autosavePolicy = { enabled: false };
+  const api = remote([record(original)]), client = new WorkflowLibraryClient(instance, { api: api.api });
+  await client.open(original.id);
+  instance.doc.nodes[0].x = 777; instance.unsaved = true;
+  await client.handleLifecycle({ id: original.id, lifecycle: 'trashed', revision: 2 });
+  assertUnloaded(instance, client, original.id);
+  const cached = JSON.parse(values.get(PREFIX + original.id));
+  assert.equal(cached.dirty, true); assert.equal(cached.document.nodes[0].x, 777); assert.equal(api.posts.length, 0);
+});
+
 test('rendering the empty route can repeat unload without recursive notifications or placeholder saves', async t => {
   storage(t); const original = doc('repeat-unload'), instance = editor(doc('placeholder'));
   const api = remote([record(original)]), changes = [];

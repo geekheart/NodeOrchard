@@ -13,6 +13,7 @@ import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
 import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS, layoutDocument, needsAutoLayout } from '../shared/workflow/workflow-studio-utils.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
+import { workflowAutosavePolicy } from '../shared/workflow/workflow-autosave.mjs';
 import { SHORTCUT_ACTIONS, matchesShortcut, shortcutLabel } from '../shared/keyboard-shortcuts.mjs';
 
 const STORAGE_KEY = 'workbench.workflow-editor.v1';
@@ -44,6 +45,7 @@ const clone = value => structuredClone(value);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const isTextTarget = target => target instanceof Element && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
 const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) < 4;
+const titleDraftFor = (value, documentId) => value?.documentId === documentId && typeof value.value === 'string' && value.value.length <= 120 ? { documentId, value: value.value } : null;
 
 // Local draft editor only: no Hermes requests, eval, or execution of node contents.
 export class WorkflowEditor {
@@ -52,7 +54,7 @@ export class WorkflowEditor {
     this.selection = new Set(); this.selectedEdge = null; this.history = []; this.future = [];
     this.propertyDrafts = new Map(); this.nodeElements = new Map(); this.edgeElements = new Map(); this.offsets = new Map();
     this.active = false; this.space = false; this.gesture = null; this.pendingConnection = null; this.hoverNode = null;
-    this.clipboard = null; this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
+    this.clipboard = null; this.saveTimer = null; this.autosavePolicy = workflowAutosavePolicy(); this.toastTimer = null; this.geometryFrame = null;
     this.unsaved = false; this.storageValue = null; this.storageConflict = false; this.corruptDraft = null;
     this.libraryLifecycle = 'active'; this.lifecycleDisabled = new WeakMap(); this.documentLoaded = true;
     this.settings = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: true, propertiesClosed: true };
@@ -68,10 +70,11 @@ export class WorkflowEditor {
     window.addEventListener('blur', () => { this.space = false; this.cancelGesture(); this.canvas.classList.remove('pan-ready'); });
     window.addEventListener('storage', event => {
       if (event.key !== (this.storageKey || STORAGE_KEY) || event.newValue === this.storageValue) return;
-      clearTimeout(this.saveTimer); this.storageConflict = true; this.renderRecovery(); this.renderHeader();
+      this.cancelAutosave({ reset: true }); this.storageConflict = true; this.renderRecovery(); this.renderHeader();
     });
-    window.addEventListener('pagehide', () => { this.cancelGesture(); if (this.unsaved && !this.storageConflict && !this.corruptDraft) this.persist(); });
+    window.addEventListener('pagehide', () => { this.cancelGesture(); if ((this.unsaved || this.titleDraft) && !this.storageConflict && !this.corruptDraft) this.cacheDraft(); });
     document.addEventListener('visibilitychange', () => { if (document.hidden) { this.cancelGesture(); this.clearPulses(); } });
+    if (this.unsaved) this.scheduleSave();
   }
 
   restore() {
@@ -86,6 +89,7 @@ export class WorkflowEditor {
       if (record.version !== 1) throw new Error('草稿版本不支持');
       this.doc = validateDocument(record.document);
       this.pendingFitDocumentId = this.doc.id;
+      this.unsaved = record.dirty === true; this.titleDraft = titleDraftFor(record.titleDraft, this.doc.id);
       for (const key of Object.keys(this.settings)) if (typeof record.ui?.[key] === 'boolean') this.settings[key] = record.ui[key];
       this.recordCanvasSize(record.ui?.canvasSize || {});
     } catch {
@@ -176,7 +180,7 @@ export class WorkflowEditor {
   }
 
   bindTitleInput() {
-    this.titleInput.addEventListener('input', () => { this.titleDraft = { documentId: this.doc.id, value: this.titleInput.value }; });
+    this.titleInput.addEventListener('input', () => { this.titleDraft = { documentId: this.doc.id, value: this.titleInput.value }; this.scheduleSave(); });
     const apply = () => { try { this.flushTitleDraft(); } catch (error) { this.toast(error.message, true); } };
     this.titleInput.addEventListener('change', apply); this.titleInput.addEventListener('blur', apply);
     this.titleInput.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); apply(); } });
@@ -197,26 +201,27 @@ export class WorkflowEditor {
   deactivate() { if (!this.active) return; this.nodeLibrary?.cancelNested(true); this.active = false; this.cancelGesture(); this.cancelConnection(); this.contextMenu.hidden = true; this.clearPulses(); if (this.dialog.open) this.dialog.close(); }
 
   captureDocumentState() {
-    return { history: clone(this.history), future: clone(this.future), propertyDrafts: clone([...this.propertyDrafts]), validationDraftErrors: clone([...(this.validationDraftErrors || [])]), selection: [...this.selection], selectedEdge: this.selectedEdge };
+    return { history: clone(this.history), future: clone(this.future), propertyDrafts: clone([...this.propertyDrafts]), validationDraftErrors: clone([...(this.validationDraftErrors || [])]), selection: [...this.selection], selectedEdge: this.selectedEdge, unsaved: Boolean(this.unsaved || this.titleDraft), titleDraft: titleDraftFor(this.titleDraft, this.doc.id) };
   }
   useDocument(document, state, { persist = true } = {}) {
     this.nodeLibrary?.cancelNested(true);
     const next = validateDocument(document);
-    this.cancelGesture(); this.cancelConnection(); clearTimeout(this.saveTimer);
-    this.doc = next; this.documentLoaded = true; this.renderDocumentAvailability(); this.titleDraft = null; this.storageKey = DRAFT_PREFIX + next.id;
+    this.cancelGesture(); this.cancelConnection(); this.cancelAutosave({ reset: true });
+    this.doc = next; this.documentLoaded = true; this.renderDocumentAvailability(); this.titleDraft = titleDraftFor(state?.titleDraft, next.id); this.storageKey = DRAFT_PREFIX + next.id;
     try { this.storageValue = localStorage.getItem(this.storageKey); localStorage.setItem(ACTIVE_KEY, next.id); } catch { this.storageValue = null; }
-    this.storageConflict = false; this.corruptDraft = null; this.saveError = ''; this.unsaved = false;
+    this.storageConflict = false; this.corruptDraft = null; this.saveError = ''; this.unsaved = state?.unsaved === true;
     this.history = clone(state?.history || []); this.future = clone(state?.future || []);
     this.propertyDrafts = new Map(clone(state?.propertyDrafts || [])); this.validationDraftErrors = new Map(clone(state?.validationDraftErrors || [])); this.selection = new Set(state?.selection || []); this.selectedEdge = state?.selectedEdge || null;
     this.runStates = {}; this.canvasSize = null; this.offsets.clear();
     this.pruneSelection(); this.renderGraph(); this.renderProperties(); this.renderHeader(); this.requestDocumentFit();
-    if (persist && !this.libraryReadOnly) this.persist();
+    if (persist && !this.libraryReadOnly) this.cacheDraft();
+    if (this.unsaved) this.scheduleSave();
   }
 
   unloadDocument() {
     this.documentLoaded = false; this.active = false;
     this.nodeLibrary?.cancelNested(true); this.cancelGesture(); this.cancelConnection();
-    clearTimeout(this.saveTimer); clearTimeout(this.toastTimer);
+    this.cancelAutosave({ reset: true }); clearTimeout(this.toastTimer);
     if (this.geometryFrame) cancelAnimationFrame(this.geometryFrame);
     this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
     this.pendingFitDocumentId = null;
@@ -242,7 +247,7 @@ export class WorkflowEditor {
   setLibraryLifecycle(lifecycle) {
     if (lifecycle === 'archived') lifecycle = 'trashed';
     if (!['active', 'trashed', 'deleted'].includes(lifecycle)) throw new Error('无效的工作流管理状态。');
-    this.nodeLibrary?.cancelNested(true); this.cancelGesture(); this.cancelConnection(); clearTimeout(this.saveTimer);
+    this.nodeLibrary?.cancelNested(true); this.cancelGesture(); this.cancelConnection(); this.cancelAutosave({ reset: true });
     this.libraryLifecycle = lifecycle;
     if (this.libraryReadOnly) {
       this.unsaved = false; this.saveError = '';
@@ -274,7 +279,7 @@ export class WorkflowEditor {
     this.renderDocumentAvailability(); if (this.documentLoaded === false) return;
     if (document.activeElement !== this.titleInput) this.titleInput.value = this.titleDraft?.documentId === this.doc.id ? this.titleDraft.value : this.doc.title;
     const status = this.root.querySelector('.wf-save-status');
-    status.textContent = this.storageConflict ? '另一标签页有更新' : this.corruptDraft ? '原草稿待恢复' : this.saveError || (this.propertyDrafts.size ? `${this.propertyDrafts.size} 个属性待应用` : this.unsaved ? '保存中…' : this.libraryStatus || (this.storageValue ? '已保存 · 此浏览器' : '本浏览器草稿'));
+    status.textContent = this.storageConflict ? '另一标签页有更新' : this.corruptDraft ? '原草稿待恢复' : this.saveError || (this.propertyDrafts.size ? `${this.propertyDrafts.size} 个属性待应用` : this.unsaved ? '尚未保存' : this.libraryStatus || (this.storageValue ? '已保存 · 此浏览器' : '本浏览器草稿'));
     status.title = this.libraryError || ''; status.dataset.state = this.saveError || this.corruptDraft || this.storageConflict || this.libraryError ? 'error' : 'ready';
     this.root.querySelector('[data-action="undo"]').disabled = !this.history.length;
     this.root.querySelector('[data-action="redo"]').disabled = !this.future.length;
@@ -892,7 +897,7 @@ export class WorkflowEditor {
       this.doc = current;
     }
     if (clean.id !== this.doc.id && this.onPersist) {
-      this.persist(); this.history = []; this.propertyDrafts.clear();
+      this.cacheDraft(); this.cancelAutosave({ reset: true }); this.history = []; this.propertyDrafts.clear();
     } else {
       this.history.push({ document: clone(before), label }); if (this.history.length > 80) this.history.shift();
     }
@@ -1200,17 +1205,50 @@ export class WorkflowEditor {
   }
   toast(message, error = false) { const node = this.root.querySelector('.wf-toast'); clearTimeout(this.toastTimer); node.textContent = message; node.classList.toggle('error', error); node.hidden = false; this.toastTimer = setTimeout(() => { node.hidden = true; }, error ? 6000 : 2800); }
 
-  scheduleSave() { if (this.libraryReadOnly) { clearTimeout(this.saveTimer); return; } this.unsaved = true; this.renderHeader(); clearTimeout(this.saveTimer); if (this.nodeLibrary?.nested) return; this.saveTimer = setTimeout(() => this.persist(), 350); }
-  persist() {
-    if (this.nodeLibrary?.nested) { clearTimeout(this.saveTimer); return true; }
-    if (this.libraryReadOnly) { clearTimeout(this.saveTimer); return true; }
-    clearTimeout(this.saveTimer); if (this.storageConflict || this.corruptDraft) { this.renderHeader(); return false; }
-    let document;
+  cancelAutosave({ reset = false } = {}) {
+    clearTimeout(this.saveTimer); this.saveTimer = null;
+    if (reset) { this.autosaveDocumentId = null; this.autosaveDueAt = null; }
+  }
+  setAutosavePreferences(preferences) {
+    const previous = this.autosavePolicy || workflowAutosavePolicy(), next = workflowAutosavePolicy(preferences);
+    this.autosavePolicy = next;
+    if (previous.enabled === next.enabled && previous.intervalMs === next.intervalMs) { if (this.unsaved && this.saveTimer == null && next.enabled) this.scheduleSave(); return; }
+    this.cancelAutosave({ reset: true });
+    if (this.unsaved && next.enabled) this.scheduleSave();
+  }
+  scheduleSave() {
+    if (this.libraryReadOnly) { this.cancelAutosave({ reset: true }); return; }
+    this.unsaved = true; this.renderHeader();
+    const policy = this.autosavePolicy || workflowAutosavePolicy();
+    if (!policy.enabled || this.nodeLibrary?.nested) return;
+    const documentId = this.doc.id;
+    if (this.autosaveDocumentId !== documentId || !Number.isFinite(this.autosaveDueAt)) {
+      this.cancelAutosave({ reset: true }); this.autosaveDocumentId = documentId; this.autosaveDueAt = Date.now() + policy.intervalMs;
+    }
+    if (this.saveTimer != null) return;
+    const timer = setTimeout(() => {
+      if (this.saveTimer !== timer) return;
+      this.saveTimer = null;
+      if (this.doc.id !== documentId || this.libraryReadOnly || this.nodeLibrary?.nested || !this.unsaved || !(this.autosavePolicy || workflowAutosavePolicy()).enabled) return;
+      if (this.persist() === false && this.doc.id === documentId && this.unsaved && !this.libraryReadOnly && !this.nodeLibrary?.nested
+        && !this.storageConflict && !this.corruptDraft && (this.autosavePolicy || workflowAutosavePolicy()).enabled) {
+        this.cancelAutosave({ reset: true }); this.scheduleSave();
+      }
+    }, Math.max(0, this.autosaveDueAt - Date.now()));
+    this.saveTimer = timer;
+  }
+  cacheDraft() { return this.persist({ cacheOnly: true }); }
+  persist({ cacheOnly = false } = {}) {
+    if (this.nodeLibrary?.nested) { if (!cacheOnly) this.cancelAutosave(); return true; }
+    if (this.libraryReadOnly) { if (!cacheOnly) this.cancelAutosave({ reset: true }); return true; }
+    if (!cacheOnly) this.cancelAutosave({ reset: true });
+    if (this.storageConflict || this.corruptDraft) { this.renderHeader(); return false; }
+    let document, persisted = false;
     try {
       // A background save must not cancel an in-progress canvas gesture. Its
       // release schedules another save, which can commit the pending title.
-      if (!this.gesture && !this.flushTitleDraft()) return false;
-      clearTimeout(this.saveTimer);
+      if (!cacheOnly && !this.gesture && !this.flushTitleDraft()) return false;
+      if (!cacheOnly) this.cancelAutosave({ reset: true });
       // Pointer movement is a preview until release. A pending autosave must never
       // make a position durable that Escape, blur or route switching can cancel.
       const committed = this.gesture?.kind === 'nodes' ? this.gesture.before
@@ -1220,11 +1258,14 @@ export class WorkflowEditor {
       }
       if (localStorage.getItem(this.storageKey || STORAGE_KEY) !== this.storageValue) { this.storageConflict = true; this.renderRecovery(); this.renderHeader(); return false; }
       document = this.persistenceDocument(committed);
-      const raw = JSON.stringify({ version: 1, document, ui: { ...this.settings, canvasSize: this.canvasSize || null }, savedAt: new Date().toISOString() });
+      const previousPublication = cacheOnly ? JSON.parse(this.storageValue || 'null') : null, publicationPending = previousPublication?.publicationPending === true;
+      const raw = JSON.stringify({ version: 1, document, dirty: cacheOnly && Boolean(this.unsaved || this.titleDraft), publicationPending,
+        ...(publicationPending ? { publicationFingerprint: previousPublication.publicationFingerprint } : {}),
+        titleDraft: cacheOnly ? titleDraftFor(this.titleDraft, committed.id) : null, ui: { ...this.settings, canvasSize: this.canvasSize || null }, savedAt: new Date().toISOString() });
       if (new Blob([raw]).size > MAX_FILE_BYTES) throw new Error('草稿过大');
-      localStorage.setItem(this.storageKey || STORAGE_KEY, raw); this.storageValue = raw; this.unsaved = false; this.saveError = ''; this.renderHeader(); return true;
-    } catch { this.saveError = '保存失败，请导出 JSON'; this.unsaved = true; this.renderHeader(); return false; }
-    finally { if (document) this.onPersist?.(clone(document)); }
+      localStorage.setItem(this.storageKey || STORAGE_KEY, raw); this.storageValue = raw; persisted = true; if (!cacheOnly) this.unsaved = false; this.saveError = ''; this.renderHeader(); return true;
+    } catch { this.saveError = '保存失败，请导出 JSON'; if (!cacheOnly) this.unsaved = true; this.renderHeader(); return false; }
+    finally { if (persisted && !cacheOnly) this.onPersist?.(clone(document)); }
   }
   saveDraft() {
     if (this.libraryReadOnly) return;

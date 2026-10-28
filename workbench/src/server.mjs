@@ -473,6 +473,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       const sharedAssets = {
         '/shared/diagnostics.mjs': '../diagnostics.mjs',
         '/shared/keyboard-shortcuts.mjs': '../keyboard-shortcuts.mjs',
+        '/shared/workflow/workflow-autosave.mjs': 'workflow-autosave.mjs',
         '/shared/workflow/workflow-components.mjs': 'workflow-components.mjs',
         '/shared/workflow/workflow-capability-contract.mjs': 'workflow-capability-contract.mjs',
         '/shared/workflow/workflow-conversation-commands.mjs': 'workflow-conversation-commands.mjs',

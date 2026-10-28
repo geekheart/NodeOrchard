@@ -54,6 +54,14 @@ function storage(t, initial = null) {
   return () => raw;
 }
 
+function clock(t) {
+  let now = 0, sequence = 0; const tasks = new Map();
+  t.mock.method(Date, 'now', () => now);
+  globalValue(t, 'setTimeout', (callback, delay = 0) => { const id = ++sequence; tasks.set(id, { callback, at: now + delay }); return id; });
+  globalValue(t, 'clearTimeout', id => tasks.delete(id));
+  return { tick(milliseconds) { const target = now + milliseconds; for (;;) { const next = [...tasks].filter(([, task]) => task.at <= target).sort((a, b) => a[1].at - b[1].at)[0]; if (!next) break; tasks.delete(next[0]); now = next[1].at; next[1].callback(); } now = target; }, get now() { return now; } };
+}
+
 function documentWith(type = 'input', position = { x: 0, y: 0 }) {
   const doc = createDocument();
   doc.nodes.push(createNode(type, position, { id: 'node-a' }));
@@ -548,6 +556,90 @@ test('autosave excludes node and pan previews and stores only the fitted committ
     assert.equal(instance.gesture, null);
     assert.deepEqual(instance.doc, before, 'Escape/blur keeps the original content and live camera');
     assert.deepEqual(instance.doc.nodes, stored.nodes);
+  }
+});
+
+test('automatic saving waits ten minutes from the first edit and further edits do not postpone it', t => {
+  const time = clock(t), instance = editor(), savedAt = []; instance.unsaved = false;
+  instance.scheduleSave = WorkflowEditor.prototype.scheduleSave;
+  instance.persist = () => { savedAt.push(time.now); instance.unsaved = false; return true; };
+  instance.scheduleSave(); assert.equal(instance.unsaved, true);
+  time.tick(5 * 60_000); assert.deepEqual(savedAt, []);
+  instance.scheduleSave(); time.tick(5 * 60_000 - 1); assert.deepEqual(savedAt, []);
+  time.tick(1); assert.deepEqual(savedAt, [600_000]);
+  time.tick(600_000); assert.deepEqual(savedAt, [600_000], 'clean workflows do not produce repeated saves');
+});
+
+test('disabled automatic saving stays dirty while manual saving is immediate and the next edit starts a fresh interval', t => {
+  const time = clock(t), raw = storage(t), instance = editor(), savedAt = [];
+  instance.scheduleSave = WorkflowEditor.prototype.scheduleSave;
+  instance.setAutosavePreferences({ workflowAutosaveEnabled: false, workflowAutosaveIntervalMinutes: 2 });
+  instance.doc.nodes[0].x = 96; instance.scheduleSave(); time.tick(3_600_000);
+  assert.equal(raw(), null); assert.equal(instance.unsaved, true);
+  instance.saveDraft(); assert.ok(raw()); assert.equal(instance.unsaved, false);
+  instance.setAutosavePreferences({ workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 2 });
+  const persist = instance.persist.bind(instance); instance.persist = (...args) => { savedAt.push(time.now); return persist(...args); };
+  instance.doc.nodes[0].x = 120; instance.scheduleSave(); time.tick(60_000); instance.saveDraft();
+  const manuallySavedAt = time.now; time.tick(120_000); assert.deepEqual(savedAt, [manuallySavedAt]);
+  instance.doc.nodes[0].x = 144; instance.scheduleSave(); time.tick(119_999); assert.deepEqual(savedAt, [manuallySavedAt]);
+  time.tick(1); assert.deepEqual(savedAt, [manuallySavedAt, manuallySavedAt + 240_000]); assert.equal(instance.unsaved, false);
+});
+
+test('local recovery caching keeps edits and title drafts dirty without publishing or postponing automatic saving', t => {
+  const time = clock(t), values = new Map(), instance = editor(); let published = 0;
+  globalValue(t, 'localStorage', { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) });
+  instance.onPersist = () => published++; instance.scheduleSave = WorkflowEditor.prototype.scheduleSave;
+  instance.doc.nodes[0].x = 192; instance.scheduleSave(); time.tick(5 * 60_000);
+  instance.titleDraft = { documentId: instance.doc.id, value: '尚未提交的名称' }; instance.titleInput = { value: instance.titleDraft.value };
+  instance.propertyDrafts.set('node-a', { title: '未应用的属性' });
+  assert.equal(instance.cacheDraft(), true); assert.equal(published, 0); assert.equal(instance.unsaved, true);
+  const cached = JSON.parse(values.get(instance.storageKey)); assert.equal(cached.dirty, true); assert.deepEqual(cached.titleDraft, instance.titleDraft);
+  assert.equal(cached.document.nodes[0].x, 192); assert.equal(cached.document.nodes[0].title, instance.doc.nodes[0].title); assert.equal(instance.propertyDrafts.size, 1); assert.equal(instance.history.length, 0);
+  const restored = editor(); restored.restore(); assert.equal(restored.unsaved, true); assert.deepEqual(restored.titleDraft, instance.titleDraft); assert.deepEqual(restored.doc, cached.document);
+  time.tick(5 * 60_000 - 1); assert.equal(published, 0); time.tick(1); assert.equal(published, 1); assert.equal(instance.unsaved, false); assert.equal(instance.doc.title, '尚未提交的名称');
+});
+
+test('switching documents cannot publish the previous document timer and returning restores its dirty title draft', t => {
+  const time = clock(t), values = new Map(), instance = editor(), published = [];
+  globalValue(t, 'localStorage', { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) });
+  instance.onPersist = document => published.push(document.id); instance.scheduleSave = WorkflowEditor.prototype.scheduleSave; instance.requestGeometry = () => {};
+  const first = instance.doc; instance.scheduleSave(); instance.titleDraft = { documentId: first.id, value: '继续编辑的名称' };
+  const state = instance.captureDocumentState(); time.tick(300_000); instance.useDocument(createDocument());
+  time.tick(600_000); assert.deepEqual(published, []); assert.equal(instance.unsaved, false);
+  instance.useDocument(first, state); assert.equal(instance.unsaved, true); assert.deepEqual(instance.titleDraft, state.titleDraft);
+  instance.titleInput = { value: state.titleDraft.value }; time.tick(599_999); assert.deepEqual(published, []);
+  time.tick(1); assert.deepEqual(published, [first.id]); assert.equal(instance.doc.title, '继续编辑的名称');
+});
+
+test('changing automatic-save preferences cancels the old deadline and uses the newly enabled interval', t => {
+  const time = clock(t), instance = editor(), saves = [];
+  instance.scheduleSave = WorkflowEditor.prototype.scheduleSave; instance.persist = () => { saves.push(time.now); instance.unsaved = false; return true; };
+  instance.scheduleSave(); time.tick(300_000); instance.setAutosavePreferences({ workflowAutosaveEnabled: false });
+  time.tick(600_000); assert.deepEqual(saves, []); assert.equal(instance.unsaved, true);
+  instance.setAutosavePreferences({ workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 1 });
+  time.tick(30_000); instance.setAutosavePreferences({ workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 1 });
+  time.tick(29_999); assert.deepEqual(saves, []); time.tick(1); assert.deepEqual(saves, [960_000]);
+});
+
+test('failed local automatic saves retry on the next full interval while conflicts and disabled policies stop retries', t => {
+  const time = clock(t), values = new Map(), instance = editor(), publishedAt = []; let failWrites = true;
+  globalValue(t, 'localStorage', {
+    getItem: key => values.get(key) ?? null,
+    setItem(key, value) { if (failWrites && key.startsWith('workbench.workflow-document.v1:')) throw new Error('local storage unavailable'); values.set(key, value); },
+  });
+  instance.onPersist = () => publishedAt.push(time.now); instance.scheduleSave = WorkflowEditor.prototype.scheduleSave;
+  instance.setAutosavePreferences({ workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 1 });
+  time.tick(60_000); assert.equal(instance.unsaved, true); assert.equal(instance.saveError, '保存失败，请导出 JSON'); assert.deepEqual(publishedAt, []);
+  failWrites = false; time.tick(59_999); assert.deepEqual(publishedAt, []); time.tick(1); assert.deepEqual(publishedAt, [120_000]); assert.equal(instance.unsaved, false);
+  for (const blocked of ['storageConflict', 'corruptDraft', 'readonly', 'disabled']) {
+    instance.storageConflict = false; instance.corruptDraft = null; instance.libraryLifecycle = 'active';
+    instance.setAutosavePreferences({ workflowAutosaveEnabled: true, workflowAutosaveIntervalMinutes: 1 }); instance.scheduleSave();
+    const before = publishedAt.length;
+    if (blocked === 'disabled') instance.setAutosavePreferences({ workflowAutosaveEnabled: false, workflowAutosaveIntervalMinutes: 1 });
+    else if (blocked === 'readonly') instance.libraryLifecycle = 'trashed';
+    else instance[blocked] = blocked === 'corruptDraft' ? 'unreadable original' : true;
+    time.tick(60_000); instance.storageConflict = false; instance.corruptDraft = null; instance.libraryLifecycle = 'active'; time.tick(120_000);
+    assert.equal(publishedAt.length, before, `${blocked} must not schedule a delayed write`);
   }
 });
 

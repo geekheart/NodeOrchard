@@ -92,6 +92,8 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.equal(inspector.status, 'ui-only'); assert.deepEqual(inspector.tools, []);
   const camera = interfaces.features.find(row => row.id === 'workflow-canvas-view');
   assert.equal(camera.status, 'ui-only'); assert.deepEqual(camera.tools, []); assert.match(camera.note, /不触发工作流保存/);
+  const autosave = interfaces.features.find(row => row.id === 'workflow-autosave');
+  assert.equal(autosave.status, 'ui-only'); assert.deepEqual(autosave.tools, []); assert.match(autosave.note, /10分钟/);
   assert.equal(interfaces.features.find(row => row.id === 'business-code').status, 'proposal-only');
   assert.match(interfaces.features.find(row => row.id === 'workflow-editing').apply, /新增节点后自动按依赖布局/);
   assert.match(interfaces.features.find(row => row.id === 'workflow-editing').apply, /连线新增、删除或改接后也自动重排/);

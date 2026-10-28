@@ -20,6 +20,7 @@ import { SkillAuthoringUI } from './skill-authoring-ui.js';
 import { openAttachmentInput } from './workflow-attachment-input.js';
 import { ShortcutSettingsUI } from './shortcut-settings-ui.js';
 import { bindChatSendShortcut, updateChatShortcutHints, handleGlobalChatShortcut } from './keyboard-shortcuts.js';
+import { WORKFLOW_AUTOSAVE_DEFAULTS, workflowAutosavePolicy } from '../shared/workflow/workflow-autosave.mjs';
 
 const $ = (id) => document.getElementById(id);
 let workflowEditor, workflowBoard, workflowLibraryClient, applicationConversation, applicationConversationSelection, conversationHub, routeLoad = 0;
@@ -46,7 +47,8 @@ const appDiagnosticClient = createAppDiagnosticClient({ getState: () => ({ page:
 const backendLabels = { stopped: '尚未连接', starting: '连接中', ready: '已连接', error: '连接异常', disconnected: '已断开' };
 const sessionLabels = { idle: '空闲', ready: '已就绪', running: '进行中', busy: '进行中', waiting: '待处理', complete: '已完成', completed: '已完成', interrupted: '已停止', stopped: '已停止', unknown: '待确认', error: '失败', failed: '失败', disconnected: '未恢复' };
 const pageLabels = { board: '工作流看板', workflows: '节点编辑器', conversations: '对话管理', skills: 'Skills', statistics: '统计', settings: '设置', task: '任务' };
-const defaults = { theme: 'system', density: 'comfortable', defaultWorkspace: '.' };
+const defaults = { theme: 'system', density: 'comfortable', defaultWorkspace: '.', workflowAutosaveEnabled: WORKFLOW_AUTOSAVE_DEFAULTS.enabled,
+  workflowAutosaveIntervalMinutes: WORKFLOW_AUTOSAVE_DEFAULTS.intervalMinutes };
 const iconPaths = {
   workflow: 'M3 3h6v6H3zM15 3h6v6h-6zM15 15h6v6h-6zM9 6h6M6 9v9h9',
   home: 'M3 10.5 12 3l9 7.5M5 9v11h5v-6h4v6h5V9',
@@ -256,7 +258,7 @@ function ensureWorkflowEditor() {
     getRequests: () => [...state.requests.values()], taskURL,
   });
   workflowEditor.conversation = new WorkflowConversationUI(workflowEditor, { api, attachmentsClient: { api, binaryRequest }, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts });
-  workflowEditor.updateShortcutHints();
+  workflowEditor.setAutosavePreferences(preferences()); workflowEditor.updateShortcutHints();
   if (diagnosticCapture) workflowEditor.conversation.schedulePoll = () => {};
   workflowEditor.conversation.connectRuntime(workflowEditor.runtime);
   workflowLibraryClient = new WorkflowLibraryClient(workflowEditor, { api,
@@ -495,6 +497,7 @@ function applyPreferences(prefs) {
   document.documentElement.dataset.theme = ['light', 'dark'].includes(prefs.theme) ? prefs.theme : 'system'; document.documentElement.dataset.density = prefs.density === 'compact' ? 'compact' : 'comfortable';
   try { localStorage.setItem('workbench-appearance', JSON.stringify({ theme: prefs.theme, density: prefs.density })); } catch {}
   if (state.settings) shortcutSettings.accept(state.settings);
+  workflowEditor?.setAutosavePreferences(prefs);
   workflowEditor?.updateShortcutHints(); workflowEditor?.conversation?.updateShortcutHints(); applicationConversation?.updateShortcutHints();
   updateChatShortcutHints($('message-input'), $('send-button'), prefs.shortcuts);
 }
@@ -502,9 +505,14 @@ function renderSettings() {
   assistantPermissions.render();
   if (state.settings) shortcutSettings.accept(state.settings);
   const settings = state.settings; const runtime = settings?.runtime || {}; const prefs = preferences();
-  if (!state.settingsDirty) { $('setting-theme').value = prefs.theme; $('setting-density').value = prefs.density; $('setting-workspace').value = prefs.defaultWorkspace; }
+  if (!state.settingsDirty) {
+    $('setting-theme').value = prefs.theme; $('setting-density').value = prefs.density; $('setting-workspace').value = prefs.defaultWorkspace;
+    const autosave = workflowAutosavePolicy(prefs); $('setting-workflow-autosave-enabled').checked = autosave.enabled;
+    $('setting-workflow-autosave-interval').value = autosave.intervalMinutes;
+  }
   $('save-preferences').disabled = state.saving || !state.csrfToken || !settings; $('save-preferences').textContent = state.saving ? '保存中…' : '保存偏好';
-  for (const id of ['setting-theme', 'setting-density', 'setting-workspace']) $(id).disabled = state.saving || !settings;
+  for (const id of ['setting-theme', 'setting-density', 'setting-workspace', 'setting-workflow-autosave-enabled']) $(id).disabled = state.saving || !settings;
+  $('setting-workflow-autosave-interval').disabled = state.saving || !settings || !$('setting-workflow-autosave-enabled').checked;
   $('runtime-facts').replaceChildren(...factList([['连接状态', backendLabels[state.backend.state] || '尚未检查'], ['提供商', hermesModels.current().provider || state.backend.provider || runtime.provider], ['当前模型', hermesModels.current().model || state.backend.model], ['认证状态', state.backend.authenticated === true ? '已认证' : state.backend.authenticated === false ? '未认证' : '尚未检查'], ['Hermes 版本', state.backend.hermesVersion || runtime.hermesVersion], ['审批模式', settings?.approvalMode === 'manual' ? '手动审批' : settings?.approvalMode === 'smart' ? '智能审批' : '尚未确认']]).children);
   $('runtime-paths').replaceChildren(...factList([['Hermes 程序', runtime.hermesRoot], ['Hermes 目录', runtime.hermesHome], ['工作区根目录', runtime.workspaceRoot]]).children); renderBackend(); renderEvents();
 }
@@ -561,7 +569,7 @@ async function loadRouteData() {
       ensureWorkflowEditor(); await workflowLibraryClient.initialize();
       if (load !== routeLoad || state.route.page !== route.page || state.route.id !== route.id) return;
       if (route.page === 'board') {
-        await workflowLibraryClient.flush();
+        await workflowLibraryClient.flushPending();
         if (load === routeLoad && state.route.page === 'board') { ensureWorkflowBoard(); await workflowBoard.load(); }
       } else {
         const canResume = workflowEditor.documentLoaded !== false && workflowEditor.libraryReadOnly !== true;
@@ -695,8 +703,23 @@ $('create-skill').addEventListener('click', () => void skillAuthoring.open({ onC
   state.skillDetails.set(skill.name, skill); await loadSkills(true); if (isCurrent()) location.hash = `#/skills/${encodeURIComponent(skill.name)}`;
 } }));
 $('statistics-period').addEventListener('change', () => { renderStatistics(); void loadStatistics(); });
-$('preferences-form').addEventListener('input', () => { state.settingsDirty = true; $('preferences-status').textContent = '有未保存的更改'; });
-$('preferences-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.saving) return; state.saving = true; $('preferences-status').textContent = '正在保存…'; renderSettings(); try { const prefs = { theme: $('setting-theme').value, density: $('setting-density').value, defaultWorkspace: $('setting-workspace').value.trim() }; state.settings = await api('/api/settings', { method: 'POST', body: { preferences: prefs } }); state.settingsRevision++; state.settingsDirty = false; applyPreferences(preferences()); await synchronize(); $('preferences-status').textContent = '偏好已保存'; } catch (error) { $('preferences-status').textContent = `保存失败：${error.message}`; } finally { state.saving = false; renderSettings(); } });
+$('preferences-form').addEventListener('input', () => { state.settingsDirty = true; $('preferences-status').textContent = '有未保存的更改'; $('setting-workflow-autosave-interval').disabled = !$('setting-workflow-autosave-enabled').checked; });
+$('preferences-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); if (state.saving) return;
+  let interval = Number($('setting-workflow-autosave-interval').value);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 1440) {
+    if ($('setting-workflow-autosave-enabled').checked) { $('preferences-status').textContent = '自动保存周期必须为 1–1440 分钟的整数。'; return; }
+    interval = workflowAutosavePolicy(preferences()).intervalMinutes;
+  }
+  state.saving = true; $('preferences-status').textContent = '正在保存…'; renderSettings();
+  try {
+    const prefs = { theme: $('setting-theme').value, density: $('setting-density').value, defaultWorkspace: $('setting-workspace').value.trim(),
+      workflowAutosaveEnabled: $('setting-workflow-autosave-enabled').checked, workflowAutosaveIntervalMinutes: interval };
+    state.settings = await api('/api/settings', { method: 'POST', body: { preferences: prefs } });
+    state.settingsRevision++; state.settingsDirty = false; applyPreferences(preferences()); await synchronize(); $('preferences-status').textContent = '偏好已保存';
+  } catch (error) { $('preferences-status').textContent = `保存失败：${error.message}`; }
+  finally { state.saving = false; renderSettings(); }
+});
 $('session-form').addEventListener('submit', async (event) => { event.preventDefault(); if (state.creating || state.backend.state !== 'ready') return; state.creating = true; state.newTaskError = ''; renderNewTaskState(); notify(''); try { const result = await api('/api/sessions', { method: 'POST', body: { title: $('session-title').value.trim(), cwd: $('session-cwd').value.trim() } }); const session = result.session || result; upsertSession(session); state.histories.set(session.id, []); state.historyLoading = false; $('session-title').value = ''; $('session-cwd').value = ''; $('new-task-dialog').close(); navigate(taskURL(session.id)); } catch (error) { notify(`创建任务失败：${error.message}`, true); state.newTaskError = safeText(error.message); } finally { state.creating = false; renderNewTaskState(); } });
 $('resume-button').addEventListener('click', async () => { const id = state.selectedId; if (!id || state.resuming) return; const turnRevision = state.turnRevision.get(id) || 0; state.resuming = true; state.historyRevision.set(id, (state.historyRevision.get(id) || 0) + 1); notify(''); renderComposer(); try { const result = await api(`/api/sessions/${encodeURIComponent(id)}/resume`, { method: 'POST', body: {} }); if ((state.turnRevision.get(id) || 0) !== turnRevision) { await synchronize(); await loadHistory(id, { quiet: true }); notify('会话已恢复，并同步了较新的执行状态。'); return; } upsertSession(result.session); const snapshot = result.snapshot || {}; state.histories.set(id, snapshot.messages || []); state.info.set(id, snapshot.info || {}); for (const [key, request] of state.requests) if (request.sessionId === id) state.requests.delete(key); for (const request of snapshot.open_requests || []) state.requests.set(String(request.id), { ...request, sessionId: request.sessionId || id }); if (snapshot.inflight?.streaming || snapshot.running || snapshot.inflight === true) { const inflight = Array.isArray(snapshot.inflight) ? snapshot.inflight.at(-1) : snapshot.inflight; state.streams.set(id, { role: 'assistant', text: typeof inflight?.text === 'string' ? inflight.text : typeof inflight?.assistant === 'string' ? inflight.assistant : '' }); } else state.streams.delete(id); renderTask(); await loadHistory(id, { quiet: true }); notify('任务会话已恢复。'); } catch (error) { notify(`恢复失败：${error.message}`, true); } finally { state.resuming = false; renderComposer(); } });
 $('message-form').addEventListener('submit', async (event) => { event.preventDefault(); const id = state.selectedId; const text = $('message-input').value.trim(); if (!id || !text || isBusy(id) || state.backend.state !== 'ready') return; state.posting.add(id); state.messageRevision.set(id, (state.messageRevision.get(id) || 0) + 1); notify(''); const message = { role: 'user', text }; const messages = state.histories.get(id) || []; messages.push(message); state.histories.set(id, messages); $('message-input').value = ''; state.messageDrafts.delete(id); renderMessages({ follow: true }); try { await api(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { text } }); } catch (error) { const history = state.histories.get(id); const index = history?.indexOf(message) ?? -1; if (index >= 0) history.splice(index, 1); if (state.selectedId === id && !$('message-input').value) $('message-input').value = text; state.messageDrafts.set(id, text); notify(`发送失败：${error.message}`, true); if (id === state.selectedId) renderMessages(); } finally { state.posting.delete(id); updateSessionViews(); } });

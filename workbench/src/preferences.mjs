@@ -1,9 +1,12 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DEFAULT_SHORTCUTS, normalizeShortcuts } from '../shared/keyboard-shortcuts.mjs';
+import { WORKFLOW_AUTOSAVE_DEFAULTS } from '../shared/workflow/workflow-autosave.mjs';
 
 export const DEFAULT_PREFERENCES = Object.freeze({
   theme: 'system', density: 'comfortable', defaultModel: '', defaultWorkspace: '.', shortcuts: DEFAULT_SHORTCUTS,
+  workflowAutosaveEnabled: WORKFLOW_AUTOSAVE_DEFAULTS.enabled,
+  workflowAutosaveIntervalMinutes: WORKFLOW_AUTOSAVE_DEFAULTS.intervalMinutes,
 });
 
 const KEYS = new Set(Object.keys(DEFAULT_PREFERENCES));
@@ -41,6 +44,15 @@ export function validatePreferences(patch, current, { workspaceRoot } = {}) {
   if (Object.hasOwn(patch, 'density')) {
     if (!['comfortable', 'compact'].includes(patch.density)) throw new Error('无效的显示密度。');
     next.density = patch.density;
+  }
+  if (Object.hasOwn(patch, 'workflowAutosaveEnabled')) {
+    if (typeof patch.workflowAutosaveEnabled !== 'boolean') throw new Error('自动保存开关必须是布尔值。');
+    next.workflowAutosaveEnabled = patch.workflowAutosaveEnabled;
+  }
+  if (Object.hasOwn(patch, 'workflowAutosaveIntervalMinutes')) {
+    const interval = patch.workflowAutosaveIntervalMinutes;
+    if (!Number.isInteger(interval) || interval < 1 || interval > 1440) throw new Error('自动保存间隔必须是 1–1440 分钟的整数。');
+    next.workflowAutosaveIntervalMinutes = interval;
   }
   if (Object.hasOwn(patch, 'defaultWorkspace')) next.defaultWorkspace = workspacePreference(patch.defaultWorkspace, workspaceRoot);
   if (Object.hasOwn(patch, 'shortcuts')) {

@@ -257,6 +257,19 @@ test('applying a nested camera-only change preserves the parent snapshot without
   assert.deepEqual(editor.doc, before); assert.deepEqual(fixture.document, before);
 });
 
+test('nested editing pauses the parent automatic save and returning keeps its original elapsed deadline', t => {
+  let now = 0, sequence = 0; const tasks = new Map(), published = [];
+  const { fixture, editor, ui } = nestedHarness(t);
+  globalValue(t, 'setTimeout', (callback, delay) => { const id = ++sequence; tasks.set(id, { callback, at: now + delay }); return id; });
+  globalValue(t, 'clearTimeout', id => tasks.delete(id)); t.mock.method(Date, 'now', () => now);
+  editor.onPersist = document => published.push(document.id); editor.scheduleSave();
+  now = 300_000; ui.openNested(fixture.node.id); editor.doc.nodes[0].title = '仅内部草稿'; editor.scheduleSave();
+  now = 900_000; assert.equal(tasks.size, 0, 'neither the suspended parent nor child starts a remote save'); assert.deepEqual(published, []);
+  ui.cancelNested(); assert.equal(tasks.size, 1);
+  const [id, task] = [...tasks][0]; assert.equal(task.at, now, 'an elapsed parent deadline resumes immediately'); tasks.delete(id); task.callback();
+  assert.deepEqual(published, [fixture.document.id]); assert.equal(editor.unsaved, false);
+});
+
 test('applying real nested node movement preserves its position and saves only the child fitted viewport', async t => {
   const { fixture, editor, ui } = nestedHarness(t), parent = structuredClone(fixture.document); let committed;
   editor.commit = next => { committed = next; editor.doc = next; };

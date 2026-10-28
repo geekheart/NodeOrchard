@@ -40,16 +40,24 @@ class FakeEditor {
   renderHeader() { this.headers.push({ id: this.doc.id, status: this.libraryStatus, error: this.libraryError }); }
   cancelGesture() { this.cancelledGestures++; }
   cancelConnection() { this.cancelledConnections++; }
-  captureDocumentState() { return copy({ history: this.history, future: this.future, propertyDrafts: [...this.propertyDrafts], selection: [...this.selection], selectedEdge: this.selectedEdge }); }
+  captureDocumentState() { return copy({ history: this.history, future: this.future, propertyDrafts: [...this.propertyDrafts], selection: [...this.selection], selectedEdge: this.selectedEdge,
+    unsaved: this.unsaved === true, titleDraft: this.titleDraft || null }); }
   persist() {
-    this.storageValue = JSON.stringify({ version: 1, document: this.doc }); localStorage.setItem(this.storageKey, this.storageValue);
+    this.storageValue = JSON.stringify({ version: 1, document: this.doc }); localStorage.setItem(this.storageKey, this.storageValue); this.unsaved = false;
     this.onPersist?.(copy(this.doc)); return true;
   }
-  useDocument(value, state) {
+  cacheDraft() {
+    const previous = JSON.parse(localStorage.getItem(this.storageKey) || 'null');
+    this.storageValue = JSON.stringify({ version: 1, document: this.doc, dirty: Boolean(this.unsaved || this.titleDraft), titleDraft: this.titleDraft || null,
+      ...(previous?.publicationPending ? { publicationPending: true, publicationFingerprint: previous.publicationFingerprint } : {}) });
+    localStorage.setItem(this.storageKey, this.storageValue); return true;
+  }
+  useDocument(value, state, { persist = true } = {}) {
     this.doc = validateDocument(copy(value)); this.storageKey = DRAFT_PREFIX + value.id;
     this.history = copy(state?.history || []); this.future = copy(state?.future || []);
     this.propertyDrafts = new Map(copy(state?.propertyDrafts || [])); this.selection = new Set(state?.selection || []); this.selectedEdge = state?.selectedEdge || null;
-    this.uses.push({ id: value.id, state: copy(state) }); this.persist(); this.renderHeader();
+    this.unsaved = state?.unsaved === true; this.titleDraft = state?.titleDraft || null;
+    this.uses.push({ id: value.id, state: copy(state) }); if (persist) this.cacheDraft(); this.renderHeader();
   }
   toast(message) { this.toasts.push(message); }
 }
@@ -186,14 +194,14 @@ test('a conflicted A draft does not block saving B and reopens with its queued c
   assert.equal(remote.records.get(b.id).document.title, 'B saves independently'); assert.equal(remote.records.get(b.id).revision, 2);
   const attemptedA = remote.posts().filter(call => call.options.body.document.id === a.id).length;
   assert.equal(await client.open(a.id), true);
-  assert.deepEqual(editor.doc, localA); assert.deepEqual(editor.captureDocumentState(), stateA);
+  assert.deepEqual(editor.doc, localA); assert.deepEqual(editor.captureDocumentState(), { ...stateA, unsaved: true });
   assert.deepEqual(client.slot(a.id).queued, localA); assert.match(client.slot(a.id).error, /已变化/); assert.match(editor.libraryStatus, /本地保留/);
   assert.equal(client.slot(a.id).revision, 1); assert.equal(JSON.parse(values.get(ACK_KEY))[a.id], 1);
   assert.deepEqual(remote.records.get(a.id), serverA);
   assert.equal(remote.posts().filter(call => call.options.body.document.id === a.id).length, attemptedA, 'returning to a conflicted draft must not retry or overwrite it');
 });
 
-test('a persist refusal without onPersist retains committed A edits across switching B even when the remote CAS conflicts', async t => {
+test('a cache refusal retains committed A edits across switching B and defers a conflicting recovery until explicit save', async t => {
   const values = storage(t), a = document('persist-refused-A'), b = document('persist-refused-B');
   a.nodes = [createNode('tool', { x: 10, y: 20 }, { id: 'refused-A-node' })];
   const editor = new FakeEditor(document('placeholder')), remote = backend([record(a), record(b)]);
@@ -202,22 +210,23 @@ test('a persist refusal without onPersist retains committed A edits across switc
   remote.records.set(a.id, copy(serverA));
   editor.doc.title = 'A committed in memory only'; editor.doc.nodes[0].title = 'A committed node edit';
   editor.propertyDrafts.set('refused-A-node', { title: 'A unapplied property' }); editor.history.push({ label: 'A undo', document: copy(a) });
+  editor.unsaved = true;
   const localA = copy(editor.doc), stateA = editor.captureDocumentState(), notifications = [];
   const notify = editor.onPersist; editor.onPersist = value => { notifications.push(value.id); notify(value); };
-  editor.persist = function () {
+  editor.cacheDraft = function () {
     if (this.doc.id === a.id) return false;
-    return FakeEditor.prototype.persist.call(this);
+    return FakeEditor.prototype.cacheDraft.call(this);
   };
   assert.equal(client.slot(a.id).queued, null, 'the committed in-memory edit has never reached the normal persistence callback');
   assert.equal(await client.open(b.id), true); assert.equal(editor.doc.id, b.id);
-  assert.deepEqual(client.slot(a.id).queued, localA); assert.match(client.slot(a.id).error, /已变化/);
+  assert.deepEqual(client.slot(a.id).draft, localA); assert.equal(client.slot(a.id).queued, null); assert.match(client.slot(a.id).error, /本地缓存/);
   assert.equal(values.get(DRAFT_PREFIX + a.id), cachedA, 'refused persistence does not pretend the browser cache contains the new edit');
   assert.deepEqual(remote.records.get(a.id), serverA);
-  assert.deepEqual(remote.posts().map(call => [call.options.body.document.id, call.options.body.expectedRevision]), [[a.id, 1]]);
+  assert.equal(remote.posts().length, 0);
   assert.equal(await client.open(a.id), true);
-  assert.deepEqual(editor.doc, localA); assert.deepEqual(editor.captureDocumentState(), stateA);
-  assert.deepEqual(client.slot(a.id).queued, localA); assert.match(editor.libraryStatus, /本地保留/);
-  assert.deepEqual(remote.records.get(a.id), serverA); assert.equal(remote.posts().length, 1);
+  assert.notEqual(editor.doc.id, a.id); assert.deepEqual(editor.doc.nodes, localA.nodes); assert.deepEqual(editor.captureDocumentState(), stateA);
+  assert.deepEqual(client.slot(editor.doc.id).draft, editor.doc); assert.match(editor.libraryStatus, /尚未保存/);
+  assert.deepEqual(remote.records.get(a.id), serverA); assert.equal(remote.posts().length, 0);
   assert.equal(notifications.filter(id => id === a.id).length, 0, 'recovering the in-memory draft must work even though editor.persist never invokes onPersist for A');
 });
 
@@ -330,15 +339,16 @@ test('real node movement queues a fitted copy while retaining the live camera an
   assert.deepEqual(editor.doc, live); assert.notDeepEqual(projected.viewport, live.viewport);
 });
 
-test('a refused dirty save retains a fitted fallback and title drafts still trigger persistence', async t => {
+test('navigation caches dirty and title drafts without submitting a save, including cache failures', async t => {
   storage(t); const doc = document('refused-view'); doc.nodes = [createNode('tool', { x: 80, y: 60 }, { id: 'fallback-node' })];
   const editor = new FakeEditor(document('placeholder')), remote = backend([record(doc)]); fittedPersistence(editor);
   const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(doc.id);
   let persists = 0; editor.unsaved = false; editor.titleDraft = { documentId: doc.id, value: '待提交标题' }; editor.persist = () => { persists++; return true; };
-  client.rememberCurrent(); assert.equal(persists, 1, 'a title draft counts as an actual edit even before dirty is set');
-  editor.titleDraft = null; editor.unsaved = true; editor.doc.nodes[0].x = 480; editor.doc.viewport = { x: 900, y: 700, zoom: .2 }; editor.persist = () => { persists++; return false; };
+  client.rememberCurrent(); assert.equal(persists, 0, 'a title draft is cached without an implicit save');
+  assert.equal(JSON.parse(localStorage.getItem(DRAFT_PREFIX + doc.id)).titleDraft.value, '待提交标题');
+  editor.titleDraft = null; editor.unsaved = true; editor.doc.nodes[0].x = 480; editor.doc.viewport = { x: 900, y: 700, zoom: .2 }; editor.cacheDraft = () => false;
   const projected = editor.persistenceDocument(), live = copy(editor.doc); client.rememberCurrent();
-  assert.deepEqual(client.slot(doc.id).queued, projected); assert.deepEqual(editor.doc, live); assert.equal(remote.posts().length, 0);
+  assert.deepEqual(client.slot(doc.id).draft, projected); assert.equal(client.slot(doc.id).queued, null); assert.deepEqual(editor.doc, live); assert.equal(remote.posts().length, 0);
 });
 
 test('opening a non-current unreadable scoped draft preserves the original cache and the current canvas', async t => {
@@ -389,7 +399,7 @@ test('switching documents restores each document property drafts, undo redo hist
   storage(t); const a = document('state-A'), b = document('state-B'); a.nodes = [createNode('tool', { x: 0, y: 0 }, { id: 'node-A' })];
   b.nodes = [createNode('tool', { x: 0, y: 0 }, { id: 'node-B' })];
   const editor = new FakeEditor(document('placeholder')), remote = backend([record(a), record(b)]), client = new WorkflowLibraryClient(editor, { api: remote.api });
-  await client.open(a.id); editor.doc.title = 'A committed edit'; editor.propertyDrafts.set('node-A', { title: 'A unapplied property' });
+  await client.open(a.id); editor.doc.title = 'A committed edit'; editor.unsaved = true; editor.propertyDrafts.set('node-A', { title: 'A unapplied property' });
   editor.history.push({ label: 'A undo', document: copy(a) }); editor.future.push({ label: 'A redo', document: copy(a) }); editor.selection.add('node-A'); editor.selectedEdge = 'edge-A';
   const stateA = editor.captureDocumentState(); await client.open(b.id);
   assert.equal(editor.doc.id, b.id); assert.equal(editor.propertyDrafts.size, 0); assert.equal(editor.history.length, 0);
@@ -409,6 +419,87 @@ test('creating an empty workflow only saves its draft and does not execute, sche
   assert.equal(created.document.title, '新工作流'); assert.equal(remote.calls.length, 1); assert.equal(remote.posts().length, 1);
   assert.equal(await client.open(id), true); assert.equal(editor.doc.id, id);
   assert(remote.calls.every(call => call.path.startsWith('/api/workflow-library')));
+});
+
+test('disabled autosave keeps edits local across navigation and reload until an explicit save', async t => {
+  storage(t); const a = document('disabled-A'), b = document('disabled-B');
+  a.nodes = [createNode('tool', { x: 10, y: 20 }, { id: 'disabled-node' })];
+  const editor = new FakeEditor(document('placeholder')), remote = backend([record(a), record(b)]);
+  editor.autosavePolicy = { enabled: false };
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(a.id);
+  editor.doc.nodes[0].x = 410; editor.unsaved = true; client.leave();
+  assert.equal(remote.posts().length, 0); assert.equal(JSON.parse(localStorage.getItem(DRAFT_PREFIX + a.id)).dirty, true);
+  await client.open(b.id); await client.open(a.id);
+  assert.equal(editor.doc.nodes[0].x, 410); assert.equal(editor.unsaved, true); assert.equal(remote.posts().length, 0);
+  const restored = reloadedEditor(a.id); restored.autosavePolicy = { enabled: false };
+  const reloaded = new WorkflowLibraryClient(restored, { api: remote.api }); await reloaded.initialize();
+  assert.equal(restored.doc.nodes[0].x, 410); assert.equal(restored.unsaved, true); assert.equal(remote.posts().length, 0);
+  restored.persist(); await reloaded.flush();
+  assert.equal(remote.posts().length, 1); assert.equal(remote.records.get(a.id).revision, 2); assert.equal(remote.records.get(a.id).document.nodes[0].x, 410);
+});
+
+test('a concurrent same-workflow reopen defers recovery and preserves an uncached title draft under its new identity', async t => {
+  storage(t); const a = document('uncached-A'), editor = new FakeEditor(document('placeholder')), remote = backend([record(a)]);
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(a.id);
+  editor.doc.title = '尚未到周期的改动'; editor.unsaved = true;
+  editor.titleDraft = { documentId: a.id, value: '尚未提交的名称' };
+  const newer = record({ ...a, title: '另一窗口的新版本' }, 2); remote.records.set(a.id, newer);
+  await client.open(a.id);
+  assert.notEqual(editor.doc.id, a.id); assert.equal(remote.posts().length, 0); assert.deepEqual(remote.records.get(a.id), newer);
+  const recoveryId = editor.doc.id, cached = JSON.parse(localStorage.getItem(DRAFT_PREFIX + recoveryId));
+  assert.equal(cached.dirty, true); assert.deepEqual(cached.titleDraft, { documentId: recoveryId, value: '尚未提交的名称' });
+  assert.deepEqual(editor.titleDraft, cached.titleDraft); assert.equal(editor.unsaved, true);
+  const restored = reloadedEditor(recoveryId); restored.autosavePolicy = { enabled: false };
+  await new WorkflowLibraryClient(restored, { api: remote.api }).initialize();
+  assert.deepEqual(restored.titleDraft, cached.titleDraft); assert.equal(remote.posts().length, 0);
+});
+
+test('disabled autosave defers an unmarked legacy draft and navigation does not retry a failed explicit save', async t => {
+  const a = document('disabled-legacy'), local = { ...a, title: '旧版未同步草稿' };
+  storage(t, [[DRAFT_PREFIX + a.id, JSON.stringify({ version: 1, document: local })], [ACK_KEY, JSON.stringify({ [a.id]: 1 })]]);
+  const editor = reloadedEditor(a.id), b = document('after-failure'), remote = backend([record(a), record(b)]); editor.autosavePolicy = { enabled: false };
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.initialize();
+  assert.equal(remote.posts().length, 0); assert.equal(editor.doc.title, local.title); assert.equal(editor.unsaved, true);
+  remote.beforeSave = () => { throw failure('暂时离线', 503); };
+  editor.persist(); await assert.rejects(client.flush(), /暂时离线/); const count = remote.posts().length;
+  await client.open(b.id); await client.flushPending(a.id);
+  assert.equal(remote.posts().length, count); assert.equal(remote.records.get(a.id).revision, 1);
+});
+
+test('a failed earlier save never replaces a newer cached draft on reopen, and a confirmed receipt needs no replay', async t => {
+  storage(t); const a = document('failed-earlier'), b = document('failed-next'), editor = new FakeEditor(document('placeholder'));
+  const remote = backend([record(a), record(b)]), client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(a.id);
+  remote.beforeSave = () => { throw failure('响应未确认', 503); };
+  editor.doc.title = '旧的保存请求'; editor.persist(); await assert.rejects(client.flush(), /未确认/);
+  const requested = copy(client.slot(a.id).queued);
+  editor.doc.title = '较新的未保存草稿'; editor.unsaved = true;
+  await client.open(a.id); assert.equal(editor.doc.title, '较新的未保存草稿'); assert.equal(editor.unsaved, true);
+  await client.open(b.id); await client.open(a.id);
+  assert.equal(editor.doc.title, '较新的未保存草稿'); assert.equal(editor.unsaved, true);
+  assert.equal(client.slot(a.id).queued.title, requested.title); assert.equal(remote.posts().length, 1);
+  // A later read can confirm the old request succeeded without issuing it again.
+  remote.records.set(a.id, record(requested, 2)); await client.open(a.id);
+  assert.equal(editor.doc.title, '较新的未保存草稿'); assert.equal(client.slot(a.id).queued, null);
+  assert.equal(client.currentId, a.id);
+  assert.equal(client.slot(a.id).revision, 2); assert.equal(remote.posts().length, 1);
+});
+
+test('refreshing an unconfirmed save only reads its receipt and never resubmits it with autosave enabled', async t => {
+  storage(t); const original = document('unconfirmed-refresh'), editor = new FakeEditor(document('placeholder'));
+  editor.autosavePolicy = { enabled: true };
+  const remote = backend([record(original)]), client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(original.id);
+  remote.beforeSave = () => { throw failure('网络中断，结果未确认', 503); };
+  editor.doc.title = '待确认的保存'; editor.persist(); await assert.rejects(client.flush(), /未确认/);
+  const requested = copy(client.slot(original.id).queued);
+  assert.equal(JSON.parse(localStorage.getItem(DRAFT_PREFIX + original.id)).publicationPending, true);
+  const restored = reloadedEditor(original.id); restored.autosavePolicy = { enabled: true };
+  const reloaded = new WorkflowLibraryClient(restored, { api: remote.api }); await reloaded.initialize();
+  assert.equal(remote.posts().length, 1); assert.equal(restored.doc.title, requested.title); assert.match(reloaded.slot(original.id).error, /尚未确认/);
+  // A read confirms a lost successful response without creating another write.
+  remote.records.set(original.id, record(requested, 2)); await reloaded.open(original.id);
+  assert.equal(remote.posts().length, 1); assert.equal(reloaded.slot(original.id).revision, 2);
+  assert.notEqual(JSON.parse(localStorage.getItem(DRAFT_PREFIX + original.id)).publicationPending, true);
+  assert.equal(restored.unsaved, false);
 });
 
 test('a corrupt local draft is retained and never uploaded as a valid migration', async t => {

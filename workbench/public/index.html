@@ -36,6 +36,8 @@
             <label class="setting-row"><span>外观</span><select id="setting-theme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">暗色</option></select></label>
             <label class="setting-row"><span>界面密度</span><select id="setting-density"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label>
             <label class="setting-row"><span>默认工作目录<span>相对工作区路径；“.” 为根目录</span></span><input id="setting-workspace" autocomplete="off" placeholder="." /></label>
+            <label class="setting-row"><span>工作流自动保存</span><input id="setting-workflow-autosave-enabled" type="checkbox" checked disabled /></label>
+            <label class="setting-row"><span>自动保存间隔（分钟）</span><input id="setting-workflow-autosave-interval" type="number" min="1" max="1440" step="1" value="10" inputmode="numeric" disabled /></label>
             <div class="settings-save"><span id="preferences-status" role="status" class="helper"></span><button id="save-preferences" type="submit" class="button primary">保存偏好</button></div>
           </form></section>
           <section class="settings-section" aria-labelledby="shortcut-settings-heading"><div class="settings-section-heading"><h2 id="shortcut-settings-heading">快捷键</h2></div><div id="shortcut-settings-root"></div></section>
