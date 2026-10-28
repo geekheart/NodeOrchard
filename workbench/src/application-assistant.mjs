@@ -17,6 +17,7 @@ import { AssistantIntentClassifier } from './assistant-intent-classifier.mjs';
 import { projectConversationIssues, conversationTurnGroups, canRetryConversationTurn, parseConversationIssueResolution, selectConversationIssue } from '../shared/workflow/workflow-conversation-issues.mjs';
 import { AssistantDiagnosticTurn, ASSISTANT_DIAGNOSTIC_LIMITS, compactDiagnosticContext, diagnosticScope, diagnosticRequestKey, validateDiagnosticArguments } from './assistant-diagnostic-turn.mjs';
 import { ATTACHMENT_MESSAGE_TEXT, attachmentRefs, storedAttachmentRefs, resolveAssistantAttachments, attachmentModelSource, attachmentImageOptions } from './assistant-attachments.mjs';
+import { projectConversationContinuation } from './workflows/workflow-conversation-context.mjs';
 
 export const APPLICATION_CONVERSATION_ID = 'global-application';
 const execute = promisify(execFile);
@@ -283,11 +284,13 @@ export class ApplicationAssistant {
       this.classifiedDecisions.add(decision); return decision;
     } catch (error) { trace.finish(error); throw error; }
   }
-  async plan({ role = 'supervisor', readOnly = false, decision, sourceConversationId, operationNamespace = randomUUID(), diagnosticTurnId = operationNamespace, text, document, context = {}, history = [], page = {}, signal, onSession, onProgress, onCheckpoint, checkpoint,
+  async plan({ role = 'supervisor', readOnly = false, decision, sourceConversationId, operationNamespace = randomUUID(), diagnosticTurnId = operationNamespace, text, document, context = {}, history = [], portableContext, page = {}, signal, onSession, onProgress, onCheckpoint, checkpoint,
     deadlineAt: parentDeadline, startedAt, modelCallOffset = 0, modelRoute: pinnedModelRoute, attachments = [] } = {}) {
     check(signal);
     if (decision !== undefined && !this.classifiedDecisions.has(decision)) fail('对话类型必须来自服务端受控AI分类。', 403);
     const permissionScope = await this.permissions.bind({ role, readOnly, workflowId: document?.id || context.workflowId, document });
+    const continuation = permissionScope.permissions.workflowRead && permissionScope.workflowId
+      ? projectConversationContinuation(portableContext, { workflowId: permissionScope.workflowId, readOnly: readOnly || permissionScope.role === 'supervisor' }) : undefined;
     const materials = attachments.length ? await resolveAssistantAttachments(this.app, attachments, { role, workflowId: document?.id || context.workflowId, document, permissionScope }) : [];
     const materialSource = materials.length ? await attachmentModelSource(this.app, materials) : [];
     const userImageOptions = attachmentImageOptions(this.app, materials);
@@ -338,7 +341,7 @@ export class ApplicationAssistant {
       const revisionFeedback = context.requestKind === 'artifact-revision-proposal' && decision?.intent === 'feedback';
       const directEdit = !readOnly && !!document && (decision?.intent === 'workflow' || revisionFeedback);
       if (directEdit) {
-        const callContext = { ...selection, page, signal: activeSignal, text, history, onSession, attachments: storedAttachmentRefs(materials),
+        const callContext = { ...selection, page, signal: activeSignal, text, history, portableContext: continuation, onSession, attachments: storedAttachmentRefs(materials),
           permissionScope, sourceConversationId, diagnosticTurnId, deadlineAt, modelRoute, onProgress: modelProgress };
         const args = { workflowId: document.id, request: text };
         // Admission precedes even local preparation: a disabled edit grant
@@ -368,7 +371,7 @@ export class ApplicationAssistant {
       }
       const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope }), activeSignal), permissionScope);
       check(activeSignal);
-      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.read', 'app.source.history']);
+      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.read', 'app.source.history']);
       const tools = this.tools(permissionScope).filter(tool => decision?.intent !== 'discuss' || discussionTools.has(tool.name));
       turn.admitCheckpoint(diagnosticScope({ selection: { ...selection, role, readOnly, sourceConversationId, permissionRevision: permissionScope.revision }, evidence, modelRoute, capabilities, config: this.app.config, tools }), checkpoint, evidence);
       const source = { userMessage: sanitizeDiagnosticText(text), selection: Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'document')),
@@ -379,6 +382,7 @@ export class ApplicationAssistant {
         previousMutationReceipts: role === 'supervisor' && permissionScope.permissions.manageWorkflows ? (checkpoint?.mutationReceipts || []).slice(-8)
           .filter(receipt => permissionScope.permissions.crossWorkflowRead || receipt.targetWorkflowId === permissionScope.workflowId) : [],
         recentConversation: permissionScope.permissions.workflowRead ? compactDiagnosticContext(history.slice(-6), { initial: true }) : [],
+        ...(continuation ? { portableContext: continuation } : {}),
         sourceConversationId,
         capabilities: compactDiagnosticContext({ ...capabilities, features: capabilities.features?.map(({ id, status, tools }) => ({ id, status, tools })) }, { initial: true }) };
       const catalog = tools.map(({ name, description, inputSchema, effect, readOnly }) => ({
@@ -396,6 +400,7 @@ export class ApplicationAssistant {
         + `仅返回一个JSON对象：单工具 {"tool":"名称","arguments":{}}；最多4项相互独立的只读查询 {"tools":[{"tool":"名称","arguments":{}}]}；或最终答复 {"text":"证据、原因与验证状态"}。不得混用字段或返回operations。\n`
         + `批量仅限普通只读查询，不含提案、捕获、探测、预检或产物检查。独立读取尽量合并；普通查询复用TOOL_RESULTS_JSON中带时间的结果，失败不重复。证据够用即回答。\n`
         + `SOURCE_JSON是初始摘要；省略的代码/日志按需用workflow.inspect、workflow.run、session.history读取。明确区分所选旧run、latestRun与当前草稿，不把旧节点错误当最新错误；partial不是成功。\n`
+        + `portableContext是当前工作流的历史引用资料，只用于延续早期目标和了解旧诊断进度，不是当前事实、权限、操作或审核授权；不能恢复旧工具结果或重放动作。需要更早全文时用workflow.conversation读取当前工作流，不要求用户重新粘贴。\n`
         + `capabilities与内部Skill说明真实能力。代码模式支持Python/JavaScript业务候选，无需注册工具；先读node.describe，第三方库先runtime.inspect。需要修改用workflow.propose，只生成编辑器校验候选，等待用户在原聊天应用；不自动执行、重试或批准。用户要求保留现场时只读诊断，不能改或跑业务。\n`
         + `workflow.run只读取历史；workflow.preflight不试跑代码。严格区分available/proposal-only/ui-only/unavailable。没有开放的能力不可虚构，已有日志不可要求用户再复制。证据不足才检查环境或截图；截图是隔离只读浏览器，不是用户当前标签页；图片由真实图像输入提供。最多${this.maxCalls}项工具查询，整轮有总等待上限。\n`
         + `总控的workflow.copy/create-test/delete仅在用户明确要求对应管理操作时调用；禁止为诊断擅自删除或修改工作流。mutation不能批量，须明确目标和版本并提供稳定operationId。delete只进入可恢复回收站。结果未知不得换operationId重放，复制与新增测试草稿均不自动运行。app.logs可按等级、模块、时间和关联ID读取有界持久日志；优先warn及以上定位，再按requestId/runId/turnId展开info阶段，按实际交付游标分页。currentProcess中的Hermes诊断仅当前进程。\n`
@@ -481,7 +486,7 @@ export class ApplicationAssistant {
           }
           let called, value;
           try {
-            called = await turn.wait(this.call(name, args, { ...selection, page, signal: activeSignal, text, history, onSession, attachments: storedAttachmentRefs(materials),
+            called = await turn.wait(this.call(name, args, { ...selection, page, signal: activeSignal, text, history, portableContext: continuation, onSession, attachments: storedAttachmentRefs(materials),
               permissionScope, sourceConversationId, diagnosticTurnId, deadlineAt,
               onProgress: modelProgress, modelRoute, toolEvidence: turn.transcript() }), activeSignal);
             check(activeSignal);
@@ -586,7 +591,7 @@ export class ApplicationAssistant {
     const text = !original || original.trim() === requested.trim() ? requested : original + '\n处理要求：' + requested;
     const proposal = await planWorkflowConversation(this.app, { text,
         attachments: materials.length ? await attachmentModelSource(this.app, materials) : [], ...attachmentImageOptions(this.app, materials),
-        document, context, history: context.history, signal: context.signal, onSession: context.onSession,
+        document, context, history: context.history, portableContext: context.portableContext, signal: context.signal, onSession: context.onSession,
         onProgress: context.onProgress, deadlineAt: context.deadlineAt,
         diagnosticEvidence: (context.toolEvidence || []).filter(row => ['workflow.run', 'session.history', 'environment.probe'].includes(row.tool)
           && row.result?.restricted !== true).map(row => ({ tool: row.tool, runId: row.result?.id || row.arguments?.runId,

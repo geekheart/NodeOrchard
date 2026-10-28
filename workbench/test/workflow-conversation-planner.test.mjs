@@ -121,6 +121,25 @@ test('focused history is bounded and marks omissions without clipping the curren
   assert.equal(calls[0].prompt.split(current).length - 1, 1);
 });
 
+test('portable workflow context survives the focused history window as bounded historical data without restoring actions', async () => {
+  const doc = document(), { app, calls } = fixture({ text: '保留早期目标，候选尚未应用。', operations: [] });
+  const portableContext = { format: 'NodeOrchard.workflow-conversation-context', version: 1, workflowId: doc.id, conversationRevision: 40, turnCount: 20, historyTool: 'workflow.conversation',
+    backgroundMessages: [{ sourceTurnId: 'early-goal', role: 'user', text: 'EARLY_GOAL：每日公开项目海报，禁止改动已有工作流。', intent: 'workflow', historicalStatus: 'complete' }],
+    recentMessages: [{ sourceTurnId: 'recent', role: 'assistant', text: '已保留已有步骤。', historicalStatus: 'complete' }],
+    diagnosticProgress: [{ sourceTurnId: 'diagnosis', stage: 'model-response', label: '图片候选等待首个响应', status: 'error' }],
+    actions: [{ kind: 'review-approve', token: 'OLD_ACTION_MUST_NOT_RETURN' }], permissionScope: { grant: 'OLD_PERMISSION_MUST_NOT_RETURN' },
+    checkpoint: { results: [{ output: 'OLD_CACHE_MUST_NOT_RETURN' }] }, modelSessionId: 'OLD_SESSION_MUST_NOT_RETURN' };
+  await planWorkflowConversation(app, { text: '按之前目标继续修改', document: doc, portableContext,
+    history: Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: '最近讨论 ' + index })) });
+  const source = JSON.parse(calls[0].prompt.split('USER_SOURCE_JSON=')[1]);
+  assert(source.portableContext.backgroundMessages.some(row => row.text.includes('EARLY_GOAL')));
+  assert.equal(source.portableContext.diagnosticProgress[0].label, '图片候选等待首个响应');
+  assert.equal(source.portableContext.historyTool, 'workflow.conversation');
+  assert(JSON.stringify(source.portableContext).length <= 8500);
+  assert.equal(/OLD_(?:ACTION|PERMISSION|CACHE|SESSION)_MUST_NOT_RETURN/.test(calls[0].prompt), false);
+  assert.match(calls[0].prompt, /portableContext.*(?:历史|引用|资料)/);
+});
+
 test('a protected assistant controller is preferred while the original model route and deadline are retained', async () => {
   let calls = 0, options;
   const app = { assistantModel: { generate: async (_prompt, value) => { calls++; options = value; return '{"text":"候选","operations":[]}'; } },

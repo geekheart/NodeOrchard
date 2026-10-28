@@ -78,6 +78,84 @@ test('the original no-input GitHub poster request is AI-classified before one pr
   assert.deepEqual(f.app.workflows.list(), []);
 });
 
+test('direct workflow proposals receive restored early context without adding it to the lightweight classifier payload', async t => {
+  const f = await fixture(t), at = '2026-10-27T01:00:00.000Z';
+  const db = f.app.store.db;
+  db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,?)').run(f.document.id, 20);
+  const insert = db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)');
+  for (let index = 0; index < 16; index++) {
+    const turn = { id: 'restored-' + index, workflowId: f.document.id, clientMessageId: 'restored-message-' + index, status: 'complete',
+      importedArchive: true, sourceTurnId: 'original-' + index, createdAt: at, updatedAt: at, actions: [],
+      user: { text: index ? '后续讨论 ' + index : 'EARLY_PROPOSAL_GOAL：无输入，公开 GitHub 数据并生成真实海报。', intent: 'workflow', context: {} },
+      assistant: { text: '原有讨论 ' + index, ...(index === 15 ? { historicalProgress: [{ stage: 'proposal', label: 'OLD_PROPOSAL_PROGRESS：等待候选', status: 'interrupted' }] } : {}) } };
+    insert.run(turn.id, f.document.id, turn.clientMessageId, at, JSON.stringify(turn), JSON.stringify({ document: f.document, imported: true, automatic: true, requestDigest: 'old-' + index }));
+  }
+  const turn = await message(f, '按最早的目标创建这个工作流');
+  assert.equal(turn.status, 'proposed'); assert.equal(f.prompts.length, 2);
+  const classifier = f.prompts[0], proposal = f.prompts[1], source = JSON.parse(proposal.split('\nUSER_SOURCE_JSON=')[1]);
+  assert.equal(classifier.includes('EARLY_PROPOSAL_GOAL'), false); assert.equal(classifier.includes('OLD_PROPOSAL_PROGRESS'), false);
+  assert.equal(classifier.includes('portableContext'), false);
+  assert(source.portableContext.backgroundMessages.some(row => row.text.includes('EARLY_PROPOSAL_GOAL')));
+  assert(source.portableContext.diagnosticProgress.some(step => step.label.includes('OLD_PROPOSAL_PROGRESS')));
+  assert.equal(source.portableContext.workflowId, f.document.id); assert(JSON.stringify(source.portableContext).length <= 8000);
+  assert.deepEqual(f.app.workflowLibrary.get(f.document.id), f.before); assert.deepEqual(f.app.workflows.list(), []);
+});
+
+test('ordinary discussion can retrieve omitted middle conversation text through the scoped read-only history tool', async t => {
+  const f = await fixture(t), at = '2026-10-27T01:00:00.000Z';
+  const db = f.app.store.db;
+  db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,?)').run(f.document.id, 10);
+  const insert = db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)');
+  for (let index = 0; index < 10; index++) {
+    const turn = { id: 'middle-' + index, workflowId: f.document.id, clientMessageId: 'middle-message-' + index, status: 'complete', actions: [], createdAt: at, updatedAt: at,
+      user: { text: index === 4 ? 'MIDDLE_DETAIL：海报需要保留项目的许可证。' : '一般讨论 ' + index, intent: 'discuss', context: {} }, assistant: { text: '已记录 ' + index } };
+    insert.run(turn.id, f.document.id, turn.clientMessageId, at, JSON.stringify(turn), JSON.stringify({ document: f.document, automatic: true, requestDigest: 'middle-' + index }));
+  }
+  f.app.assistantModel.generate = async (prompt, options) => {
+    f.prompts.push(prompt);
+    if (options.title === '应用对话 · 任务意图分类') return '{"intent":"discuss"}';
+    const tools = JSON.parse(prompt.split('\nTOOL_CATALOG=')[1].split('\nSOURCE_JSON=')[0]);
+    assert(tools.some(row => row.name === 'workflow.conversation'));
+    if (f.prompts.length === 2) return '{"tool":"workflow.conversation","arguments":{"query":"MIDDLE_DETAIL","limit":1}}';
+    assert(prompt.split('\nTOOL_RESULTS_JSON=')[1].includes('MIDDLE_DETAIL'));
+    return '{"text":"之前要求海报保留项目许可证；历史资料已读取，未修改工作流。"}';
+  };
+  const turn = await message(f, '解释之前讨论过的海报要求');
+  assert.equal(turn.status, 'complete'); assert.match(turn.assistant.text, /许可证/);
+  assert.deepEqual(turn.assistant.evidence.map(row => row.tool), ['workflow.conversation']);
+  assert.deepEqual(f.app.workflowLibrary.get(f.document.id), f.before); assert.deepEqual(f.app.workflows.list(), []);
+});
+
+test('long conversation text is complete across the real diagnostic broker pagination and projection boundary', async t => {
+  const f = await fixture(t), at = '2026-10-27T01:00:00.000Z';
+  const expected = 'U'.repeat(1999) + '😀' + '中'.repeat(2500) + 'A'.repeat(3999), userText = expected.slice(0, 4501), assistantText = expected.slice(4501);
+  const db = f.app.store.db, source = { id: 'long-history-turn', workflowId: f.document.id, clientMessageId: 'long-history-message', status: 'complete', actions: [],
+    createdAt: at, updatedAt: at, user: { text: userText, intent: 'discuss', context: {} }, assistant: { text: assistantText } };
+  db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,1)').run(f.document.id);
+  db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)')
+    .run(source.id, f.document.id, source.clientMessageId, at, JSON.stringify(source), JSON.stringify({ document: f.document, requestDigest: 'long-history' }));
+  let restored = '', pages = 0;
+  f.app.assistantModel.generate = async (prompt, options) => {
+    f.prompts.push(prompt);
+    if (options.title === '应用对话 · 任务意图分类') return '{"intent":"discuss"}';
+    const transcript = JSON.parse(prompt.split('\nTOOL_RESULTS_JSON=')[1]), page = transcript.filter(row => row.tool === 'workflow.conversation').at(-1)?.result;
+    let offset = 0;
+    if (page) {
+      assert.equal(page.offset, restored.length);
+      const text = page.turns[0].messages.map(item => item.text).join('');
+      assert(text.length <= 2000); assert.equal(text.includes('[已截断'), false);
+      restored += text; pages++;
+      if (page.nextOffset === null) return '{"text":"完整历史已逐页读取，未恢复旧操作。"}';
+      offset = page.nextOffset;
+    }
+    return JSON.stringify({ tool: 'workflow.conversation', arguments: { turnId: source.id, offset } });
+  };
+  const turn = await message(f, '只读核对之前完整的长说明');
+  assert.equal(turn.status, 'complete'); assert.equal(restored, expected); assert.equal(pages, 5);
+  assert.equal(turn.assistant.evidence.filter(row => row.tool === 'workflow.conversation').length, pages);
+  assert.deepEqual(f.app.workflowLibrary.get(f.document.id), f.before); assert.deepEqual(f.app.workflows.list(), []);
+});
+
 test('questions, quoted edit requests and diagnostic instructions stay in the ordinary read-only decision path', async t => {
   for (const text of ['无输入，能不能解释这个工作流怎么运行？', '解释这句话：“帮我创建海报工作流”', '帮我检查为什么失败，不要修改工作流', '请分析这个节点配置是否合理']) {
     const f = await fixture(t); f.intent = 'discuss';

@@ -48,6 +48,51 @@ test('no shell, arbitrary files, source writes or model-supplied operations are 
   await assert.rejects(f.assistant.plan({ text: '检查问题' }), /协议/);
 });
 
+test('workflow diagnosis receives portable history as bounded data under the current read-only permissions', async t => {
+  const f = fixture(t, [{ text: '历史目标已恢复，仍需读取当前事实。' }]);
+  const portableContext = { format: 'NodeOrchard.workflow-conversation-context', version: 1, workflowId: 'wf', turnCount: 300,
+    backgroundMessages: [{ sourceTurnId: 'old-goal', role: 'user', text: 'EARLY_DIAG_GOAL：保留当前工作流并分析生成超时', intent: 'diagnose', historicalStatus: 'complete' }],
+    recentMessages: [{ sourceTurnId: 'old-feedback', role: 'user', text: 'PRIVATE_LEARNING_FEEDBACK', intent: 'feedback', historicalStatus: 'complete' }],
+    diagnosticProgress: [{ sourceTurnId: 'old-diagnosis', stage: 'model-response', label: '等待候选生成', status: 'interrupted' }],
+    permissionScope: { role: 'supervisor', permissions: { sourceRepair: true } }, actions: [{ token: 'STALE_APPROVAL_TOKEN' }],
+    checkpoint: { results: [{ cache: 'STALE_CACHED_FACT' }] }, modelSessionId: 'STALE_NATIVE_SESSION' };
+  await f.assistant.plan({ role: 'workflow', readOnly: true, text: '继续解释', context: { workflowId: 'wf' }, portableContext });
+  const source = JSON.parse(f.calls[0].prompt.split('\nSOURCE_JSON=')[1].split('\nTOOL_RESULTS_JSON=')[0]);
+  assert(source.portableContext.backgroundMessages.some(row => row.text.includes('EARLY_DIAG_GOAL')));
+  assert.equal(source.portableContext.diagnosticProgress[0].stage, 'model-response');
+  assert.equal(source.portableContext.historicalOnly, true); assert.equal(source.portableContext.resumePolicy, 'fresh-session');
+  assert(JSON.stringify(source.portableContext).length <= 8000);
+  assert.equal(/PRIVATE_LEARNING_FEEDBACK|STALE_APPROVAL_TOKEN|STALE_CACHED_FACT|STALE_NATIVE_SESSION/.test(f.calls[0].prompt), false);
+  assert.equal(source.permissionScope.role, 'workflow'); assert.equal(source.permissionScope.readOnly, true);
+  assert.deepEqual(source.permissionScope.permissions, DEFAULT_ASSISTANT_PERMISSIONS.workflow);
+  assert.equal(f.calls[0].prompt.includes('"name":"workflow.propose"'), false); assert.equal(f.reads.length, 0);
+});
+
+test('portable conversation data cannot cross the workflow boundary or bypass disabled workflow reads', async t => {
+  for (const foreign of [true, false]) await t.test(foreign ? 'foreign workflow' : 'workflow reads disabled', async sub => {
+    const f = fixture(sub, [{ text: '没有读取旧上下文。' }]);
+    if (!foreign) f.app.assistantPermissionSettings.get = () => ({ revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS),
+      workflow: { ...DEFAULT_ASSISTANT_PERMISSIONS.workflow, workflowRead: false } });
+    await f.assistant.plan({ role: 'workflow', text: '解释现状', context: { workflowId: 'wf' }, portableContext: {
+      format: 'NodeOrchard.workflow-conversation-context', version: 1, workflowId: foreign ? 'foreign' : 'wf',
+      backgroundMessages: [{ sourceTurnId: 'old', role: 'user', text: 'FORBIDDEN_CONTEXT_BODY' }], recentMessages: [], diagnosticProgress: [] } });
+    const source = JSON.parse(f.calls[0].prompt.split('\nSOURCE_JSON=')[1].split('\nTOOL_RESULTS_JSON=')[0]);
+    assert.equal(source.portableContext, undefined); assert.equal(f.calls[0].prompt.includes('FORBIDDEN_CONTEXT_BODY'), false);
+    assert.equal(f.reads.length, 0);
+  });
+});
+
+test('supervisor portable history retains ordinary background while keeping learning and feedback text private', async t => {
+  const f = fixture(t, [{ text: '只读取普通历史背景。' }]);
+  await f.assistant.plan({ role: 'supervisor', text: '解释历史目标', context: { workflowId: 'wf' }, portableContext: {
+    format: 'NodeOrchard.workflow-conversation-context', version: 1, workflowId: 'wf',
+    backgroundMessages: [{ sourceTurnId: 'normal', role: 'user', text: 'NORMAL_WORKFLOW_GOAL', intent: 'workflow' }],
+    recentMessages: [{ sourceTurnId: 'private', role: 'assistant', text: 'SUPERVISOR_PRIVATE_LEARNING_BODY', intent: 'feedback' }], diagnosticProgress: [] } });
+  const source = JSON.parse(f.calls[0].prompt.split('\nSOURCE_JSON=')[1].split('\nTOOL_RESULTS_JSON=')[0]);
+  assert(source.portableContext.backgroundMessages.some(row => row.text === 'NORMAL_WORKFLOW_GOAL'));
+  assert.equal(f.calls[0].prompt.includes('SUPERVISOR_PRIVATE_LEARNING_BODY'), false);
+});
+
 test('global conversation is idempotent, survives restart and never repeats an uncertain turn', async t => {
   const f = fixture(t, [{ intent: 'diagnose' }, { text: '已读取全局状态。' }]);
   const body = { clientMessageId: 'same-message', text: '检查整个应用' };

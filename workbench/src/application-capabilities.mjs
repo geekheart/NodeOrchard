@@ -8,6 +8,7 @@ import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-h
 import { ASSISTANT_MODEL_TOOLS } from './assistant-model-tools.mjs';
 import { APPLICATION_SOURCE_TOOLS } from './application-source-tools.mjs';
 import { resolveAssistantAttachments } from './assistant-attachments.mjs';
+import { readConversationHistory } from './workflows/workflow-conversation-context.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -36,6 +37,9 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     steps: { type: 'array', maxItems: 12, description: '受限应用路由导航、click/scroll；禁止业务提交、输入和任意脚本' } }),
   definition('workflow.preflight', '检查工作流默认输入及文件准备；不编译或试跑 Python，不证明依赖可用或业务产物成功。', { workflowId: text }),
   definition('workflow.folder', '只读获取指定工作流的独立文件夹、资料归集状态、保存版本与 .workflow 下载入口；不打开本机窗口、不解包、不执行。', { workflowId: text }),
+  definition('workflow.conversation', '按需搜索或分页读取获准工作流的完整可见对话历史。恢复早期目标时使用；返回历史数据，不恢复旧审核、权限、操作或模型会话。单条长消息使用 turnId 和 offset 继续读取。', {
+    workflowId: text, query: { type: 'string', maxLength: 200 }, beforeTurnId: text, turnId: text,
+    offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8 } }),
   definition('workflow.attachments', '读取当前获准工作流中用户保存的素材名称、路径与哈希；不执行或修改文件。', { workflowId: text }),
   definition('workflow.attachment.read', '按素材 ID 读取有界文本或二进制元数据，验证归属和哈希；图片在本轮选中后走原生图像输入，不把路径当成已看过。', {
     workflowId: text, id: text, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8192 } }),
@@ -43,9 +47,10 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     workflowId: text, request: { type: 'string', maxLength: 12000 } }, 'proposal'),
 ]);
 
-const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read']);
+const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
   { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
   { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置，认证继续由Hermes管理。创建全局可执行资源保留人工入口，业务Skill和应用助手均无skill_manage或配置写工具。' },
   { id: 'workflow-property-inspector', status: 'ui-only', tools: [], note: '属性面板随当前视图的有效节点或连线选择打开，取消选择后自动关闭；未应用的节点属性草稿保留。此为本地界面选择状态，不提供助手操作工具。' },
@@ -138,6 +143,15 @@ export class ApplicationCapabilities {
     if (name === 'assistant.skills.read') return this.skills.read(args.name);
     if (name === 'runtime.inspect') return inspectCodeRuntime(this.app, args, { signal: context.signal });
     if (name === 'workbench.inspect') return this.inspectWorkbench(args);
+    if (name === 'workflow.conversation') {
+      const workflowId = args.workflowId || context.workflowId || context.document?.id;
+      this.app.workflowLibrary.assertAvailable(workflowId);
+      return readConversationHistory(this.app.store.db, workflowId, args, {
+        readOnly: context.permissionScope?.readOnly === true || context.permissionScope?.role === 'supervisor',
+        document: this.app.workflowLibrary.get?.(workflowId)?.document,
+        readRun: this.app.workflows?.get ? id => this.app.workflows.get(id) : undefined,
+      });
+    }
     if (name === 'workflow.attachments' || name === 'workflow.attachment.read') {
       const workflowId = args.workflowId || context.workflowId || context.document?.id;
       this.app.workflowLibrary.assertAvailable(workflowId);
@@ -152,7 +166,7 @@ export class ApplicationCapabilities {
       const record = this.app.workflowLibrary.get(workflowId);
       return { workflowId: record.id, directory: this.app.workflowFolders.directory(record.id), revision: record.revision,
         ...this.app.workflowFolders.status(record.id),
-        layout: ['workflow.json', 'conversation.json', 'inputs/', 'outputs/', 'runs/', 'history/', 'skills/'],
+        layout: ['workflow.json', 'conversation.json', 'conversation.md', 'context.json', 'inputs/', 'outputs/', 'runs/', 'history/', 'skills/'],
         export: { format: '.workflow', url: `/api/workflow-library/${record.id}/export?expectedRevision=${record.revision}` } };
     }
     if (name === 'node.describe') return workflowNodeContract(args.type, { schemaVersion: args.schemaVersion ?? context.document?.schemaVersion ?? 2 });

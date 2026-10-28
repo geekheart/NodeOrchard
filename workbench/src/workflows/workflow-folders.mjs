@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { lstat, readFile, readdir, realpath, stat, writeFile, rename, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { workflowInputFields, workflowInputValue } from '../../shared/workflow/workflow-inputs.mjs';
+import { captureConversationSnapshot, conversationJson, conversationMarkdown, buildConversationContext } from './workflow-conversation-context.mjs';
 
 const execute = promisify(execFile), clone = value => structuredClone(value);
 const hash = data => createHash('sha256').update(data).digest('hex');
@@ -25,7 +26,8 @@ const identifier = value => {
 // index. They never move or rewrite frozen historical execution identities.
 export class WorkflowFolders {
   constructor(app, { openDirectory } = {}) {
-    this.app = app; this.db = app.store.db; this.pending = new Map(); this.inputRequests = new Map();
+    this.app = app; this.db = app.store.db; this.pending = new Map(); this.inputRequests = new Map(); this.conversationPersistence = new Map();
+    this.db.exec('CREATE TABLE IF NOT EXISTS workflow_conversation_persistence (workflow_id TEXT PRIMARY KEY,value TEXT NOT NULL)');
     this.workspace = resolve(app.config.workspaceRoot);
     this.openDirectory = openDirectory || (path => execute(process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open', [path], { timeout: 5000 }));
   }
@@ -55,7 +57,10 @@ export class WorkflowFolders {
     return directory;
   }
   json(workflowId, name, value) {
-    const directory = this.ensure(workflowId), path = this.safePath(directory, join(directory, name)), serialized = JSON.stringify(value, null, 2) + '\n';
+    return this.writeText(workflowId, name, JSON.stringify(value, null, 2) + '\n');
+  }
+  writeText(workflowId, name, serialized) {
+    const directory = this.ensure(workflowId), path = this.safePath(directory, join(directory, name));
     mkdirSync(dirname(path), { recursive: true }); this.safePath(directory, path);
     if (existsSync(path) && readFileSync(path, 'utf8') === serialized) return;
     const temporary = path + '.' + randomUUID() + '.tmp';
@@ -105,7 +110,7 @@ export class WorkflowFolders {
         return value;
       } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     };
-    return { inputSync: read('input-sync.json'), migration: read('migration-errors.json') };
+    return { inputSync: read('input-sync.json'), migration: read('migration-errors.json'), conversationSync: this.conversationStatus(workflowId) };
   }
   scheduleInputs(record) {
     // The database save has already committed. Material failures belong to this
@@ -143,12 +148,51 @@ export class WorkflowFolders {
       request.promise = Promise.resolve(status('error', { error: error.message })); return request.promise;
     }
   }
-  syncConversation(workflowId) {
+  conversationStatus(workflowId) {
+    identifier(workflowId);
+    const cached = this.conversationPersistence.get(workflowId);
+    if (cached) return clone(cached);
+    const row = this.db.prepare('SELECT value FROM workflow_conversation_persistence WHERE workflow_id=?').get(workflowId);
+    return row ? JSON.parse(row.value) : null;
+  }
+  recordConversationStatus(value) {
+    this.conversationPersistence.set(value.workflowId, clone(value));
+    try { this.db.prepare('INSERT INTO workflow_conversation_persistence(workflow_id,value) VALUES(?,?) ON CONFLICT(workflow_id) DO UPDATE SET value=excluded.value')
+      .run(value.workflowId, JSON.stringify(value)); }
+    catch { /* A diagnostic index failure cannot change a committed chat turn. */ }
+    return clone(value);
+  }
+  syncConversation(workflowId, { required = false, snapshot } = {}) {
     identifier(workflowId); this.app.workflowLibrary?.assertAvailable(workflowId);
-    const revision = this.table('workflow_conversations') ? this.db.prepare('SELECT revision FROM workflow_conversations WHERE workflow_id=?').get(workflowId)?.revision || 0 : 0;
-    const rows = this.table('workflow_conversation_turns') ? this.db.prepare('SELECT value,private_value FROM workflow_conversation_turns WHERE workflow_id=? ORDER BY rowid').all(workflowId) : [];
-    const turns = rows.map(row => ({ ...JSON.parse(row.value), privateValue: JSON.parse(row.private_value || '{}') }));
-    this.json(workflowId, 'conversation.json', { version: 1, workflowId, revision, turns });
+    const previous = this.conversationStatus(workflowId), at = () => new Date().toISOString();
+    let captured, revision = previous?.revision || 0, conversationSha256;
+    try {
+      captured = snapshot || captureConversationSnapshot(this.db, workflowId); revision = captured.revision;
+      if (captured.workflowId !== workflowId) fail('聊天文件快照归属不一致。', 409);
+      const serialized = conversationJson(captured), context = buildConversationContext(captured); conversationSha256 = hash(Buffer.from(serialized));
+      if (context.conversationSha256 !== conversationSha256) fail('聊天文件与上下文快照哈希不一致。', 409);
+      this.recordConversationStatus({ version: 1, workflowId, revision, status: 'dirty', dirty: true, updatedAt: at(),
+        ...(previous?.lastSyncedRevision !== undefined ? { lastSyncedRevision: previous.lastSyncedRevision } : {}) });
+      this.writeText(workflowId, 'conversation.json', serialized);
+      this.writeText(workflowId, 'conversation.md', conversationMarkdown(captured));
+      // Publish the binding last. A partial filesystem failure remains dirty;
+      // exports require a successful retry rather than packaging mixed versions.
+      this.json(workflowId, 'context.json', context);
+      const result = this.recordConversationStatus({ version: 1, workflowId, revision, status: 'synced', dirty: false, conversationSha256,
+        lastSyncedRevision: revision, updatedAt: at() });
+      if (previous?.dirty) this.app.logEvents?.write('info', 'workflow.conversation.persistence.synced', { component: 'workflow', workflowId, revision, status: 'synced' });
+      return result;
+    } catch (error) {
+      const errorCode = typeof error.code === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(error.code) ? error.code : 'CONVERSATION_WRITE_FAILED';
+      const result = this.recordConversationStatus({ version: 1, workflowId, revision, status: 'error', dirty: true, error: error.message, errorCode, updatedAt: at(),
+        ...(conversationSha256 ? { conversationSha256 } : {}), ...(previous?.lastSyncedRevision !== undefined ? { lastSyncedRevision: previous.lastSyncedRevision } : {}) });
+      if (previous?.status !== 'error' || previous?.errorCode !== errorCode) this.app.logEvents?.write('error', 'workflow.conversation.persistence.failed', { component: 'workflow', workflowId, revision, status: 'error', code: errorCode });
+      if (required) throw Object.assign(new Error('聊天文件尚未完整保存，未导出：' + error.message), { httpStatus: error.httpStatus || 409, code: 'CONVERSATION_FLUSH_FAILED' });
+      return result;
+    }
+  }
+  flushConversation(workflowId, options = {}) {
+    return this.syncConversation(workflowId, { ...options, required: true });
   }
   syncRun(run) {
     if (!run || typeof run !== 'object') fail('运行文件记录无效。');
@@ -528,10 +572,14 @@ export class WorkflowFolders {
     const record = this.record(workflowId); this.syncDocument(record); this.syncConversation(workflowId);
     const result = { workflowId, directory: this.directory(workflowId), ...(request ? { inputSync: this.inputStatus(workflowId) } : {}) };
     this.directory(workflowId); await this.openDirectory(result.directory);
-    return { ...result, opened: true };
+    return { ...result, conversationSync: this.conversationStatus(workflowId), opened: true };
   }
   async close() {
     this.closing = true;
     while (this.pending.size) await Promise.allSettled([...this.pending.values()]);
+    for (const row of this.db.prepare('SELECT workflow_id,value FROM workflow_conversation_persistence').all()) {
+      if (!JSON.parse(row.value).dirty) continue;
+      try { this.syncConversation(row.workflow_id); } catch { /* Keep dirty metadata for the next explicit flush or startup. */ }
+    }
   }
 }

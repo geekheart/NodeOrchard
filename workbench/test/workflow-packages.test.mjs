@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Application } from '../src/application.mjs';
@@ -8,6 +9,7 @@ import { readConfig } from '../src/config.mjs';
 import { createWorkbenchServer } from '../src/server.mjs';
 import { createDocument, createNode, connectNodes } from '../shared/workflow/workflow-model.mjs';
 import { encodeZip, decodeZip } from '../src/workflows/workflow-zip.mjs';
+import { captureConversationSnapshot, validateConversationContext } from '../src/workflows/workflow-conversation-context.mjs';
 
 class Offline extends EventEmitter {
   constructor() { super(); this.state = 'stopped'; this.serverRequests = new Map(); this.calls = []; }
@@ -117,4 +119,68 @@ test('the assistant discovers only its workflow folder and a download link witho
   assert.equal(result.directory, f.app.workflowFolders.directory(f.document.id)); assert.match(result.export.url, /expectedRevision=1$/);
   await assert.rejects(f.app.applicationAssistant.call('workflow.folder', { workflowId: 'workflow-other' }, context), /当前工作流/);
   await assert.rejects(f.app.applicationAssistant.call('workflow.folder', { path: '/etc' }, context), /未知|字段/);
+});
+
+test('export requires a complete three-file conversation flush and rejects a chat changed while ZIP entries are read', async t => {
+  const f = await fixture(t, { run: false }), write = f.app.workflowFolders.writeText.bind(f.app.workflowFolders);
+  f.app.workflowFolders.writeText = (workflowId, name, serialized) => { if (name === 'context.json') throw Error('isolated context write failure'); return write(workflowId, name, serialized); };
+  await assert.rejects(f.app.workflowPackages.export(f.document.id, { expectedRevision: 1 }), /聊天文件尚未完整保存/);
+  assert.equal(f.app.conversations.get(f.document.id).conversation.turns[0].status, 'complete'); assert.equal(f.app.workflowFolders.conversationStatus(f.document.id).dirty, true);
+  f.app.workflowFolders.writeText = write;
+  const entries = f.app.workflowPackages.entries.bind(f.app.workflowPackages);
+  f.app.workflowPackages.entries = async directory => {
+    const captured = await entries(directory), turn = structuredClone(f.app.conversations.get(f.document.id).conversation.turns[0]);
+    turn.assistant.text = '打包途中确认的新回复。'; f.app.conversations.update(turn); return captured;
+  };
+  await assert.rejects(f.app.workflowPackages.export(f.document.id, { expectedRevision: 1 }), error => error.httpStatus === 409 && /聊天记录.*变化/.test(error.message));
+  f.app.workflowPackages.entries = entries;
+  const exported = await f.app.workflowPackages.export(f.document.id, { expectedRevision: 1 }), decoded = decodeZip(exported.data);
+  const conversationFile = decoded.find(row => row.name === 'conversation.json'), conversation = JSON.parse(conversationFile.data), context = JSON.parse(decoded.find(row => row.name === 'context.json').data), manifest = JSON.parse(decoded.find(row => row.name === 'workflow-package.json').data);
+  validateConversationContext(context, conversation); assert.equal(conversation.turns[0].assistant.text, '打包途中确认的新回复。');
+  assert.equal(manifest.conversation.revision, conversation.revision); assert.equal(manifest.conversation.sha256, createHash('sha256').update(conversationFile.data).digest('hex')); assert.equal(context.conversationSha256, manifest.conversation.sha256);
+  assert(decoded.find(row => row.name === 'conversation.md').data.toString().includes('打包途中确认的新回复。'));
+});
+
+function rewrittenPackage(data, change) {
+  const entries = decodeZip(data), result = change(entries) || entries, manifest = JSON.parse(result.find(row => row.name === 'workflow-package.json').data);
+  manifest.files = result.filter(row => !row.name.endsWith('/') && row.name !== 'workflow-package.json').map(row => ({ name: row.name, size: row.data.length, sha256: createHash('sha256').update(row.data).digest('hex') }));
+  result.find(row => row.name === 'workflow-package.json').data = Buffer.from(JSON.stringify(manifest)); return encodeZip(result);
+}
+
+test('old packages rebuild context while malformed bound contexts reject before registering another workflow', async t => {
+  const f = await fixture(t, { run: false }), exported = await f.app.workflowPackages.export(f.document.id, { expectedRevision: 1 });
+  const legacy = rewrittenPackage(exported.data, entries => {
+    const remaining = entries.filter(row => !['context.json', 'conversation.md'].includes(row.name)), manifest = remaining.find(row => row.name === 'workflow-package.json'), value = JSON.parse(manifest.data);
+    delete value.conversation; manifest.data = Buffer.from(JSON.stringify(value)); return remaining;
+  });
+  const imported = await f.app.workflowPackages.import(legacy, { filename: 'legacy.workflow', operationId: crypto.randomUUID() });
+  const folder = f.app.workflowFolders.directory(imported.workflow.id), snapshot = JSON.parse(await readFile(join(folder, 'conversation.json'), 'utf8'));
+  validateConversationContext(JSON.parse(await readFile(join(folder, 'context.json'), 'utf8')), snapshot); assert.match(await readFile(join(folder, 'conversation.md'), 'utf8'), /原始完整聊天内容/);
+  const before = f.app.workflowLibrary.list().length;
+  for (const mutate of [value => { value.permissionScope = { all: true }; }, value => { value.conversationRevision++; }, value => { value.recentMessages[0].sourceTurnId = 'foreign-turn'; }, value => { value.resumePolicy = 'resume-native-session'; }]) {
+    const malicious = rewrittenPackage(exported.data, entries => { const entry = entries.find(row => row.name === 'context.json'), value = JSON.parse(entry.data); mutate(value); entry.data = Buffer.from(JSON.stringify(value)); });
+    await assert.rejects(f.app.workflowPackages.import(malicious, { filename: 'bad-context.workflow', operationId: crypto.randomUUID() }), /上下文/);
+  }
+  assert.equal(f.app.workflowLibrary.list().length, before);
+});
+
+test('import regenerates permanent context and text with new identities and retains data-only continuity after restart', async t => {
+  const f = await fixture(t, { run: false }), original = structuredClone(f.app.conversations.get(f.document.id).conversation.turns[0]);
+  original.modelSessionId = 'SOURCE_NATIVE_AUTHORITY'; original.actions = [{ id: 'source-action', kind: 'mark-applied' }];
+  original.assistant.checkpoint = { cache: { operation: 'must-not-resume' }, steps: [{ stage: 'inspect', label: '检查历史阶段', status: 'complete' }] };
+  f.app.conversations.update(original);
+  const exported = await f.app.workflowPackages.export(f.document.id, { expectedRevision: 1 }), imported = await f.app.workflowPackages.import(exported.data, { filename: exported.filename, operationId: crypto.randomUUID() });
+  const id = imported.workflow.id, folder = f.app.workflowFolders.directory(id), turns = f.app.conversations.get(id).conversation.turns, turn = turns[0];
+  assert.notEqual(turn.id, original.id); assert.deepEqual(turn.actions, []); assert.equal(turn.modelSessionId, undefined); assert.equal(turn.assistant.checkpoint, undefined);
+  assert.deepEqual(turn.assistant.historicalProgress, [{ stage: 'inspect', label: '检查历史阶段', status: 'complete', sourceTurnId: turn.id }]);
+  let context = JSON.parse(await readFile(join(folder, 'context.json'), 'utf8')); validateConversationContext(context, captureConversationSnapshot(f.app.store.db, id));
+  assert.equal(context.workflowId, id); assert(context.diagnosticProgress.every(row => row.sourceTurnId === turn.id)); assert.equal(JSON.stringify(context).includes('SOURCE_NATIVE_AUTHORITY'), false);
+  assert((await readdir(join(folder, 'history'))).some(name => name.startsWith('import-')));
+  await f.app.close(); const adapter = new Offline(), restarted = new Application(f.config, adapter);
+  try {
+    await restarted.workflowFoldersReady;
+    context = JSON.parse(await readFile(join(folder, 'context.json'), 'utf8')); validateConversationContext(context, captureConversationSnapshot(restarted.store.db, id));
+    assert.equal(restarted.conversations.get(id).conversation.turns[0].assistant.text, original.assistant.text); assert.equal(context.resumePolicy, 'fresh-session'); assert.equal(context.historicalOnly, true);
+    assert.match(await readFile(join(folder, 'conversation.md'), 'utf8'), /请保留完整历史/); assert.equal(restarted.workflows.list(id).length, 0);
+  } finally { await restarted.close(); assert.deepEqual(adapter.calls, []); }
 });

@@ -158,6 +158,70 @@ test('failed diagnosis retains completed evidence and its failed stage across re
   assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
 });
 
+test('the next workflow turn after restart recovers an imported early goal and historical diagnostic progress beyond the UI window', async t => {
+  const f = await fixture(t), document = graph(), saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const at = '2026-10-27T01:00:00.000Z', db = f.app.store.db;
+  db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,?)').run(document.id, 207);
+  const insert = db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)');
+  for (let index = 0; index < 206; index++) {
+    const turn = { id: 'imported-' + index, workflowId: document.id, clientMessageId: 'imported-message-' + index, status: 'complete',
+      importedArchive: true, sourceTurnId: 'source-' + index, originalStatus: index === 205 ? 'error' : 'complete', createdAt: at, updatedAt: at, actions: [],
+      user: { text: index ? '后续讨论 ' + index : 'EARLY_IMPORTED_GOAL：每天生成一张 GitHub 前十项目海报，保留现有工作流。', intent: 'workflow', context: {} },
+      assistant: { text: '已保留历史 ' + index, ...(index === 205 ? { historicalProgress: [{ stage: 'model-response', label: 'IMPORTED_DIAG_STEP：候选等待响应', status: 'error' }],
+        checkpoint: { results: [{ result: 'UNSAFE_IMPORTED_CACHE' }], mutationReceipts: [{ token: 'UNSAFE_IMPORTED_RECEIPT' }] } } : {}) },
+      modelSessionId: 'UNSAFE_IMPORTED_SESSION' };
+    insert.run(turn.id, document.id, turn.clientMessageId, at, JSON.stringify(turn), JSON.stringify({ imported: true, automatic: true, document,
+      permissionScope: { role: 'supervisor', sourceRepair: true }, requestDigest: 'old-' + index }));
+  }
+  await f.restart();
+  let offered, classificationCalls = 0;
+  f.app.applicationAssistant.intentClassifier.classify = async options => {
+    classificationCalls++; assert.equal(Object.hasOwn(options, 'portableContext'), false);
+    assert.equal(JSON.stringify(options.history).includes('EARLY_IMPORTED_GOAL'), false);
+    return { intent: 'discuss', modelRoute: { provider: 'fixture', model: 'fixture-model' }, modelCalls: 1 };
+  };
+  f.app.conversations.planner = async (_app, options) => { offered = options; return { text: '已恢复早期目标，旧诊断仅供参考。' }; };
+  const result = await settledMessage(f, document.id, message(document, '继续说明之前的目标'));
+  assert.equal(result.turn.status, 'complete'); assert.equal(classificationCalls, 1);
+  assert.equal(offered.history.some(row => row.text.includes('EARLY_IMPORTED_GOAL')), false);
+  assert(offered.portableContext.backgroundMessages.some(row => row.text.includes('EARLY_IMPORTED_GOAL')));
+  assert(offered.portableContext.diagnosticProgress.some(step => step.label.includes('IMPORTED_DIAG_STEP')));
+  assert.equal(offered.portableContext.workflowId, document.id); assert.equal(offered.portableContext.historicalOnly, true);
+  assert.equal(offered.portableContext.resumePolicy, 'fresh-session'); assert(JSON.stringify(offered.portableContext).length <= 8000);
+  assert.equal(JSON.stringify(offered.portableContext).includes('UNSAFE_IMPORTED_'), false); assert.equal(offered.checkpoint, undefined);
+  assert.deepEqual(result.turn.actions, []); assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('read-only continuation excludes associated learning runs and learning documents from every history channel', async t => {
+  const f = await fixture(t), document = graph(), saved = f.app.workflowLibrary.save({ document, expectedRevision: 0 });
+  const db = f.app.store.db, at = '2026-10-27T01:00:00.000Z';
+  const learningRun = { schemaVersion: 2, id: 'associated-learning-run', workflowId: document.id, document, status: 'complete', learningId: 'learning-batch', nodes: {} };
+  f.app.workflows.write.run(learningRun.id, JSON.stringify(learningRun));
+  db.prepare('INSERT INTO workflow_conversations(workflow_id,revision) VALUES(?,4)').run(document.id);
+  const insert = db.prepare('INSERT INTO workflow_conversation_turns(id,workflow_id,client_message_id,created_at,value,private_value) VALUES(?,?,?,?,?,?)');
+  for (const [id, context, privateDocument, content] of [
+    ['ordinary', {}, document, 'NORMAL_CONTEXT_GOAL'],
+    ['learning-run', { runId: learningRun.id }, document, 'ASSOCIATED_LEARNING_SECRET'],
+    ['learning-document', {}, { ...document, mode: 'learn' }, 'LEARNING_DOCUMENT_SECRET'],
+    ['unknown-run', { runId: 'missing-run' }, document, 'UNKNOWN_RUN_SECRET'],
+  ]) {
+    const turn = { id, workflowId: document.id, clientMessageId: 'old-' + id, status: 'complete', actions: [], createdAt: at, updatedAt: at,
+      user: { text: content, intent: 'discuss', context }, assistant: { text: content } };
+    insert.run(id, document.id, turn.clientMessageId, at, JSON.stringify(turn), JSON.stringify({ document: privateDocument, requestDigest: 'old-' + id }));
+  }
+  let offered;
+  f.app.conversations.planner = async (_app, options) => { offered = options; return { text: '已读取普通历史，学习材料未展开。' }; };
+  const response = await f.app.conversations.messageReadOnly(document.id, { clientMessageId: 'readonly-context', text: '只读分析当前工作流', document, context: {} },
+    { operationId: 'readonly-context-operation', sourceConversationId: 'global-application' });
+  await until(() => f.app.conversations.get(document.id).conversation.turns.find(row => row.id === response.turn.id && row.status === 'complete'));
+  assert.equal(offered.readOnly, true); assert.match(JSON.stringify(offered.portableContext), /NORMAL_CONTEXT_GOAL/);
+  assert.doesNotMatch(JSON.stringify({ history: offered.history, portableContext: offered.portableContext, checkpoint: offered.checkpoint }),
+    /ASSOCIATED_LEARNING_SECRET|LEARNING_DOCUMENT_SECRET|UNKNOWN_RUN_SECRET/);
+  assert.deepEqual(f.app.workflowLibrary.get(document.id), saved); assert.deepEqual(f.app.workflows.get(learningRun.id), learningRun);
+  assert.deepEqual(f.adapter.calls, []);
+});
+
 test('restart interrupts the unfinished diagnostic stage while retaining completed checks', async t => {
   const f = await fixture(t), document = graph(); f.app.workflowLibrary.save({ document, expectedRevision: 0 });
   const at = new Date().toISOString();

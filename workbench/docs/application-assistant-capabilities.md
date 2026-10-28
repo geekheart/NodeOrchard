@@ -14,6 +14,7 @@
 | `src/assistant-diagnostic-turn.mjs` 与对话持久化模块 | 紧凑上下文、阶段、检查点与证据有效期 | 保留对象身份和省略标记；复用不扩权，失败与重启不重放 |
 | `src/application-conversation-hub.mjs` 与工作流／总控会话存储 | 会话目录、主题隔离、历史读取与只读委派 | 先读摘要再按需展开，消息和操作始终绑定目标会话，旧记录保留 |
 | 工作流文件夹、包模块与 `workflow.folder` | 归属目录、便携包及历史导入身份 | 目录读取不执行打包；本机打开与导入为界面入口；导入不增加权限，见[工作流文件夹与便携包](workflow-packages.md) |
+| `workflow-conversation-context.mjs` 与 `workflow.conversation` | 完整聊天文件、版本／SHA 绑定的恢复上下文、有界全文检索 | 早期目标与阶段只作历史数据；沿当前权限，不恢复旧授权或原生会话，见[对话文件与上下文恢复](workflow-packages.md#对话文件与上下文恢复) |
 | 工作流素材登记、`workflow.attachments` 与 `workflow.attachment.read` | 当前获准工作流的素材列表、SHA 身份与有界文本读取 | 只接受登记身份；图片复用受保护的原生内容接口，二进制不冒充已解析正文，见[聊天素材](workflow-packages.md#聊天素材) |
 | `src/workflows/workflow-examples.mjs` | 固定示例目录、默认输入、学习配置及实际 Skill 指纹 | `workbench.inspect` 可读目录元数据；载入是界面入口，依赖未就绪时返回明确条件，见[示例目录](#示例目录) |
 | `workflow-learning-scope.mjs` 与学习编排／优化器 | Skill、指定工具及内部业务图的候选范围、评估和应用 | 前后端共用范围与快照守卫；训练证据用于优化，完整训练／验证用于评估，见[学习范围](#学习范围) |

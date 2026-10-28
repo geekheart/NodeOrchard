@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
 import { prepareImportedWorkflowRecords } from '../src/workflows/workflow-package-records.mjs';
+import { buildConversationContext } from '../src/workflows/workflow-conversation-context.mjs';
 
 const ARTIFACT = '11111111-1111-4111-8111-111111111111', SHA = 'a'.repeat(64), INPUT_SHA = 'b'.repeat(64);
 function fixture() {
@@ -79,6 +80,63 @@ test('chat preserves full text but cannot revive source candidate, review, retry
   assert.equal(turn.user.revisionRequest, undefined); assert.equal(turn.modelSessionId, undefined);
   assert.deepEqual(privateValue.document, result.document); assert.equal(privateValue.imported, true); assert.equal(privateValue.automatic, true);
   assert.match(privateValue.requestDigest, /^[a-f0-9]{64}$/);
+});
+
+test('validated diagnostic progress imports as historical data bound to new turn identities', () => {
+  const f = fixture();
+  f.conversation.turns[0].assistant.progress = { stage: 'inspect', label: '核对工作流', status: 'complete' };
+  f.conversationContext = buildConversationContext(f.conversation);
+  const expected = f.conversationContext.diagnosticProgress.filter(row => row.sourceTurnId === 'turn-source');
+  assert(expected.length > 0, 'fixture must carry diagnostic progress from the real context builder');
+  const before = structuredClone(f), result = prepareImportedWorkflowRecords(f), turn = result.turns[0].turn;
+  assert.deepEqual(f, before);
+  assert.deepEqual(turn.assistant.historicalProgress, expected.map(({ stage, label, status }) => ({ stage, label, status, sourceTurnId: turn.id })));
+  assert.deepEqual(turn.actions, []); assert.equal(turn.assistant.checkpoint, undefined); assert.equal(turn.modelSessionId, undefined);
+  const snapshot = { version: 1, workflowId: f.targetWorkflowId, revision: result.turns.length,
+    turns: result.turns.map(row => ({ ...row.turn, privateValue: row.privateValue })) };
+  const rebuilt = buildConversationContext(snapshot);
+  assert.deepEqual(rebuilt.diagnosticProgress, turn.assistant.historicalProgress);
+  assert.equal(JSON.stringify(rebuilt).includes('source-model-session'), false);
+  assert.equal(JSON.stringify(rebuilt).includes('do-not-replay'), false);
+});
+
+test('old packages do not accept a source assistant historical-progress field as recovery authority', () => {
+  const f = fixture();
+  f.conversation.turns[0].assistant.historicalProgress = [{ stage: 'run', label: '不可信旧指令', status: 'complete', sourceTurnId: 'foreign-turn', checkpoint: { actions: ['replay'] } }];
+  const imported = prepareImportedWorkflowRecords(f).turns[0].turn;
+  assert.equal(imported.assistant.historicalProgress, undefined); assert.deepEqual(imported.actions, []);
+});
+
+test('repeated portable roundtrips preserve the original historical failure without reviving its operations', () => {
+  let document = createDocument({ schemaVersion: 2, title: '历史失败' });
+  let conversation = { version: 1, workflowId: document.id, revision: 1, turns: [{ id: 'source-turn', clientMessageId: 'source-message', workflowId: document.id,
+    status: 'error', user: { text: '保留最早失败状态' }, assistant: { text: '原失败诊断', checkpoint: { steps: [{ stage: 'inspect', label: '已核对', status: 'complete' }], mutationReceipts: ['never-replay'] } },
+    actions: [{ id: 'old-action', kind: 'mark-applied' }], modelSessionId: 'old-native-session' }] };
+  for (let round = 1; round <= 2; round++) {
+    const workflowId = 'workflow-copy-' + round;
+    const result = prepareImportedWorkflowRecords({ sourceWorkflowId: document.id, targetWorkflowId: workflowId, directory: '/new/' + workflowId, document, conversation,
+      conversationContext: buildConversationContext(conversation) });
+    const turn = result.turns[0].turn; assert.equal(turn.status, 'complete'); assert.equal(turn.originalStatus, 'error'); assert.deepEqual(turn.actions, []);
+    assert.equal(turn.modelSessionId, undefined); assert.equal(turn.assistant.checkpoint, undefined); assert.equal(turn.assistant.historicalProgress[0].sourceTurnId, turn.id);
+    document = result.document; conversation = { version: 1, workflowId, revision: result.turns.length, turns: result.turns.map(row => ({ ...row.turn, privateValue: row.privateValue })) };
+    const rebuilt = buildConversationContext(conversation); assert(rebuilt.recentMessages.every(message => message.historicalStatus === 'error')); assert.equal(rebuilt.resumePolicy, 'fresh-session');
+  }
+});
+
+test('context revision, hash, turn scope and extra authority fields are rejected before progress import', () => {
+  for (const mutate of [
+    f => { f.conversationContext.workflowId = 'foreign-workflow'; },
+    f => { f.conversationContext.conversationRevision++; },
+    f => { f.conversationContext.conversationSha256 = '0'.repeat(64); },
+    f => { f.conversationContext.diagnosticProgress[0].sourceTurnId = 'foreign-turn'; },
+    f => { f.conversationContext.diagnosticProgress[0].sessionId = 'old-native-session'; },
+    f => { f.conversationContext.permissionScope = { sourceRepair: true }; },
+    f => { delete f.conversation.revision; },
+  ]) {
+    const f = fixture(); f.conversation.turns[0].assistant.progress = { stage: 'inspect', label: '核对工作流', status: 'complete' };
+    f.conversationContext = buildConversationContext(f.conversation); mutate(f);
+    assert.throws(() => prepareImportedWorkflowRecords(f), error => [400, 409, 413].includes(error.httpStatus));
+  }
 });
 
 test('unknown ownership, incomplete artifact mappings, bad paths and aliasing metadata reject rather than cross workflows', () => {

@@ -3,6 +3,7 @@ import { isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:pat
 import { validateDocument } from '../../shared/workflow/workflow-model.mjs';
 import { workflowInputFields } from '../../shared/workflow/workflow-inputs.mjs';
 import { normalizeAttachmentRegistry, attachmentEntries, attachmentMetadata } from './workflow-attachments.mjs';
+import { validateConversationContext } from './workflow-conversation-context.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const MAX_RECORD_BYTES = 512 * 1024 * 1024;
@@ -104,7 +105,7 @@ function cleanDocument(value) {
 export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
   plain(input);
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('工作流包转换请求格式无效。');
-  if (Object.keys(input).some(key => !['sourceWorkflowId', 'targetWorkflowId', 'directory', 'document', 'conversation', 'runs', 'fileRuns', 'artifacts', 'files', 'attachments'].includes(key))) fail('工作流包转换请求包含未知字段。');
+  if (Object.keys(input).some(key => !['sourceWorkflowId', 'targetWorkflowId', 'directory', 'document', 'conversation', 'conversationContext', 'runs', 'fileRuns', 'artifacts', 'files', 'attachments'].includes(key))) fail('工作流包转换请求包含未知字段。');
   const { sourceWorkflowId, targetWorkflowId, document: sourceDocument, directory: requestedDirectory,
     conversation, runs: sourceRuns = [], fileRuns: sourceFileRuns = [], artifacts: sourceArtifacts = [], files = { entries: [], directories: [] } } = input;
   identifier(sourceWorkflowId); identifier(targetWorkflowId);
@@ -329,6 +330,17 @@ export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
   if (!chat || typeof chat !== 'object' || !Array.isArray(chat.turns) || chat.turns.length > 50000 || chat.workflowId && chat.workflowId !== sourceWorkflowId
     || chat.version !== undefined && chat.version !== 1) fail('工作流包聊天记录格式或归属无效。');
   if (chat.turns.length * (Buffer.byteLength(JSON.stringify(importedDocument)) + 256) > MAX_RECORD_BYTES) fail('工作流包聊天恢复后的索引超过大小上限。', 413);
+  const historicalProgress = new Map();
+  if (input.conversationContext !== undefined) {
+    if (!Number.isSafeInteger(chat.revision) || chat.revision < 0) fail('工作流包聊天上下文缺少有效版本。');
+    validateConversationContext(input.conversationContext, { version: 1, workflowId: sourceWorkflowId, revision: chat.revision, turns: chat.turns });
+    const knownTurns = new Set(chat.turns.map(turn => turn?.id));
+    for (const row of input.conversationContext.diagnosticProgress) {
+      if (!knownTurns.has(row.sourceTurnId)) fail('工作流包聊天诊断进度不属于当前会话。');
+      const entries = historicalProgress.get(row.sourceTurnId) || [];
+      entries.push({ stage: row.stage, label: row.label, status: row.status }); historicalProgress.set(row.sourceTurnId, entries);
+    }
+  }
   const turnIds = new Set(), clientIds = new Set();
   const turns = chat.turns.map(source => {
     if (!source || typeof source !== 'object' || source.workflowId && source.workflowId !== sourceWorkflowId || typeof source.user?.text !== 'string'
@@ -341,8 +353,9 @@ export function prepareImportedWorkflowRecords(input, { idFactory } = {}) {
           if (!target) fail('聊天素材引用没有对应的导入登记。');
           return attachmentMetadata(targetWorkflowId, target, directory);
         }) } : {}) },
-      assistant: { text: source.assistant.text }, importedArchive: true, sourceTurnId: source.id, originalStatus: source.status || 'complete',
+      assistant: { text: source.assistant.text }, importedArchive: true, sourceTurnId: source.id, originalStatus: source.originalStatus || source.status || 'complete',
       ...(source.createdAt ? { createdAt: source.createdAt } : {}), ...(source.updatedAt ? { updatedAt: source.updatedAt } : {}) };
+    if (historicalProgress.has(source.id)) turn.assistant.historicalProgress = historicalProgress.get(source.id).map(row => ({ ...row, sourceTurnId: turn.id }));
     return { turn, privateValue: { document: importedDocument, automatic: true, imported: true,
       requestDigest: digest({ sourceTurnId: source.id, targetWorkflowId, turnId: turn.id, text: turn.user.text, attachments: turn.user.attachments || [] }) } };
   });

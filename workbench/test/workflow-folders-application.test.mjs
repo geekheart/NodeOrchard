@@ -51,3 +51,26 @@ test('Application close waits for saved input copies before closing its database
   const status = JSON.parse(await readFile(join(app.workflowFolders.directory(document.id), 'history', 'input-sync.json'), 'utf8'));
   assert.equal(status.status, 'complete');
 });
+
+test('conversation mirror failures preserve committed messages and model results and file-only retry does not rerun the model', async t => {
+  const directory = await mkdtemp('/private/tmp/folder-conversation-failure-'), adapter = new Offline();
+  const app = new Application(readConfig({ WORKBENCH_DATA_DIR: join(directory, 'data'), WORKBENCH_WORKSPACE_ROOT: join(directory, 'workspace') }), adapter);
+  t.after(async () => { await app.close(); assert.deepEqual(adapter.calls, []); await rm(directory, { recursive: true, force: true }); });
+  await app.workflowFoldersReady;
+  let modelCalls = 0; app.applicationAssistant.intentClassifier.classify = async () => ({ intent: 'discuss', modelCalls: 1, modelRoute: { provider: 'fixture', model: 'fixture' } });
+  app.conversations.planner = async () => { modelCalls++; return { text: '模型已经完成，不能因磁盘错误覆盖。', operations: [] }; };
+  const write = app.workflowFolders.writeText.bind(app.workflowFolders);
+  app.workflowFolders.writeText = (workflowId, name, serialized) => { if (name === 'conversation.md') throw Object.assign(Error('isolated disk full'), { code: 'ENOSPC' }); return write(workflowId, name, serialized); };
+  const document = createDocument({ schemaVersion: 2, title: '刷写故障隔离流程' });
+  const input = { clientMessageId: randomUUID(), text: '保留本轮结果', document, intent: 'auto' };
+  const response = await app.conversations.message(document.id, input);
+  for (let index = 0; index < 500 && app.conversations.get(document.id).conversation.turns[0].status === 'thinking'; index++) await new Promise(resolve => setImmediate(resolve));
+  const turn = app.conversations.get(document.id).conversation.turns[0]; assert.equal(turn.id, response.turn.id); assert.equal(turn.status, 'complete'); assert.equal(turn.assistant.text, '模型已经完成，不能因磁盘错误覆盖。');
+  assert.equal(app.workflowFolders.conversationStatus(document.id).status, 'error'); assert.equal(app.workflowFolders.conversationStatus(document.id).dirty, true);
+  assert.throws(() => app.workflowFolders.flushConversation(document.id), /未导出|尚未完整保存/);
+  const replay = await app.conversations.message(document.id, input); assert.equal(replay.turn.id, turn.id); assert.equal(modelCalls, 1);
+  app.workflowFolders.writeText = write; const synced = app.workflowFolders.flushConversation(document.id); assert.equal(synced.dirty, false);
+  const snapshot = JSON.parse(await readFile(join(app.workflowFolders.directory(document.id), 'conversation.json'), 'utf8'));
+  assert.equal(snapshot.turns[0].status, 'complete'); assert.equal(snapshot.turns[0].assistant.text, turn.assistant.text); assert.equal(modelCalls, 1);
+  assert.match(await readFile(join(app.workflowFolders.directory(document.id), 'conversation.md'), 'utf8'), /模型已经完成/);
+});

@@ -10,6 +10,7 @@ import { redact } from '../hermes-adapter.mjs';
 import { reviewRevisionPolicy } from '../../shared/workflow/workflow-review-revision.mjs';
 import { bindArtifactRevisionProposal, assertArtifactRevisionCodeChange } from './workflow-review-proposals.mjs';
 import { ATTACHMENT_MESSAGE_TEXT, attachmentRefs, storedAttachmentRefs, resolveAssistantAttachments } from '../assistant-attachments.mjs';
+import { captureConversationSnapshot, conversationContinuation, eligibleConversationTurn } from './workflow-conversation-context.mjs';
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
@@ -557,14 +558,17 @@ export class WorkflowConversations {
   async generate(turn, document, bound, controller) {
     try {
       const privateValue = this.readTurn(turn.workflowId, turn.id).privateValue, readOnly = privateValue.readOnly === true;
-      const previousTurns = this.get(turn.workflowId).conversation.turns.filter(item => item.id !== turn.id && item.status !== 'thinking'
-        && (!readOnly || !['skill', 'feedback'].includes(item.user?.intent) && !item.actions?.some(action => /learn|feedback/.test(action.kind || '')) && !item.outcome?.learningId));
+      const snapshot = captureConversationSnapshot(this.db, turn.workflowId);
+      const historyPolicy = { document, readRun: id => this.app.workflows.get(id) };
+      snapshot.turns = snapshot.turns.filter(item => item.id !== turn.id && item.status !== 'thinking' && eligibleConversationTurn(item, readOnly, historyPolicy));
+      const previousTurns = snapshot.turns;
       // The broker validates scope and freshness before reusing read-only facts.
       // A previous checkpoint never authorizes replaying proposals or operations.
       const checkpoint = previousTurns.findLast(item => ['error', 'interrupted'].includes(item.status) && item.assistant?.checkpoint)?.assistant.checkpoint;
       const history = previousTurns.slice(-10)
         .flatMap(item => [{ role: 'user', text: item.user.text.slice(0, 3000), intent: item.user.intent, status: item.status },
           { role: 'assistant', text: item.assistant.text.slice(0, 3000), intent: item.user.intent, status: item.status }]);
+      const portableContext = conversationContinuation(snapshot, { readOnly, ...historyPolicy });
       // Never send inputs, outputs, artifact contents, training samples or validation
       // records to this planning session. Only the selected execution metadata.
       const revision = turn.user.revisionRequest ? bindArtifactRevisionProposal(this.app, turn.workflowId, document, turn.user.revisionRequest) : null;
@@ -634,7 +638,7 @@ export class WorkflowConversations {
         : turn.user.text;
       const result = await this.planner(this.app, { role: 'workflow', readOnly, decision, diagnosticTurnId: turn.id,
         attachments: storedAttachmentRefs(turn.user.attachments),
-        operationNamespace: turn.retryOfTurnId || turn.id, text: proposalText, document, context, history, page, checkpoint,
+        operationNamespace: turn.retryOfTurnId || turn.id, text: proposalText, document, context, history, portableContext, page, checkpoint,
         signal: controller.signal, deadlineAt, startedAt: turn.createdAt, modelCallOffset: decision?.modelCalls || 0,
         ...(decision?.modelRoute ? { modelRoute: decision.modelRoute } : {}), ...hooks });
       if (this.closed || controller.signal.aborted) return;

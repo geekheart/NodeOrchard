@@ -11,6 +11,7 @@ import { WorkflowFiles } from '../src/workflows/workflow-files.mjs';
 import { WorkflowPackages } from '../src/workflows/workflow-packages.mjs';
 import { decodeZip } from '../src/workflows/workflow-zip.mjs';
 import { createDocument, createNode } from '../shared/workflow/workflow-model.mjs';
+import { validateConversationContext } from '../src/workflows/workflow-conversation-context.mjs';
 
 const sha = data => createHash('sha256').update(data).digest('hex');
 async function fixture(t) {
@@ -104,6 +105,11 @@ test('folder conversations contain all owned messages and recovery fields withou
   const file = await readFile(join(f.app.workflowFolders.directory(f.document.id), 'conversation.json'), 'utf8'), value = JSON.parse(file);
   assert.equal(value.turns.length, 250); assert.equal(value.turns[0].user.text, '原文 0'); assert.equal(value.turns[249].privateValue.automatic, true);
   assert.equal(file.includes('PRIVATE_OTHER_WORKFLOW'), false); assert.deepEqual(f.db.prepare('SELECT * FROM workflow_conversation_turns').all(), before);
+  const markdown = await readFile(join(f.app.workflowFolders.directory(f.document.id), 'conversation.md'), 'utf8');
+  assert.match(markdown, /原文 0/); assert.match(markdown, /回复 249/); assert.equal(markdown.includes('privateValue'), false); assert.equal(markdown.includes('PRIVATE_OTHER_WORKFLOW'), false);
+  const context = JSON.parse(await readFile(join(f.app.workflowFolders.directory(f.document.id), 'context.json'), 'utf8'));
+  assert.equal(context.turnCount, 250); assert.equal(context.conversationRevision, 250); assert.equal(context.conversationSha256, sha(file)); validateConversationContext(context, value);
+  assert.equal(f.app.workflowFolders.status(f.document.id).conversationSync.dirty, false);
 });
 
 test('an unsaved draft conversation can materialize without creating a library record', async t => {
@@ -191,7 +197,7 @@ test('a successful migration retry clears stale fixed-file migration errors with
 
 test('folder status reads only fixed identity-bound diagnostics without creating a folder', async t => {
   const f = await fixture(t), folder = f.app.workflowFolders.directory(f.document.id);
-  assert.deepEqual(f.app.workflowFolders.status(f.document.id), { inputSync: null, migration: null });
+  assert.deepEqual(f.app.workflowFolders.status(f.document.id), { inputSync: null, migration: null, conversationSync: null });
   await assert.rejects(readdir(folder), { code: 'ENOENT' });
   f.save(f.document);
   f.app.workflowFolders.json(f.document.id, 'history/migration-errors.json', { version: 1, workflowId: f.document.id, status: 'error', errors: [{ message: '资料缺失' }] });
