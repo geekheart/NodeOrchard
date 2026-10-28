@@ -27,6 +27,13 @@ function application(t) {
   return { app, assistant, capabilities: assistant.capabilities };
 }
 
+test('validated diagnosis intent loads its Skill even when the user does not use a routing keyword', async t => {
+  const f = application(t);
+  const result = await f.capabilities.bootstrap('请查清最近那件事的根本原因', { intent: 'diagnose' });
+  assert(result.loadedSkills.some(skill => skill.name === 'diagnose-workflow'));
+  assert(!result.loadedSkills.some(skill => skill.name === 'repair-application'));
+});
+
 test('source inspection and model experiments are independently advertised without granting source mutation', async t => {
   const f = application(t), settings = { revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) };
   settings.supervisor.sourceRead = true; settings.supervisor.modelExperiment = true;

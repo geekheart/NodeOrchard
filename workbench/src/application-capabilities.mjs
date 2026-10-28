@@ -144,11 +144,12 @@ export class ApplicationCapabilities {
     return all;
   }
   handles(name) { return INSPECTION_NAMES.has(name); }
-  async bootstrap(userText = '', { schemaVersion = 2, permissionScope } = {}) {
+  async bootstrap(userText = '', { schemaVersion = 2, permissionScope, intent } = {}) {
     const sourceRepair = this.sourceRepairEnabled(permissionScope);
     const manifest = (await this.skills.list()).filter(skill => sourceRepair || skill.name !== 'repair-application'), selected = [];
     const names = new Set();
     if (sourceRepair) names.add('repair-application');
+    if (intent === 'diagnose') names.add('diagnose-workflow');
     if (/(?:失败|报错|异常|超时|修复|诊断|不工作|为什么|为啥)/i.test(userText)) names.add('diagnose-workflow');
     if (/(?:python|javascript|\bjs\b|代码|脚本|工具节点)/i.test(userText)) { names.add('author-code-node'); names.add('edit-workflow'); }
     else if (/(?:搭建|修改|替换|节点|连线|流程|默认值)/i.test(userText)) names.add('edit-workflow');

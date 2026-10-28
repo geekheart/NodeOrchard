@@ -196,3 +196,5 @@
 ## 总控诊断扩展
 
 请求链路由 `assistant.diagnose` 摘要和 `assistant.trace` 受控分页读取，复用日志与对象归属权限；历史缺失和不可观测阶段明确未知。`supervisor.sourceRead` 独立开放源码目录／读取，`sourceRepair` 继续单独控制补丁、测试、修复历史与回滚。`supervisor.modelExperiment` 及顶层 `modelExperimentLimits.maxInputCharacters` 仅人工设置；默认关闭，已授权总控可用 `assistant.experiment` 做单轮一次的合成模型近似实验，不执行业务、不读取原始prompt、不修改默认模型或权限。输出为软约束，有真实用量。模型实验不进入批量、只读委派或结果缓存；未确认操作不重放。接口与证据边界见[请求级链路与近似实验](application-diagnostics.md#请求级链路与近似实验)。
+
+AI已分类为diagnose的实际处理分支会按受控意图加载诊断Skill，不依赖用户恰好使用“失败／超时”等关键词；关键词仅作为兼容的补充发现机制，不决定对话路由或权限。诊断复用近期有效短探测，长请求问题继续核对请求链路和实现，按可观察预测验证假设，区分应用控制故障与缺失的下游历史证据。

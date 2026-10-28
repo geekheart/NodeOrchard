@@ -376,7 +376,7 @@ export class ApplicationAssistant {
         turn.record('workflow.propose', args, { proposed: true, executed: false }, { key: diagnosticRequestKey('workflow.propose', args) });
         return complete(proposalResult(proposal));
       }
-      const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope }), activeSignal), permissionScope);
+      const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope, intent: decision?.intent }), activeSignal), permissionScope);
       check(activeSignal);
       const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.read', 'app.source.history']);
       const tools = this.tools(permissionScope).filter(tool => decision?.intent !== 'discuss' || discussionTools.has(tool.name));
