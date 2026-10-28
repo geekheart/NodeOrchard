@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { delimiter, join } from 'node:path';
+import { resolveHermesProxyEnvironment } from './hermes-system-proxy.mjs';
 
 export function redact(value) {
   return String(value)
@@ -11,9 +12,10 @@ export function redact(value) {
 }
 
 export class HermesAdapter extends EventEmitter {
-  constructor(config) {
+  constructor(config, { resolveProxyEnvironment = resolveHermesProxyEnvironment } = {}) {
     super();
     this.config = config;
+    this.resolveProxyEnvironment = resolveProxyEnvironment;
     this.state = 'stopped';
     this.pending = new Map();
     this.serverRequests = new Map();
@@ -39,7 +41,7 @@ export class HermesAdapter extends EventEmitter {
     this.stopping = false;
     this.setState('starting');
     const c = this.config;
-    const env = {
+    let env = {
       ...process.env,
       ...c.childEnv,
       PYTHONDONTWRITEBYTECODE: '1',
@@ -51,6 +53,14 @@ export class HermesAdapter extends EventEmitter {
       WORKBENCH_GATEWAY_WORKSPACE_ROOT: c.workspaceRoot,
       WORKBENCH_DIAGNOSTICS_ROOT: join(c.dataDir, 'diagnostics'),
     };
+    const resolved = await this.resolveProxyEnvironment(env);
+    // Discovery is bounded but asynchronous. A stop during discovery must not
+    // start a late native process after the application has already closed.
+    if (this.stopping) throw new Error('Hermes 启动已取消。');
+    env = resolved.env;
+    const { source, status, code, count } = resolved.diagnostics;
+    this.emit('network-policy', { source, status, ...(code ? { code } : {}), ...(count !== undefined ? { count } : {}) });
+    if (this.stopping) throw new Error('Hermes 启动已取消。');
     delete env.HERMES_TUI_SIDECAR_URL;
     // Hermes config owns the model; inherited launch overrides must not shadow
     // a model selection saved through Hermes from the top-level picker.
@@ -185,8 +195,8 @@ export class HermesAdapter extends EventEmitter {
 
   async stop() {
     const proc = this.proc;
-    if (!proc) return;
     this.stopping = true;
+    if (!proc) { if (this.state === 'starting') this.setState('stopped'); return; }
     proc.stdin.end();
     await new Promise(resolve => {
       let done = false;

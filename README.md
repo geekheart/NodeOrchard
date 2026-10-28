@@ -174,6 +174,8 @@ npm --prefix workbench start
 
 桥接使用 Hermes 的 Agent、Skill、记忆及模型选择接口，对接口变化有显式检查；这不表示任意 Hermes 版本均兼容。升级 Hermes 前建议备份状态并验证连接。
 
+macOS 下，每次启动 Hermes 子进程时，工作台会在没有显式代理环境变量的情况下继承系统静态 HTTP／HTTPS 代理；已有环境设置优先。只调整该子进程的环境，不修改系统或 Hermes 配置。支持范围及连接诊断见[代理继承](workbench/docs/hermes-protocol.md#代理继承)。
+
 NodeOrchard 默认查找：
 
 ```text

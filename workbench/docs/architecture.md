@@ -36,6 +36,7 @@ flowchart LR
 | --- | --- | --- |
 | `src/application.mjs`、`server.mjs` | 装配服务、会话、HTTP/SSE 和请求校验 | DOM、硬件决策 |
 | `src/config.mjs`、`workspace-layout.mjs` | 路径配置、工作环境初始化、一次性偏好兼容 | 搬移历史产物或改写审核 |
+| `src/hermes-adapter.mjs`、`hermes-system-proxy.mjs` | Hermes 子进程及协议；在启动前将获准的 macOS 静态系统代理投影到子进程环境 | 修改系统／Hermes 配置、执行 PAC、提供助手代理写入入口 |
 | `src/hermes-models.mjs`、`python/hermes_models.py` | Hermes 受限模型目录、原生全局选择与保存、严格读回确认 | 本地模型覆盖、认证文件或独立回退配置 |
 | `shared/workflow/workflow-capability-contract.mjs`、`src/application-capabilities.mjs` | 共享真实能力契约、当前可用性、节点与运行时说明 | 以提示词代替处理器、虚构依赖就绪或扩大执行权限 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
@@ -53,6 +54,8 @@ flowchart LR
 ## Hermes 与模型选择
 
 聊天和 Skill 运行需要预先独立安装、配置并验证正常对话的 Hermes；工作台不会代为安装。当前核验版本为 Hermes 0.21.4，其它版本须确认 gateway 与原生模型选择接口兼容。安装入口及配置步骤见 [使用说明](user-guide.md#启动)。
+
+`HermesAdapter` 每次启动子进程前有界读取代理设置；显式环境优先，只在 macOS 缺省时采用有效静态系统代理。读取失败保留原环境，来源诊断进入现有分级日志，不触发模型探测或工作流重跑。代理规则见[代理继承](hermes-protocol.md#代理继承)。
 
 Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入口读取已配置的模型目录，通过 Hermes 原生 `switch_model(is_global=true)` 和 `persist_model_selection` 更新全局默认选择；提供商须明确 `authenticated=true`，手动输入的模型 ID 也必须由 Hermes 确认。需要费用或数据策略等确认的选择转到 Hermes 原生界面处理，保存结果和重新读取的目录必须完全匹配才报告成功。浏览器仅接收必要标识和认证状态，不接收凭据、端点等配置。
 

@@ -121,6 +121,12 @@ export class Application extends EventEmitter {
       }
     });
     adapter.on('event', event => this.onGatewayEvent(event));
+    adapter.on('network-policy', ({ source, status, code, count }) => {
+      if (this.closed) return;
+      this.logEvents.write(status === 'unavailable' ? 'warn' : 'info', 'hermes.proxy.environment', {
+        component: 'hermes', source, status, code, count,
+      });
+    });
     adapter.on('request', frame => this.onRequest(frame));
     this.learnedSkills = new LearnedSkills(this);
     this.workflowFiles = new WorkflowFiles(this);

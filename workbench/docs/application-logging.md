@@ -22,6 +22,8 @@
 
 助手模型新增 `assistant.model.state` 事件，保存会话身份、阶段、调用总耗时、等待／输出耗时、字符数量和超时分类；流块不逐块持久。对应 `application_model_calls` 保存数字调用快照，供按归属聚合诊断，旧快照的 running 不证明重启后仍在执行。`assistant.probe.started/completed/failed` 记录固定短探测结果；不保存探测正文。`assistant.turn.state.durationMs` 为轮次时长，原 `elapsedMs` 为进度观察值，不能用最后阶段耗时推算全轮。
 
+Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: hermes`、固定枚举 `source/status/code` 与协议数量 `count`。它区分显式环境保留、系统静态代理采用及未采用原因，不保存代理地址、绕过列表、PAC 内容或凭据。该记录说明启动环境的来源，不证明网络、认证或模型任务成功；继承规则见[代理继承](hermes-protocol.md#代理继承)。
+
 ## 全局助手读取
 
 `app.logs` 支持 `minLevel`、`component`、`from/to` 及 `workflowId/runId/nodeId/sessionId/conversationId/turnId/requestId/operationId`，同时支持 `limit` 和 `afterId`。优先读取warn以上，再按关联ID补充info阶段。HTTP响应的 `X-Request-Id` 由服务端生成；页面请求错误自动携带同一ID，助手通过 `page.inspect` 即可关联软件日志。
