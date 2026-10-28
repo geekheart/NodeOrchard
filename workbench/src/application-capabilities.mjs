@@ -99,7 +99,7 @@ const FEATURES = [
   { id: 'application-source-editing', status: 'unavailable', experimental: true, defaultEnabled: false, requiredPermission: 'supervisor.sourceRepair', tools: [],
     note: '人工开启后仅总控可用受控源码读取、版本补丁、隔离相关测试、记录和冲突回滚。权限控制、凭据与用户工作流数据保持保护，没有任意shell或权限设置写工具。' },
   { id: 'application-source-reading', status: 'unavailable', defaultEnabled: false, requiredPermission: 'supervisor.sourceRead', tools: [],
-    note: '人工独立开启后，总控可按白名单分页读取当前源码与SHA；不授予修改、测试、终端或权限设置写入。' },
+    note: '人工独立开启后，总控可搜索和分页读取受控工作台源码、固定Hermes诊断模块及SHA；不授予修改、测试、终端或权限设置写入。' },
   { id: 'model-diagnostic-experiment', status: 'unavailable', defaultEnabled: false, requiredPermission: 'supervisor.modelExperiment', tools: [],
     note: '人工预授权后，总控可对已登记历史调用进行合成近似模型实验；固定路由和已确认推理配置，每轮一次、输入规模受人工额度约束。输出为软约束，有真实模型用量，不运行或修改工作流。' },
 ];

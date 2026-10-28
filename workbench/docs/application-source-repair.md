@@ -4,7 +4,7 @@
 
 ## 人工权限与工具
 
-“读取工作台源码”使用独立 `supervisor.sourceRead` 开关，默认关闭。开启后仅开放 `app.source.list/read`，不需要开启 `sourceRepair`，也不授予补丁、测试、历史备份或回滚权限。已开启修复时继续兼容读取；源码只读仍复用受控仓库路径、已登记文件、真实路径／链接与分页限制。只有用户可修改这些开关，旧设置缺失字段投影为false而不写回。
+“读取诊断源码”使用独立 `supervisor.sourceRead` 开关，默认关闭。开启后仅开放 `app.source.list/read/search`，不需要开启 `sourceRepair`，也不授予补丁、测试、历史备份或回滚权限。读取范围为受控仓库源码与下列固定Hermes诊断模块；已开启修复时继续兼容读取。只有用户可修改这些开关，旧设置缺失字段投影为false而不写回。
 
 `supervisor.sourceRepair` 默认为 `false`，由现有人工设置入口保存。助手不能开启、维持或恢复自己的权限；目录、调用和执行阶段均需检查当前身份及权限，旧聊天、工具结果与修复记录不代替当前准入。
 
@@ -21,6 +21,24 @@
 | `app.source.rollback` | 校验当前文件为该次修改后的版本或已恢复原版，再按备份回滚 |
 
 `app.source.read` 先对完整源码脱敏并保留原行数，再按每页最多1800字符返回，低于助手工具结果的压缩阈值；脱敏占位符重复处理不再扩写，分页不切断占位符。`endLine`、`readLineCount` 表示实际返回范围。`truncated=true` 时使用返回的 `nextStartLine` 与 `nextStartColumn` 继续读取；长行可能停在同一行，不能只递增行号。行与列从1开始，列按脱敏正文的UTF-16位置计数。每页保留完整文件SHA，文件变化后重新定位；到达末尾时两个续读游标均为 `null`。这只改变只读分页，不增加源码写入权限。
+
+### 固定Hermes诊断模块
+
+`read` 必须在仓库 `path` 与固定 `component` 中恰选一项；`search` 的 `component` 与仓库 `prefix` 互斥，省略二者仍搜索仓库。`component` 仅接受下表五项，不接受安装目录或SDK路径。
+
+| component | 安装目录内的逻辑文件 |
+| --- | --- |
+| `codex-stream` | `agent/codex_runtime.py` |
+| `provider-call` | `agent/chat_completion_helpers.py` |
+| `request-client` | `agent/client_lifecycle.py` |
+| `client-factory` | `agent/agent_runtime_helpers.py` |
+| `gateway-output` | `tui_gateway/prompt_turn.py` |
+
+根目录由工作台启动配置提供；逐段拒绝链接，核对打开文件身份、大小、UTF-8及读取前后的版本。每个文件上限256KiB，只读内容经完整脱敏后分页或字面量搜索。返回 `origin: hermes-installed`、组件、逻辑相对文件及原文SHA，不返回本机安装路径。缺失、变化或不受支持的安装布局明确拒绝，不导入或执行Hermes来补齐。
+
+仓库和固定模块共用源码显示规则：源码中的推理标签字面量先转义为 `&lt;think>` 等形式，再完整脱敏，返回 `sourceMarkupEscaped: true`；普通诊断及会话的推理过滤保持原样。搜索仍输入源码原有字面量，例如 `<think>`，在原行匹配后对显示文本归一，普通符号不受影响。行号保留，列按最终展示文本计数；SHA始终指向原文。脱敏或显示转义后的片段不能无条件当作完整原文件用于补丁，写入仍须经过已有路径、原文SHA及替换校验。
+
+这些内容说明当前安装源码可能采取的分支，不能代替该次调用的实际分支或生效重试配置。读取接口不读取Hermes配置、认证、环境文件或任意SDK源码；未知配置保持未知。组件和原生逻辑路径均不能用于 `patch`，固定读取器本身也受源码保护。
 
 工具只处理工作台允许的源码范围；权限和工具准入相关实现、凭据、`.git` 及用户数据目录固定保护。路径、来源与版本校验由服务端执行，不接受任意本机路径或 shell 命令。业务代码候选仍走工作流原有提案、应用与运行入口，不能借此修改应用源码。
 

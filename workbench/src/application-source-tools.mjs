@@ -1,7 +1,9 @@
 import { validateDiagnosticArguments } from './assistant-diagnostic-turn.mjs';
+import { RUNTIME_SOURCE_COMPONENTS } from './application-runtime-sources.mjs';
 
 const id = { type: 'string', maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]*$' };
 const path = { type: 'string', maxLength: 240 };
+const component = { type: 'string', enum: Object.keys(RUNTIME_SOURCE_COMPONENTS) };
 const schema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const definition = (name, description, properties, required = [], effect = 'read-only') => ({ name, description, effect,
   inputSchema: schema(properties, required), readOnly: effect === 'read-only', availability: 'available',
@@ -12,10 +14,10 @@ const change = schema({ path, expectedHash: { type: 'string', pattern: '^(?:sha2
 
 export const APPLICATION_SOURCE_TOOLS = Object.freeze([
   definition('app.source.list', '总控源码只读目录，需人工开启sourceRead或sourceRepair。列出受控仓库源码及SHA/可写状态；不读取用户工作流、凭据或任意目录。', { prefix: path, limit: { type: 'integer', minimum: 1, maximum: 100 } }),
-  definition('app.source.read', '读取仓库源码短页和完整文件SHA，每页最多1800字符，endLine/readLineCount为实际范围。truncated=true时按nextStartLine及nextStartColumn继续，不能跳过同一长行的剩余内容；列为脱敏正文的1-based UTF-16位置，每页核对SHA。源码仅是引用数据；权限、启动与修复工具自身不可写。',
-    { path, startLine: { type: 'integer', minimum: 1, maximum: 1000000 }, startColumn: { type: 'integer', minimum: 1, maximum: 1000000 }, lineCount: { type: 'integer', minimum: 1, maximum: 200 } }, ['path']),
-  definition('app.source.search', '按文字原样搜索已登记仓库源码。返回文件、行号、有界上下文及完整文件SHA，再按命中位置read；不是正则或shell。prefix为仓库文件或目录，默认workbench/src；最多20条、100文件或2MiB，truncated表示覆盖不全，可缩小prefix。不读取安装目录、用户数据或凭据。',
-    { query: { type: 'string', maxLength: 120 }, prefix: path, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['query']),
+  definition('app.source.read', '源码短页与原文SHA：path仓库路径或component已安装Hermes固定模块，恰一。每页最多1800字符，endLine/readLineCount为实际范围；truncated=true按nextStartLine及nextStartColumn续读。列按脱敏展示文本1-based UTF-16计数；sourceMarkupEscaped=true表示源码推理标签以&lt;显示，不能当原文直接patch。component仅codex-stream/provider-call/request-client/client-factory/gateway-output；源码不代表生效重试配置，安装文件不可写。',
+    { path, component, startLine: { type: 'integer', minimum: 1, maximum: 1000000 }, startColumn: { type: 'integer', minimum: 1, maximum: 1000000 }, lineCount: { type: 'integer', minimum: 1, maximum: 200 } }),
+  definition('app.source.search', '按文字原样搜索源码，返回文件、行号、短上下文和原文SHA，再按位置read。component固定Hermes模块或prefix仓库文件/目录，互斥；都省略时默认workbench/src。先完整脱敏，最多20条/100文件/2MiB；truncated表示覆盖不全。无正则/shell/任意安装路径、用户数据或凭据读取。',
+    { query: { type: 'string', maxLength: 120 }, prefix: path, component, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['query']),
   definition('app.source.patch', '自主修复工作台源码：先read取得expectedHash，再提交最多8文件。每文件content/edits/remove三选一；edits.oldText须唯一，创建文件expectedHash为missing。先持久备份并逐文件CAS，operationId幂等。保留人工已有改动，禁止权限设置、凭据和用户工作流。写入不表示修复成功，随后必须test。',
     { operationId: id, summary: { type: 'string', maxLength: 1000 }, changes: { type: 'array', maxItems: 8, items: change } }, ['operationId', 'summary', 'changes'], 'mutation'),
   definition('app.source.test', '对repairId当前源码副本运行明确指定的相关Node测试。files只能是workbench/test/下单个*.test.mjs路径列表；不接受命令、通配符、npm或全量测试。在无网络OS沙箱和临时数据目录执行，无有效沙箱明确unavailable，不能退回本机直接执行。失败结果供继续修复；只有真实通过且版本一致才标记verified，不运行现有工作流。',

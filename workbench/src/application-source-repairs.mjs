@@ -4,19 +4,19 @@ import { resolve, relative, dirname, join, sep, isAbsolute, extname } from 'node
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { sanitizeDiagnosticText } from './app-diagnostics.mjs';
+import { escapeSourceMarkup, readRuntimeSource, sourceDisplayText, sourceReadPage } from './application-runtime-sources.mjs';
 
 const execute = promisify(execFile);
-const MAX_FILE = 256 * 1024, MAX_PATCH = 1024 * 1024, MAX_OUTPUT = 32768, MAX_SOURCE_PAGE = 1800;
+const MAX_FILE = 256 * 1024, MAX_PATCH = 1024 * 1024, MAX_OUTPUT = 32768;
 const SOURCE = /^workbench\/(?:src|public|shared|python|test|assistant-skills|docs)\//;
 const ROOT_FILES = new Set(['README.md', 'CONTEXT.md', 'AGENTS.md', 'workbench/README.md', 'workbench/package.json']);
 const EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.md', '.css', '.html', '.json', '.txt', '.yaml', '.yml']);
 const PROTECTED = new Set([
   'agents.md', 'context.md', 'workbench/package.json', 'workbench/package-lock.json',
   ...['application.mjs', 'server.mjs', 'main.mjs', 'store.mjs', 'config.mjs', 'assistant-permission-settings.mjs', 'application-assistant-permissions.mjs',
-    'application-assistant.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
+    'application-assistant.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-runtime-sources.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
   ...['assistant-permissions-ui.js', 'source-repair-ui.js', 'app.js'].map(name => 'workbench/public/' + name),
-  ...['application-source-repairs.test.mjs', 'application-source-tools.test.mjs', 'source-repair-ui.test.mjs', 'assistant-permission-settings.test.mjs',
+  ...['application-source-repairs.test.mjs', 'application-source-tools.test.mjs', 'application-runtime-sources.test.mjs', 'source-repair-ui.test.mjs', 'assistant-permission-settings.test.mjs',
     'application-assistant-permissions.test.mjs', 'assistant-permissions-ui.test.mjs'].map(name => 'workbench/test/' + name),
 ]);
 const own = (value, key) => Object.hasOwn(value, key);
@@ -158,35 +158,21 @@ export class ApplicationSourceRepairs {
     if (guarded) await this.checkpoint(guarded);
     return { files, truncated };
   }
-  async read({ path, startLine = 1, startColumn = 1, lineCount = 120 } = {}, context) {
+  async read(input = {}, context) {
+    object(input, ['path', 'component', 'startLine', 'startColumn', 'lineCount']);
+    if (own(input, 'path') === own(input, 'component')) throw fail('源码读取必须指定唯一的仓库路径或诊断组件。');
     await this.ready;
     const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
     if (guarded) await this.checkpoint(guarded);
-    if (!Number.isSafeInteger(startLine) || startLine < 1 || !Number.isSafeInteger(startColumn) || startColumn < 1
-      || !Number.isSafeInteger(lineCount) || lineCount < 1 || lineCount > 300) throw fail('源码行列范围无效。');
-    const source = await this.source(path, { context: guarded });
-    const lines = sanitizeDiagnosticText(clean(source.content, MAX_FILE), { preserveLines: true }).split('\n');
-    const first = lines[startLine - 1], offset = startColumn - 1;
-    if (first === undefined ? offset !== 0 : offset > first.length || offset > 0 && /[\uDC00-\uDFFF]/.test(first[offset] || '') && /[\uD800-\uDBFF]/.test(first[offset - 1])) throw fail('源码起始列无效。');
-    let content = '', endLine = null, readLineCount = 0, nextStartLine = null, nextStartColumn = null;
-    for (let index = startLine - 1; index < Math.min(lines.length, startLine - 1 + lineCount); index++) {
-      const line = lines[index], begin = index === startLine - 1 ? offset : 0, separator = readLineCount ? '\n' : '';
-      const remaining = MAX_SOURCE_PAGE - content.length - separator.length;
-      let end = Math.min(line.length, begin + Math.max(0, remaining));
-      if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1] || '') && /[\uDC00-\uDFFF]/.test(line[end])) end--;
-      const redaction = line.lastIndexOf('[REDACTED]', end - 1);
-      if (redaction >= begin && redaction + '[REDACTED]'.length > end) end = redaction;
-      if (remaining < 0 || end === begin && begin < line.length) { nextStartLine = index + 1; nextStartColumn = begin + 1; break; }
-      content += separator + line.slice(begin, end); endLine = index + 1; readLineCount++;
-      if (end < line.length) { nextStartLine = index + 1; nextStartColumn = end + 1; break; }
-      nextStartLine = index + 1 < lines.length ? index + 2 : null; nextStartColumn = nextStartLine === null ? null : 1;
-    }
+    const source = own(input, 'component') ? await readRuntimeSource(this.app.config, input.component, async () => { if (guarded) await this.checkpoint(guarded); })
+      : { ...await this.source(input.path, { context: guarded }), path: input.path };
+    const result = sourceReadPage({ ...source, content: clean(source.content, MAX_FILE) }, input);
     if (guarded) await this.checkpoint(guarded);
-    return { path, hash: source.hash, content, startLine, startColumn, endLine, readLineCount, totalLines: lines.length,
-      truncated: nextStartLine !== null, nextStartLine, nextStartColumn };
+    return result;
   }
   async search(input = {}, context) {
-    object(input, ['prefix', 'query', 'limit']);
+    object(input, ['prefix', 'component', 'query', 'limit']);
+    if (own(input, 'component') && own(input, 'prefix')) throw fail('诊断组件与仓库搜索范围不能同时指定。');
     const { prefix = 'workbench/src', query, limit = 20 } = input;
     if (typeof prefix !== 'string' || prefix.length > 240 || !/^[A-Za-z0-9_./-]+$/.test(prefix)
       || prefix.split('/').some(part => !part || part.startsWith('.')) || typeof query !== 'string' || !query.trim()
@@ -194,15 +180,19 @@ export class ApplicationSourceRepairs {
     await this.ready;
     const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
     if (guarded) await this.checkpoint(guarded);
-    const candidates = [...this.known].filter(path => path === prefix || path.startsWith(prefix + '/')).sort();
+    const runtime = own(input, 'component') ? await readRuntimeSource(this.app.config, input.component, async () => { if (guarded) await this.checkpoint(guarded); }) : null;
+    const candidates = runtime ? [runtime.path] : [...this.known].filter(path => path === prefix || path.startsWith(prefix + '/')).sort();
     if (!candidates.length) throw fail('只能搜索已登记的源码文件或目录。', 'SOURCE_FILE_UNTRACKED', 403);
-    const matches = [], budget = { remaining: 2 * 1024 * 1024, bytes: 0 }; let scannedFiles = 0, truncated = false;
+    const matches = [], budget = { remaining: 2 * 1024 * 1024, bytes: 0 }; let scannedFiles = 0, truncated = false, sourceMarkupEscaped = false;
     scan: for (const [index, path] of candidates.entries()) {
       if (guarded) await this.checkpoint(guarded);
       if (scannedFiles >= 100) { truncated = true; break; }
       scannedFiles++;
       let source;
-      try { source = await this.source(path, { context: guarded, searchBudget: budget }); }
+      try {
+        source = runtime || await this.source(path, { context: guarded, searchBudget: budget });
+        if (runtime) budget.bytes += Buffer.byteLength(source.content);
+      }
       catch (error) {
         if (guarded) await this.checkpoint(guarded);
         truncated = true;
@@ -210,16 +200,18 @@ export class ApplicationSourceRepairs {
         if (!['SOURCE_FILE_UNAVAILABLE', 'SOURCE_FILE_UNTRACKED', 'SOURCE_LINK_FORBIDDEN', 'SOURCE_PATH_FORBIDDEN', 'SOURCE_TEXT_INVALID', 'SOURCE_SEARCH_CHANGED'].includes(error.code)) throw error;
         continue;
       }
-      const lines = source.content.split('\n');
+      const rawLines = source.content.split('\n'), display = sourceDisplayText(clean(source.content, MAX_FILE)), lines = display.content.split('\n');
+      sourceMarkupEscaped ||= display.sourceMarkupEscaped;
       for (const [lineIndex, text] of lines.entries()) {
-        if (!text.includes(query)) continue;
-        const visible = clean(text, MAX_FILE), start = Math.max(0, visible.indexOf(query) - 60), context = visible.slice(start, start + 240);
-        matches.push({ path, line: lineIndex + 1, context, hash: source.hash });
+        const displayedQuery = escapeSourceMarkup(query);
+        if (!rawLines[lineIndex]?.includes(query) || !text.includes(displayedQuery)) continue;
+        const start = Math.max(0, text.indexOf(displayedQuery) - 60), context = text.slice(start, start + 240);
+        matches.push({ path, line: lineIndex + 1, context, hash: source.hash, ...(runtime ? { origin: runtime.origin, component: runtime.component } : {}) });
         if (matches.length === limit) { truncated ||= lineIndex < lines.length - 1 || index < candidates.length - 1; break scan; }
       }
     }
     if (guarded) await this.checkpoint(guarded);
-    return { matches, truncated, scannedFiles, scannedBytes: budget.bytes };
+    return { ...(runtime ? { origin: runtime.origin, component: runtime.component, path: runtime.path } : {}), sourceMarkupEscaped, matches, truncated, scannedFiles, scannedBytes: budget.bytes };
   }
   async history({ limit = 20, repairId, includeDiff = false } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || repairId !== undefined && !identifier(repairId) || typeof includeDiff !== 'boolean') throw fail('修复历史参数无效。');

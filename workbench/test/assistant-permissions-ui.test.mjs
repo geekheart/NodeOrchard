@@ -103,7 +103,8 @@ test('source read and model experiments are independent human drafts and the inp
     calls.push(options); return options ? { ...options.body, revision: 2 } : config();
   });
   await ui.refresh(); const read = ui.inputs.get('supervisor.sourceRead'), experiment = ui.inputs.get('supervisor.modelExperiment');
-  assert.equal(read.checked, false); read.change(true); assert.equal(ui.draft.supervisor.sourceRepair, false);
+  assert.equal(read.checked, false); assert.equal(read.attributes['aria-label'], '总控助手：读取诊断源码');
+  read.change(true); assert.equal(ui.draft.supervisor.sourceRepair, false);
   assert.equal(calls.length, 1); assert.equal(ui.experimentInput.disabled, true);
   experiment.change(true); assert.equal(ui.experimentInput.disabled, false);
   ui.experimentInput.value = '4000'; ui.experimentInput.listeners.get('input')();

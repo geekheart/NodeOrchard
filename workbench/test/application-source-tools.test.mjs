@@ -96,6 +96,19 @@ test('source search uses the read grant and read-only scope without admitting re
   assert.equal(calls.length, 1);
 });
 
+test('the existing source-read grant admits fixed Hermes components but no arbitrary native path or new privilege', async t => {
+  const { app, enable, calls } = await fixture(t), owner = app.applicationAssistant;
+  enable({ sourceRead: true, sourceRepair: false }); const scope = await owner.permissions.bind({ role: 'supervisor', readOnly: true });
+  await owner.call('app.source.read', { component: 'codex-stream', startLine: 1037 }, { permissionScope: scope });
+  await owner.call('app.source.search', { component: 'request-client', query: 'max_retries' }, { permissionScope: scope });
+  assert.equal(calls.length, 2); assert(calls.every(row => row.context.sourceAccess === 'read' && row.context.allowSourceWrite === false));
+  for (const component of ['unknown', '../agent/codex_runtime.py', '/native/file.py', '__proto__']) {
+    await assert.rejects(owner.call('app.source.read', { component }, { permissionScope: scope }));
+  }
+  await assert.rejects(owner.call('app.source.patch', { operationId: 'no-native-write', changes: [{ component: 'codex-stream', content: 'changed' }] }, { permissionScope: scope }), /权限/);
+  assert.equal(app.assistantPermissionSettings.get().supervisor.sourceRepair, false); assert.equal(calls.length, 2);
+});
+
 test('source dispatch strips forged human authority and protects against argument privilege injection', async t => {
   const { app, enable, calls } = await fixture(t), owner = app.applicationAssistant; enable(true);
   const scope = await owner.permissions.bind({ role: 'supervisor' }), context = { permissionScope: scope, text: '请修复工作台源码，不要修改现有工作流', human: true, sourceConversationId: 'supervisor-fixture', diagnosticTurnId: 'turn-fixture' };

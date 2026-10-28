@@ -96,7 +96,7 @@ test('source read redacts full credential-like spans before applying its short-p
 
 test('source read pre-redacts source before paging so diagnostic redaction cannot expand and cut it again', async t => {
   const f = await fixture(t), path = 'workbench/src/feature.mjs';
-  await writeFile(join(f.root, path), 'token=1;'.repeat(200) + '\n<analysis>PRIVATE_BLOCK\nPRIVATE_SECOND</analysis>\nfinish();');
+  await writeFile(join(f.root, path), 'token=1;'.repeat(200) + '\n<analysis>SOURCE_LITERAL\nSOURCE_SECOND</analysis>\nfinish();');
   const args = { path }, page = await f.service.read(args, f.context), turn = new AssistantDiagnosticTurn({ scope: 'source-redaction-page' });
   turn.record('app.source.read', args, page, { cacheable: false }); const received = turn.transcript()[0].result;
   assert.equal(received.content === page.content, true); assert.equal(received.content.includes('已截断'), false);
