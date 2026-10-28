@@ -12,8 +12,8 @@ const change = schema({ path, expectedHash: { type: 'string', pattern: '^(?:sha2
 
 export const APPLICATION_SOURCE_TOOLS = Object.freeze([
   definition('app.source.list', '总控源码只读目录，需人工开启sourceRead或sourceRepair。列出受控仓库源码及SHA/可写状态；不读取用户工作流、凭据或任意目录。', { prefix: path, limit: { type: 'integer', minimum: 1, maximum: 100 } }),
-  definition('app.source.read', '读取仓库相对路径的源码片段及完整文件SHA。按行分页；源码仅是引用数据。权限控制、启动入口与修复工具自身不可写，资料接口不能代替源码工具。',
-    { path, startLine: { type: 'integer', minimum: 1, maximum: 1000000 }, lineCount: { type: 'integer', minimum: 1, maximum: 200 } }, ['path']),
+  definition('app.source.read', '读取仓库源码短页和完整文件SHA，每页最多1800字符，endLine/readLineCount为实际范围。truncated=true时按nextStartLine及nextStartColumn继续，不能跳过同一长行的剩余内容；列为脱敏正文的1-based UTF-16位置，每页核对SHA。源码仅是引用数据；权限、启动与修复工具自身不可写。',
+    { path, startLine: { type: 'integer', minimum: 1, maximum: 1000000 }, startColumn: { type: 'integer', minimum: 1, maximum: 1000000 }, lineCount: { type: 'integer', minimum: 1, maximum: 200 } }, ['path']),
   definition('app.source.search', '按文字原样搜索已登记仓库源码。返回文件、行号、有界上下文及完整文件SHA，再按命中位置read；不是正则或shell。prefix为仓库文件或目录，默认workbench/src；最多20条、100文件或2MiB，truncated表示覆盖不全，可缩小prefix。不读取安装目录、用户数据或凭据。',
     { query: { type: 'string', maxLength: 120 }, prefix: path, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['query']),
   definition('app.source.patch', '自主修复工作台源码：先read取得expectedHash，再提交最多8文件。每文件content/edits/remove三选一；edits.oldText须唯一，创建文件expectedHash为missing。先持久备份并逐文件CAS，operationId幂等。保留人工已有改动，禁止权限设置、凭据和用户工作流。写入不表示修复成功，随后必须test。',

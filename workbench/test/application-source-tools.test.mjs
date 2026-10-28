@@ -67,12 +67,13 @@ test('a human source-read grant exposes only registered source reads without sou
   const scope = await owner.permissions.bind({ role: 'supervisor' }), readonly = await owner.permissions.bind({ role: 'supervisor', readOnly: true });
   for (const current of [scope, readonly]) {
     assert.deepEqual(owner.tools(current).filter(row => row.name.startsWith('app.source.')).map(row => row.name), ['app.source.list', 'app.source.read', 'app.source.search']);
-    await owner.call('app.source.read', { path: 'workbench/src/fixture.mjs' }, { permissionScope: current, text: '仅查看源码', deadlineAt: null });
+    await owner.call('app.source.read', { path: 'workbench/src/fixture.mjs', startLine: 4, startColumn: 12 }, { permissionScope: current, text: '仅查看源码', deadlineAt: null });
   }
   for (const tool of ['app.source.patch', 'app.source.test', 'app.source.rollback', 'app.source.history']) {
     await assert.rejects(owner.call(tool, {}, { permissionScope: scope, text: '请修复源码并运行测试' }), /权限/);
   }
   assert.equal(calls.length, 2); assert(calls.every(call => call.context.sourceAccess === 'read' && call.context.allowSourceWrite === false));
+  assert(calls.every(call => call.args.startLine === 4 && call.args.startColumn === 12));
   assert.equal(app.assistantPermissionSettings.get().supervisor.sourceRepair, false);
   assert.equal(app.store.db.prepare('SELECT count(*) count FROM source_repair_operations').get().count, 0);
 });

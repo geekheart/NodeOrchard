@@ -4,9 +4,10 @@ import { resolve, relative, dirname, join, sep, isAbsolute, extname } from 'node
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { sanitizeDiagnosticText } from './app-diagnostics.mjs';
 
 const execute = promisify(execFile);
-const MAX_FILE = 256 * 1024, MAX_PATCH = 1024 * 1024, MAX_OUTPUT = 32768;
+const MAX_FILE = 256 * 1024, MAX_PATCH = 1024 * 1024, MAX_OUTPUT = 32768, MAX_SOURCE_PAGE = 1800;
 const SOURCE = /^workbench\/(?:src|public|shared|python|test|assistant-skills|docs)\//;
 const ROOT_FILES = new Set(['README.md', 'CONTEXT.md', 'AGENTS.md', 'workbench/README.md', 'workbench/package.json']);
 const EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.md', '.css', '.html', '.json', '.txt', '.yaml', '.yml']);
@@ -157,13 +158,32 @@ export class ApplicationSourceRepairs {
     if (guarded) await this.checkpoint(guarded);
     return { files, truncated };
   }
-  async read({ path, startLine = 1, lineCount = 120 } = {}, context) {
+  async read({ path, startLine = 1, startColumn = 1, lineCount = 120 } = {}, context) {
     await this.ready;
     const guarded = context ? { ...context, sourceAccess: 'read' } : undefined;
     if (guarded) await this.checkpoint(guarded);
-    if (!Number.isSafeInteger(startLine) || startLine < 1 || !Number.isSafeInteger(lineCount) || lineCount < 1 || lineCount > 300) throw fail('源码行范围无效。');
-    const source = await this.source(path, { context: guarded }), lines = source.content.split('\n'), text = lines.slice(startLine - 1, startLine - 1 + lineCount).join('\n');
-    return { path, hash: source.hash, content: clean(text, 65536), startLine, totalLines: lines.length, truncated: startLine - 1 + lineCount < lines.length || text.length > 65536 };
+    if (!Number.isSafeInteger(startLine) || startLine < 1 || !Number.isSafeInteger(startColumn) || startColumn < 1
+      || !Number.isSafeInteger(lineCount) || lineCount < 1 || lineCount > 300) throw fail('源码行列范围无效。');
+    const source = await this.source(path, { context: guarded });
+    const lines = sanitizeDiagnosticText(clean(source.content, MAX_FILE), { preserveLines: true }).split('\n');
+    const first = lines[startLine - 1], offset = startColumn - 1;
+    if (first === undefined ? offset !== 0 : offset > first.length || offset > 0 && /[\uDC00-\uDFFF]/.test(first[offset] || '') && /[\uD800-\uDBFF]/.test(first[offset - 1])) throw fail('源码起始列无效。');
+    let content = '', endLine = null, readLineCount = 0, nextStartLine = null, nextStartColumn = null;
+    for (let index = startLine - 1; index < Math.min(lines.length, startLine - 1 + lineCount); index++) {
+      const line = lines[index], begin = index === startLine - 1 ? offset : 0, separator = readLineCount ? '\n' : '';
+      const remaining = MAX_SOURCE_PAGE - content.length - separator.length;
+      let end = Math.min(line.length, begin + Math.max(0, remaining));
+      if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1] || '') && /[\uDC00-\uDFFF]/.test(line[end])) end--;
+      const redaction = line.lastIndexOf('[REDACTED]', end - 1);
+      if (redaction >= begin && redaction + '[REDACTED]'.length > end) end = redaction;
+      if (remaining < 0 || end === begin && begin < line.length) { nextStartLine = index + 1; nextStartColumn = begin + 1; break; }
+      content += separator + line.slice(begin, end); endLine = index + 1; readLineCount++;
+      if (end < line.length) { nextStartLine = index + 1; nextStartColumn = end + 1; break; }
+      nextStartLine = index + 1 < lines.length ? index + 2 : null; nextStartColumn = nextStartLine === null ? null : 1;
+    }
+    if (guarded) await this.checkpoint(guarded);
+    return { path, hash: source.hash, content, startLine, startColumn, endLine, readLineCount, totalLines: lines.length,
+      truncated: nextStartLine !== null, nextStartLine, nextStartColumn };
   }
   async search(input = {}, context) {
     object(input, ['prefix', 'query', 'limit']);

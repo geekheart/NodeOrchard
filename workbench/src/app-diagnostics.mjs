@@ -19,12 +19,13 @@ const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(mess
 const own = (object, key) => object && Object.getOwnPropertyDescriptor(object, key)?.value;
 const size = value => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
-function safeText(value) {
+function safeText(value, { preserveLines = false } = {}) {
   return redact(String(value ?? ''))
-    .replace(/<(?:think|thinking|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/(?:think|thinking|analysis|reasoning)>|$)/gi, '[内部推理已省略]')
+    .replace(/<(?:think|thinking|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/(?:think|thinking|analysis|reasoning)>|$)/gi,
+      match => '[内部推理已省略]' + (preserveLines ? '\n'.repeat((match.match(/\n/g) || []).length) : ''))
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g, '[REDACTED]')
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@')
-    .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|csrf[_ -]?token|token|password|secret|authorization)["']?\s*[:=]\s*["']?)[^\s"',;}\]&#]+/gi, '$1[REDACTED]')
+    .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|csrf[_ -]?token|token|password|secret|authorization)["']?\s*[:=]\s*["']?)(?:\[REDACTED\](?=$|[\s"',;}\]&#])|(?:\[REDACTED\])?[^\s"',;}\]&#]+)/gi, '$1[REDACTED]')
     .replace(/(^|\n)((?:set-)?cookie\s*:)\s*[^\r\n]*/gi, '$1$2 [REDACTED]');
 }
 

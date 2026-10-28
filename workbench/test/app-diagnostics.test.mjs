@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { AppDiagnostics, APP_DIAGNOSTIC_LIMITS, sanitizeDiagnosticEvidence } from '../src/app-diagnostics.mjs';
+import { AppDiagnostics, APP_DIAGNOSTIC_LIMITS, sanitizeDiagnosticEvidence, sanitizeDiagnosticText } from '../src/app-diagnostics.mjs';
 import { WorkflowFiles } from '../src/workflows/workflow-files.mjs';
 import { WorkflowRuns } from '../src/workflows/workflow-runs.mjs';
 import { WorkflowLibrary } from '../src/workflows/workflow-library.mjs';
@@ -195,6 +195,17 @@ test('tool catalog projects static workflow capabilities and cached Hermes names
   assert(result.workflowTools.some(tool => tool.id === 'text.trim'));
   assert(result.hermesTools.some(tool => tool.name === 'browser'));
   assert.equal(JSON.stringify(result).includes('api_key'), false); assert.deepEqual(f.calls, []);
+});
+
+test('diagnostic text redaction is idempotent and can retain source line identities', () => {
+  const input = 'token=PRIVATE_TOKEN; password=[REDACTED]\n"secret":\n"PRIVATE_SECRET"\n<analysis>PRIVATE_THOUGHT\nHIDDEN</analysis>\nend';
+  const once = sanitizeDiagnosticText(input);
+  assert.equal(sanitizeDiagnosticText(once), once); assert.equal(once.includes('PRIVATE_'), false);
+  const source = sanitizeDiagnosticText(input, { preserveLines: true });
+  assert.equal(source.split('\n').length, input.split('\n').length);
+  assert.equal(sanitizeDiagnosticText(source), source); assert.equal(source.includes('PRIVATE_'), false);
+  const disguised = sanitizeDiagnosticText('token=[REDACTED]PRIVATE_SUFFIX; password="[REDACTED]PRIVATE_QUOTED"');
+  assert.equal(disguised.includes('PRIVATE_'), false); assert.equal(sanitizeDiagnosticText(disguised), disguised);
 });
 
 test('diagnostic payloads are bounded, redact nested config, and preserve the end of logs', async () => {

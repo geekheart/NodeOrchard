@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { ApplicationSourceRepairs } from '../src/application-source-repairs.mjs';
+import { AssistantDiagnosticTurn } from '../src/assistant-diagnostic-turn.mjs';
 
 const hash = value => 'sha256:' + createHash('sha256').update(value).digest('hex');
 async function fixture(t, options = {}) {
@@ -34,6 +35,83 @@ test('source read/list are bounded and patch uses the observed hash with an immu
   assert.equal((await service.patch(payload, context)).id, repair.id);
   await assert.rejects(service.patch({ ...payload, summary: 'A different operation' }, context), /操作|幂等/);
   assert.equal((await service.history({ limit: 5 })).repairs.length, 1);
+});
+
+test('source read pages survive the real assistant transcript without a second hidden truncation', async t => {
+  const f = await fixture(t), path = 'workbench/src/feature.mjs';
+  const content = Array.from({ length: 80 }, (_, index) => `line${index + 1}: ` + 'x'.repeat(110)).join('\n');
+  await writeFile(join(f.root, path), content);
+  const args = { path, startLine: 1, lineCount: 200 }, page = await f.service.read(args, f.context);
+  const turn = new AssistantDiagnosticTurn({ scope: 'source-read-fixture' });
+  turn.record('app.source.read', args, page, { cacheable: false });
+  const received = turn.transcript()[0].result;
+  assert.equal(received.content, page.content);
+  assert(page.content.length <= 1800); assert.equal(page.truncated, true);
+  assert.equal(page.hash, hash(content)); assert.equal(page.startLine, 1);
+  assert.equal(page.readLineCount, page.endLine); assert.equal(page.nextStartLine, page.endLine);
+  assert(page.nextStartColumn > 1); assert.equal(received.nextStartColumn, page.nextStartColumn);
+});
+
+test('source read cursors recover a long Unicode line completely without changing the file identity', async t => {
+  const f = await fixture(t), path = 'workbench/src/feature.mjs', content = '😀'.repeat(1900) + ' firstOutputAt; finish();';
+  await writeFile(join(f.root, path), content);
+  let cursor = { startLine: 1, startColumn: 1 }, restored = ''; const visited = new Set();
+  while (cursor) {
+    const identity = JSON.stringify(cursor); assert.equal(visited.has(identity), false); visited.add(identity);
+    const args = { path, ...cursor }, page = await f.service.read(args, f.context);
+    const turn = new AssistantDiagnosticTurn({ scope: 'source-long-line' }); turn.record('app.source.read', args, page, { cacheable: false });
+    const received = turn.transcript()[0].result;
+    assert.equal(received.content, page.content); assert(page.content.length <= 1800); assert.equal(page.hash, hash(content));
+    assert.equal(page.startLine, 1); assert.equal(page.endLine, 1); assert.equal(page.readLineCount, 1);
+    assert.equal(Buffer.from(page.content).toString('utf8'), page.content);
+    restored += received.content;
+    cursor = page.truncated ? { startLine: page.nextStartLine, startColumn: page.nextStartColumn } : null;
+    assert(visited.size < 10);
+  }
+  assert.equal(restored, content); assert.equal(visited.size, 3);
+  await assert.rejects(f.service.read({ path, startColumn: 2 }, f.context), /起始列/);
+});
+
+test('source read reports the actual requested line page, next cursor and end of file', async t => {
+  const f = await fixture(t), path = 'workbench/src/feature.mjs'; await writeFile(join(f.root, path), 'first\nsecond\nthird');
+  const first = await f.service.read({ path, lineCount: 1 }, f.context);
+  assert.equal(first.content, 'first'); assert.equal(first.endLine, 1); assert.equal(first.readLineCount, 1);
+  assert.equal(first.truncated, true); assert.equal(first.nextStartLine, 2); assert.equal(first.nextStartColumn, 1);
+  const last = await f.service.read({ path, startLine: first.nextStartLine, startColumn: first.nextStartColumn }, f.context);
+  assert.equal(last.content, 'second\nthird'); assert.equal(last.endLine, 3); assert.equal(last.readLineCount, 2);
+  assert.equal(last.truncated, false); assert.equal(last.nextStartLine, null); assert.equal(last.nextStartColumn, null);
+  const absent = await f.service.read({ path, startLine: 100 }, f.context);
+  assert.equal(absent.content, ''); assert.equal(absent.endLine, null); assert.equal(absent.readLineCount, 0); assert.equal(absent.truncated, false);
+  await assert.rejects(f.service.read({ path, startColumn: 100 }, f.context), /起始列/);
+  await assert.rejects(f.service.read({ path, startColumn: 0 }, f.context), /行列范围/);
+});
+
+test('source read redacts full credential-like spans before applying its short-page limit', async t => {
+  const f = await fixture(t), path = 'workbench/src/feature.mjs';
+  const content = 'x'.repeat(1750) + ' sk-' + 'A'.repeat(100) + ' after'; await writeFile(join(f.root, path), content);
+  const page = await f.service.read({ path }, f.context);
+  assert.equal(page.hash, hash(content)); assert.equal(page.content, 'x'.repeat(1750) + ' [REDACTED] after');
+  assert.equal(page.truncated, false); assert.equal(page.nextStartLine, null);
+});
+
+test('source read pre-redacts source before paging so diagnostic redaction cannot expand and cut it again', async t => {
+  const f = await fixture(t), path = 'workbench/src/feature.mjs';
+  await writeFile(join(f.root, path), 'token=1;'.repeat(200) + '\n<analysis>PRIVATE_BLOCK\nPRIVATE_SECOND</analysis>\nfinish();');
+  const args = { path }, page = await f.service.read(args, f.context), turn = new AssistantDiagnosticTurn({ scope: 'source-redaction-page' });
+  turn.record('app.source.read', args, page, { cacheable: false }); const received = turn.transcript()[0].result;
+  assert.equal(received.content === page.content, true); assert.equal(received.content.includes('已截断'), false);
+  assert(page.content.length <= 1800); assert.equal(page.totalLines, 4); assert.equal(page.truncated, true);
+  let next = page, count = 0;
+  while (next.truncated) {
+    const continuation = { path, startLine: next.nextStartLine, startColumn: next.nextStartColumn };
+    next = await f.service.read(continuation, f.context);
+    const current = new AssistantDiagnosticTurn({ scope: 'source-redaction-continuation' });
+    current.record('app.source.read', continuation, next, { cacheable: false });
+    assert.equal(current.transcript()[0].result.content, next.content); assert.equal(next.content.includes('PRIVATE_'), false);
+    assert(++count < 10);
+  }
+  const finish = await f.service.read({ path, startLine: 4 }, f.context);
+  assert.equal(finish.content, 'finish();'); assert.equal(finish.startLine, 4); assert.equal(finish.truncated, false);
 });
 
 test('a source-read-only supervisor can inspect registered source but cannot convert that access into a repair', async t => {
