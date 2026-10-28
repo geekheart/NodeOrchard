@@ -8,6 +8,7 @@ import { Application } from '../src/application.mjs';
 import { createWorkbenchServer } from '../src/server.mjs';
 import { readConfig } from '../src/config.mjs';
 import { createDocument, createNode, connectNodes } from '../shared/workflow/workflow-model.mjs';
+import { layoutPositions } from '../shared/workflow/workflow-studio-utils.mjs';
 
 class Offline extends EventEmitter {
   constructor() { super(); this.state = 'ready'; this.serverRequests = new Map(); this.calls = []; }
@@ -197,9 +198,27 @@ test('a global workflow repair is a validated proposal until explicitly applied 
   const applied = await f.request(path, { action: 'mark-applied' }); assert.equal(applied.status, 200);
   assert.equal(applied.body.turn.status, 'applied');
   assert.equal(f.app.workflowLibrary.get(document.id).document.nodes[0].config.timeoutSeconds, 300);
+  assert.deepEqual(f.app.workflowLibrary.get(document.id).document.nodes.map(({ id, x, y }) => ({ id, x, y })), document.nodes.map(({ id, x, y }) => ({ id, x, y })), 'A property-only supervisor edit preserves the existing layout');
   const revision = f.app.workflowLibrary.get(document.id).revision;
   await f.request(path, { action: 'mark-applied' }); assert.equal(f.app.workflowLibrary.get(document.id).revision, revision);
   assert.deepEqual(f.app.workflows.get(run.id), run);
+});
+
+test('supervisor application lays out newly generated nodes once without running the workflow', async t => {
+  const f = await setup(t); let document = createDocument({ schemaVersion: 2, title: '总控新增节点布局' });
+  document.nodes = [createNode('input', { x: 1700, y: 1300 }, { id: 'input' }), createNode('output', { x: 1900, y: 1300 }, { id: 'output' })];
+  document = connectNodes(document, { sourceNode: 'input', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
+  const original = f.app.workflowLibrary.save({ document, expectedRevision: 0 }); f.classificationIntent = 'workflow'; f.app.skills = async () => ({ connected: true, skills: [] });
+  let step = 0; f.respond = () => step++ === 0 ? { tool: 'workflow.propose', arguments: { workflowId: document.id, request: '添加一个校验节点' } }
+    : { text: '添加校验节点。', operations: [{ op: 'add-node', ref: 'check', type: 'validation', x: 5000, y: 4000 }] };
+  await f.request('/api/app-assistant/messages', { clientMessageId: 'generated-node-layout', text: '添加一个校验节点' });
+  const turn = await f.finished('/api/app-assistant'); assert.equal(turn.status, 'proposed'); assert.deepEqual(f.app.workflowLibrary.get(document.id), original);
+  const path = `/api/app-assistant/turns/${turn.id}/action`, applied = await f.request(path, { action: 'mark-applied' }); assert.equal(applied.status, 200);
+  const saved = f.app.workflowLibrary.get(document.id), positions = layoutPositions(saved.document);
+  assert.equal(saved.document.nodes.length, 3); for (const node of saved.document.nodes) assert.deepEqual({ x: node.x, y: node.y }, positions.get(node.id));
+  assert.deepEqual(saved.document.edges, document.edges); assert.equal(saved.revision, original.revision + 1);
+  await f.request(path, { action: 'mark-applied' }); assert.deepEqual(f.app.workflowLibrary.get(document.id), saved);
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
 });
 
 test('HTTP stop prevents a late model tool request and duplicate delivery cannot replay it', async t => {

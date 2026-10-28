@@ -1,6 +1,6 @@
 import { createNode, getPorts, connectNodes, validateDocument, updateNode, NODE_TYPES } from '../shared/workflow/workflow-model.mjs';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
-import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutPositions, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
+import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutDocument, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
@@ -659,8 +659,7 @@ export class WorkflowStudioUI {
   autoLayout() {
     this.editor.measurePorts?.();
     const sizes = new Map(this.editor.doc.nodes.map(node => [node.id, this.editor.offsets?.get(`${node.id}:size`)]));
-    const positions = layoutPositions(this.editor.doc, sizes);
-    this.editor.commit({ ...this.editor.doc, nodes: this.editor.doc.nodes.map(node => ({ ...node, ...positions.get(node.id) })) }, '按依赖自动布局');
+    this.editor.commit(layoutDocument(this.editor.doc, sizes), '按依赖自动布局');
     requestAnimationFrame(() => this.editor.fit());
   }
   executable(type) { return isV2(this.editor.doc) || ['input', 'skill', 'tool', 'output', 'evaluation', 'improvement'].includes(type); }

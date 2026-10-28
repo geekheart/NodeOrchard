@@ -10,7 +10,7 @@ import { mainChainSkillNodes, mainChainToolNodes } from './workflow-learning-ui.
 import { mergeLearningCandidate } from '../shared/workflow/workflow-learning-scope.mjs';
 import { WorkflowStudioUI } from './workflow-studio-ui.js';
 import { WorkflowNodeLibraryUI } from './workflow-node-library-ui.js';
-import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS } from '../shared/workflow/workflow-studio-utils.mjs';
+import { vacantNodePosition, reviewTargetNodes, STUDIO_STATUS, layoutDocument, hasGeneratedNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { SHORTCUT_ACTIONS, matchesShortcut, shortcutLabel } from '../shared/keyboard-shortcuts.mjs';
@@ -521,17 +521,27 @@ export class WorkflowEditor {
     if (!this.doc.nodes.length) { this.doc.viewport = { x: 48, y: 90, zoom: 1 }; this.applyViewport(); this.scheduleSave(); return; }
     const r = this.canvas.getBoundingClientRect(); if (!r.width || !r.height) return; this.measurePorts();
     this.recordCanvasSize(r);
+    let visibleLeft = 0, visibleRight = r.width;
+    const panels = this.panelSettings(), canvasLeft = r.left ?? 0, canvasTop = r.top ?? 0;
+    for (const [element, closed, side] of [[this.properties, panels.propertiesClosed, 'right'], [this.root?.querySelector?.('.wf-library'), panels.libraryClosed, 'left']]) {
+      if (closed) continue;
+      const panel = element?.getBoundingClientRect?.();
+      if (!(panel?.width > 0 && panel.height > 0 && panel.left < canvasLeft + r.width && panel.right > canvasLeft && panel.top < canvasTop + r.height && panel.bottom > canvasTop)) continue;
+      if (side === 'right') visibleRight = Math.min(visibleRight, panel.left - canvasLeft);
+      else visibleLeft = Math.max(visibleLeft, panel.right - canvasLeft);
+    }
+    const visibleWidth = visibleRight - visibleLeft; if (visibleWidth <= 0) return;
     const bounds = this.doc.nodes.map(node => ({ x: node.x, y: node.y, ...this.nodeSize(node.id) }));
     const left = Math.min(...bounds.map(b => b.x)), top = Math.min(...bounds.map(b => b.y)), right = Math.max(...bounds.map(b => b.x + b.width)), bottom = Math.max(...bounds.map(b => b.y + b.height));
-    const width = right - left, height = bottom - top, padding = Math.min(32, r.width * .05, r.height * .08), topPadding = Math.min(56, r.height * .2);
-    const availableWidth = Math.max(1, r.width - padding * 2), availableHeight = Math.max(1, r.height - topPadding - padding);
+    const width = right - left, height = bottom - top, padding = Math.min(32, visibleWidth * .05, r.height * .08), topPadding = Math.min(56, r.height * .2);
+    const availableWidth = Math.max(1, visibleWidth - padding * 2), availableHeight = Math.max(1, r.height - topPadding - padding);
     const zoom = clamp(Math.min(availableWidth / width, availableHeight / height, 1), .1, 2), scaledHeight = height * zoom;
     // At the minimum zoom, relax padding before allowing a node to be clipped.
     const y = scaledHeight <= r.height ? clamp(topPadding + (availableHeight - scaledHeight) / 2, 0, r.height - scaledHeight) : (r.height - scaledHeight) / 2;
-    this.doc.viewport = { x: clamp((r.width - width * zoom) / 2 - left * zoom, -100000, 100000), y: clamp(y - top * zoom, -100000, 100000), zoom };
+    this.doc.viewport = { x: clamp(visibleLeft + (visibleWidth - width * zoom) / 2 - left * zoom, -100000, 100000), y: clamp(y - top * zoom, -100000, 100000), zoom };
     this.applyViewport(); this.scheduleSave();
     const v = this.doc.viewport;
-    if (left * zoom + v.x < -.5 || right * zoom + v.x > r.width + .5 || top * zoom + v.y < -.5 || bottom * zoom + v.y > r.height + .5) this.toast('已缩至当前可用比例，仍有节点超出画布。请平移查看，或收起底部面板后再次适应画布。');
+    if (left * zoom + v.x < visibleLeft - .5 || right * zoom + v.x > visibleRight + .5 || top * zoom + v.y < -.5 || bottom * zoom + v.y > r.height + .5) this.toast('已缩至当前可用比例，仍有节点超出画布。请平移查看，或收起底部面板后再次适应画布。');
   }
   nodeSize(id) { return this.offsets.get(`${id}:size`) || { width: 224, height: 125 }; }
 
@@ -833,11 +843,23 @@ export class WorkflowEditor {
     } catch (error) { this.toast(error.message, true); }
   }
   snapPosition(point) { const grid = this.settings.snap ? 16 : 1; return { x: clamp(Math.round(point.x / grid) * grid, -100000, 100000), y: clamp(Math.round(point.y / grid) * grid, -100000, 100000) }; }
-  commit(next, label, before = this.doc) {
+  commit(next, label, before = this.doc, { autoLayout = true } = {}) {
     if (this.libraryReadOnly) return false;
-    const clean = validateDocument(next);
+    let clean = validateDocument(next);
     if (new Blob([serializeDocument(clean)]).size > MAX_FILE_BYTES) throw new Error('草稿不能超过 2 MB，请减少节点内容。');
     if (JSON.stringify(clean) === JSON.stringify(before)) return;
+    const generated = autoLayout && hasGeneratedNodes(this.doc, clean);
+    if (generated) {
+      // Measure the newly rendered cards before recording one atomic edit.
+      const current = this.doc;
+      try {
+        this.doc = clean; this.renderGraph(); this.measurePorts();
+        const sizes = new Map(clean.nodes.map(node => [node.id, this.offsets.get(`${node.id}:size`)]));
+        clean = validateDocument(layoutDocument(clean, sizes));
+        if (new Blob([serializeDocument(clean)]).size > MAX_FILE_BYTES) throw new Error('草稿不能超过 2 MB，请减少节点内容。');
+      } catch (error) { this.doc = current; this.renderGraph(); throw error; }
+      this.doc = current;
+    }
     if (clean.id !== this.doc.id && this.onPersist) {
       this.persist(); this.history = []; this.propertyDrafts.clear();
     } else {
@@ -845,6 +867,10 @@ export class WorkflowEditor {
     }
     this.future = [];
     this.doc = clean; this.pruneSelection(); this.renderGraph(); this.renderProperties(); this.scheduleSave();
+    if (generated) {
+      const committed = this.doc;
+      globalThis.requestAnimationFrame?.(() => { if (this.doc === committed && this.active !== false && this.documentLoaded !== false && !this.settings.canvasClosed) this.fit(); });
+    }
   }
   applyConversationOperations(operations, { fingerprint, turnId } = {}) {
     if (this.libraryReadOnly) throw new Error('此工作流只读，请先从看板恢复。');
@@ -1283,7 +1309,7 @@ export class WorkflowEditor {
     } else if (this.storageConflict) {
       banner.append(el('span', '', '另一标签页更新了草稿，已暂停自动覆盖。'));
       const load = el('button', 'wf-button', '载入更新'); load.type = 'button'; load.addEventListener('click', () => {
-        try { const raw = localStorage.getItem(this.storageKey || STORAGE_KEY); if (!raw) throw new Error('另一份草稿已移除。'); const data = JSON.parse(raw), next = validateDocument(data.document); this.storageConflict = false; this.storageValue = raw; this.canvasSize = null; this.recordCanvasSize(data.ui?.canvasSize || {}); this.propertyDrafts.clear(); this.commit(next, '载入另一标签页草稿'); this.onCanvasResize(); this.renderRecovery(); }
+        try { const raw = localStorage.getItem(this.storageKey || STORAGE_KEY); if (!raw) throw new Error('另一份草稿已移除。'); const data = JSON.parse(raw), next = validateDocument(data.document); this.storageConflict = false; this.storageValue = raw; this.canvasSize = null; this.recordCanvasSize(data.ui?.canvasSize || {}); this.propertyDrafts.clear(); this.commit(next, '载入另一标签页草稿', this.doc, { autoLayout: false }); this.onCanvasResize(); this.renderRecovery(); }
         catch (error) { this.toast(error.message, true); }
       });
       const exportButton = el('button', 'wf-button', '导出 JSON 备份'); exportButton.type = 'button'; exportButton.addEventListener('click', () => this.exportLegacyDocument()); banner.append(load, exportButton);
@@ -1320,7 +1346,7 @@ export class WorkflowEditor {
     submit.addEventListener('click', () => {
       try {
         if (new Blob([area.value]).size > MAX_FILE_BYTES) throw new Error('JSON 不能超过 2 MB。');
-        const next = validateDocument(JSON.parse(area.value)); this.commit(next, '导入工作流');
+        const next = validateDocument(JSON.parse(area.value)); this.commit(next, '导入工作流', this.doc, { autoLayout: false });
         this.propertyDrafts.clear(); this.selection.clear(); this.selectedEdge = null; this.cancelConnection(); this.renderSelection(); this.renderProperties();
         dialog.close(); this.fit(); this.toast(`已导入 ${next.nodes.length} 个节点、${next.edges.length} 条连线。`);
       } catch (error) { feedback.textContent = `导入失败：${error.message}`; feedback.classList.add('error'); }

@@ -3,7 +3,8 @@ import { validateDocument, getPorts } from '../../shared/workflow/workflow-model
 import { planWorkflow, learningBranch } from '../../shared/workflow/workflow-plan.mjs';
 import { planWorkflowConversation } from './workflow-conversation-planner.mjs';
 import { sanitizeDiagnosticEvidence } from '../app-diagnostics.mjs';
-import { documentFingerprint, applyWorkflowOperations } from '../../shared/workflow/workflow-conversation-commands.mjs';
+import { documentFingerprint, applyWorkflowOperations, sameDocumentContent } from '../../shared/workflow/workflow-conversation-commands.mjs';
+import { hasGeneratedNodes } from '../../shared/workflow/workflow-studio-utils.mjs';
 import { projectConversationIssues, canRetryConversationTurn, parseConversationIssueResolution, selectConversationIssue } from '../../shared/workflow/workflow-conversation-issues.mjs';
 import { redact } from '../hermes-adapter.mjs';
 import { reviewRevisionPolicy } from '../../shared/workflow/workflow-review-revision.mjs';
@@ -772,7 +773,10 @@ export class WorkflowConversations {
       const expected = applied.document || applied;
       if (turn.user.revisionRequest) assertArtifactRevisionCodeChange(document, expected, turn.user.revisionRequest.targetNodeId);
       const actual = safeDocument(input.document, workflowId);
-      if (documentFingerprint(expected) !== documentFingerprint(actual)) fail('画布内容与本轮操作计划不一致，请重新生成建议。', 409);
+      // The editor arranges newly generated nodes after admission. Its receipt
+      // may change current-layer positions, while all business content stays fixed.
+      const matches = hasGeneratedNodes(document, expected) ? sameDocumentContent(expected, actual) : documentFingerprint(expected) === documentFingerprint(actual);
+      if (!matches) fail('画布内容与本轮操作计划不一致，请重新生成建议。', 409);
       if (this.app.applicationAssistant?.permissions) {
         const policy = this.app.applicationAssistant.permissions;
         const scope = await policy.bind({ role: 'workflow', workflowId, document });

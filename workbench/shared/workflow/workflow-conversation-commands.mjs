@@ -49,6 +49,14 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
+// Only current-layer layout may differ after a generated-node edit.
+export function sameDocumentContent(left, right) {
+  const project = document => {
+    const clean = validateDocument(jsonCopy(document, '工作流'));
+    return { ...clean, viewport: { x: 0, y: 0, zoom: 1 }, nodes: clean.nodes.map(node => ({ ...node, x: 0, y: 0 })) };
+  };
+  return canonical(project(left)) === canonical(project(right));
+}
 // A synchronous browser/server drift guard, not an authenticity credential.
 // Camera movement is deliberately not a logical workflow modification.
 export function documentFingerprint(document) {

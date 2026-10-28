@@ -91,6 +91,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   const inspector = interfaces.features.find(row => row.id === 'workflow-property-inspector');
   assert.equal(inspector.status, 'ui-only'); assert.deepEqual(inspector.tools, []);
   assert.equal(interfaces.features.find(row => row.id === 'business-code').status, 'proposal-only');
+  assert.match(interfaces.features.find(row => row.id === 'workflow-editing').apply, /新增节点后自动按依赖布局/);
   assert.equal(interfaces.features.find(row => row.id === 'application-source-editing').status, 'unavailable');
   const recycle = interfaces.features.find(row => row.id === 'workflow-recycle-bin');
   assert.equal(recycle.status, 'ui-only'); assert.equal(recycle.requiresUserConfirmation, true); assert.deepEqual(recycle.tools, []);

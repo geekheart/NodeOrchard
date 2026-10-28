@@ -38,6 +38,14 @@ function fixture(t) {
   const ui = new WorkflowExamplesUI(editor, { api, getGeneration: () => generation });
   return { ui, editor, events, calls, result, config, nextGeneration: () => generation++ };
 }
+function layoutOnCommit(editor) {
+  const commit = editor.commit.bind(editor);
+  editor.commit = (...args) => {
+    const result = commit(...args); editor.doc = structuredClone(editor.doc);
+    for (const [index, node] of editor.doc.nodes.entries()) { node.x = 120 + index * 280; node.y = index % 2 ? 240 : 80; }
+    editor.doc.viewport = { x: 24, y: 60, zoom: 0.8 }; return result;
+  };
+}
 
 test('the catalog groups execution and learning examples and loads a five-node learning draft into the same workflow without starting it', async t => {
   const f = fixture(t), id = f.editor.doc.id; assert.equal(await f.ui.open(), true);
@@ -55,6 +63,53 @@ test('the committed example is fitted after the dialog closes while a subsequent
   await f.ui.open(); await f.ui.prepare('learning-text'); assert.equal(f.editor.dialog.open, false);
   frames[0](); assert(f.events.some(row => row[0] === 'fit'));
   f.events.length = 0; f.nextGeneration(); frames[0](); assert(!f.events.some(row => row[0] === 'fit'));
+});
+
+test('the laid-out committed example anchors complete learning configuration without changing the prepared template', async t => {
+  const f = fixture(t), template = structuredClone(f.result.document); layoutOnCommit(f.editor);
+  await f.ui.open(); assert.equal(await f.ui.prepare('learning-text'), true);
+  assert.notDeepEqual(f.editor.doc.nodes.map(({ x, y }) => [x, y]), template.nodes.map(({ x, y }) => [x, y]));
+  assert.deepEqual(f.result.document, template); assert.deepEqual(f.ui.session.prepared.document, f.editor.doc);
+  assert.notEqual(f.ui.session.prepared.document, f.editor.doc);
+  assert.deepEqual(f.events.find(row => row[0] === 'config').slice(1), [f.config, { expand: true }]);
+  assert(f.events.some(row => row[0] === 'fit')); assert.equal(f.editor.dialog.open, false);
+});
+
+test('a failed learning configuration recovers against the committed layout without preparing or committing again', async t => {
+  const f = fixture(t); layoutOnCommit(f.editor); let configured = 0;
+  f.editor.runtime.learning.setConfig = async (value, options) => {
+    assert.deepEqual(value, f.config); assert.deepEqual(options, { expand: true });
+    if (++configured === 1) throw Error('配置暂时失败');
+  };
+  await f.ui.open(); assert.equal(await f.ui.prepare('learning-text'), false);
+  const committed = structuredClone(f.editor.doc), calls = f.calls.length;
+  assert.deepEqual(f.ui.session.prepared.document, committed);
+  assert.equal(await f.ui.prepare('learning-text'), true); assert.deepEqual(f.editor.doc, committed);
+  assert.equal(configured, 2); assert.equal(f.calls.length, calls); assert.equal(f.events.filter(row => row[0] === 'commit').length, 1);
+});
+
+for (const [name, mutate] of [
+  ['node configuration', document => { document.nodes[0].config.defaultValue = '用户新输入'; }],
+  ['node position', document => { document.nodes[0].x += 16; }],
+]) test(`waiting for runtime sync cannot apply example configuration after the committed ${name} changes`, async t => {
+  const f = fixture(t), gate = deferred(), entered = deferred(); layoutOnCommit(f.editor);
+  f.editor.runtime.syncWorkflow = async () => { entered.resolve(); await gate.promise; };
+  await f.ui.open(); const preparing = f.ui.prepare('learning-text'); await entered.promise;
+  mutate(f.editor.doc); const changed = structuredClone(f.editor.doc); gate.resolve();
+  assert.equal(await preparing, false); assert.deepEqual(f.editor.doc, changed);
+  assert(!f.events.some(row => ['config', 'fit'].includes(row[0])));
+});
+
+for (const inPlace of [false, true]) test(`commit-time business changes ${inPlace ? 'to the input' : 'to a cloned document'} are rejected before runtime synchronization or learning configuration`, async t => {
+  const f = fixture(t); layoutOnCommit(f.editor); const commit = f.editor.commit;
+  f.editor.commit = (document, ...args) => {
+    if (inPlace) document.nodes[0].config.defaultValue = '意外业务改动';
+    const result = commit(document, ...args);
+    if (!inPlace) f.editor.doc.nodes[0].config.defaultValue = '意外业务改动';
+    return result;
+  };
+  await f.ui.open(); assert.equal(await f.ui.prepare('learning-text'), false);
+  assert(!f.events.some(row => ['runtime-sync', 'learning-sync', 'config', 'fit'].includes(row[0])));
 });
 
 test('the existing example action delegates to the catalog instead of replacing the workflow with a fabricated Skill draft', () => {
@@ -115,6 +170,7 @@ test('a committed learning example retries failed configuration without preparin
 for (const [name, mutate] of [
   ['workflow navigation', f => f.nextGeneration()],
   ['committed node changes', f => { f.editor.doc.nodes[0].title = '用户修改'; }],
+  ['committed layout changes', f => { f.editor.doc.nodes[0].x += 16; }],
   ['unapplied properties', f => f.editor.propertyDrafts.set('input', { title: '用户属性草稿' })],
   ['unapplied title', f => { f.editor.titleDraft = { documentId: f.editor.doc.id, value: '新名称' }; }],
   ['learning form changes', f => { f.form = '用户新规则'; }],

@@ -47,6 +47,14 @@ export function layoutPositions(document, sizes = new Map()) {
   for (const node of learning) { let column = level.get(node.id); while (learningColumns.has(column)) column++; learningColumns.add(column); positions.set(node.id, { x: 64 + column * 340, y: learningY }); }
   return positions;
 }
+export function layoutDocument(document, sizes = new Map()) {
+  const positions = layoutPositions(document, sizes);
+  return { ...document, nodes: document.nodes.map(node => ({ ...node, ...positions.get(node.id) })) };
+}
+export function hasGeneratedNodes(before, next) {
+  const ids = new Set(before.nodes.map(node => node.id));
+  return before.id === next.id && next.nodes.some(node => !ids.has(node.id));
+}
 export function runArtifacts(run) {
   const items = [...(run?.artifacts || []), ...Object.values(run?.nodes || {}).flatMap(node => node.artifacts || [])], seen = new Set(), content = new Map(), result = [];
   const order = new Map((run?.nodeOrder || []).map((id, index) => [id, index]));

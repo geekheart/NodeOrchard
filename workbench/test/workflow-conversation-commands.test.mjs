@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocument, createNode, connectNodes, getPorts } from '../shared/workflow/workflow-model.mjs';
-import { applyWorkflowOperations, documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
+import { applyWorkflowOperations, documentFingerprint, sameDocumentContent } from '../shared/workflow/workflow-conversation-commands.mjs';
 
 const blank = () => createDocument({ schemaVersion: 2, title: '对话操作测试' });
 const factory = () => { let count = 0; return prefix => `${prefix}-${++count}`; };
@@ -12,6 +12,22 @@ const trimFlow = () => [
   { op: 'connect', sourceNode: 'source', sourcePort: 'out', targetNode: 'trim', targetPort: 'in' },
   { op: 'connect', sourceNode: 'trim', sourcePort: 'out', targetNode: 'result', targetPort: 'in' },
 ];
+
+test('layout-only content comparison preserves the strict plan fingerprint and all business fields', () => {
+  const document = applyWorkflowOperations(blank(), trimFlow(), { idFactory: factory() }).document;
+  const arranged = { ...structuredClone(document), viewport: { x: 50, y: 80, zoom: .5 }, nodes: document.nodes.map(node => ({ ...node, x: node.x + 64, y: node.y + 80 })) };
+  assert.equal(sameDocumentContent(document, arranged), true); assert.notEqual(documentFingerprint(document), documentFingerprint(arranged));
+  const changed = structuredClone(arranged); changed.nodes[1].config.toolName = 'text.uppercase';
+  assert.equal(sameDocumentContent(document, changed), false);
+  const disconnected = { ...arranged, edges: [] }; assert.equal(sameDocumentContent(document, disconnected), false);
+});
+
+test('layout-only comparison does not ignore changes inside an embedded workflow', () => {
+  const child = blank(); child.nodes.push(createNode('input', { x: 1, y: 2 }, { id: 'child-input' }));
+  const document = blank(); document.nodes.push(createNode('subflow', {}, { id: 'subflow', config: { document: child } }));
+  const changed = structuredClone(document); changed.nodes[0].config.document.nodes[0].x = 99;
+  assert.equal(sameDocumentContent(document, changed), false);
+});
 
 test('semantic edit batch creates typed manual-model nodes and edges without mutating original', () => {
   const document = blank(), original = structuredClone(document), operations = trimFlow(), originalOperations = structuredClone(operations);

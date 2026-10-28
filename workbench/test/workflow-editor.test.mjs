@@ -92,6 +92,53 @@ function propertiesEditor(t, doc = documentWith()) {
   return instance;
 }
 
+test('generating nodes measures the new cards and records layout with the creation in one undo step', t => {
+  const before = documentWith('input', { x: 1700, y: 1200 }); before.schemaVersion = 2; before.nodes[0].config.outputType = 'object';
+  const instance = editor(before), frames = []; let rendered = false, saved = 0, fitted = 0;
+  globalValue(t, 'requestAnimationFrame', callback => frames.push(callback));
+  instance.renderGraph = () => { rendered = instance.doc.nodes.some(node => node.id === 'first'); };
+  instance.measurePorts = () => { assert.equal(rendered, true, 'new cards must be rendered before measuring'); instance.offsets.set('first:size', { width: 270, height: 680 }); };
+  instance.scheduleSave = () => saved++; instance.fit = () => fitted++;
+  let next = { ...before, nodes: [...before.nodes, createNode('tool', { x: -900, y: -800 }, { id: 'first' }), createNode('tool', { x: -900, y: -800 }, { id: 'second' })] };
+  for (const targetNode of ['first', 'second']) next = connectNodes(next, { sourceNode: 'node-a', sourcePort: 'out', targetNode, targetPort: 'in' });
+  const content = doc => doc.nodes.map(({ x, y, ...node }) => node), candidate = structuredClone(next);
+  instance.commit(next, '生成节点'); const arranged = structuredClone(instance.doc), first = arranged.nodes[1], second = arranged.nodes[2];
+  assert.ok(first.x > arranged.nodes[0].x); assert.equal(first.x, second.x); assert.ok(second.y >= first.y + 680 + 48);
+  assert.deepEqual(content(arranged), content(candidate)); assert.deepEqual(arranged.edges, candidate.edges); assert.deepEqual(next, candidate);
+  assert.equal(instance.history.length, 1); assert.deepEqual(instance.history[0].document, before); assert.equal(saved, 1);
+  frames[0](); assert.equal(fitted, 1);
+  instance.undo(); assert.deepEqual(instance.doc.nodes, before.nodes); assert.deepEqual(instance.doc.edges, before.edges);
+  instance.undo(true); assert.deepEqual(instance.doc.nodes, arranged.nodes); assert.deepEqual(instance.doc.edges, arranged.edges);
+});
+
+test('ordinary node edits and explicit document restores preserve manual positions', () => {
+  const instance = editor(documentWith('input', { x: 1700, y: 1200 }));
+  instance.measurePorts = () => assert.fail('existing node changes do not request automatic layout');
+  instance.commit(updateNode(instance.doc, 'node-a', { title: '仅改名称' }), '配置节点');
+  assert.deepEqual([instance.doc.nodes[0].x, instance.doc.nodes[0].y], [1700, 1200]);
+  const imported = { ...instance.doc, nodes: [...instance.doc.nodes, createNode('input', { x: 912, y: 736 }, { id: 'restored' })] };
+  instance.commit(imported, '载入已有草稿', instance.doc, { autoLayout: false });
+  assert.deepEqual(instance.doc.nodes, imported.nodes);
+});
+
+test('a failed generated layout leaves the previous document and undo history untouched', () => {
+  const instance = editor(), before = structuredClone(instance.doc); let restored = false;
+  instance.renderGraph = () => { restored = instance.doc.nodes.length === 1; };
+  instance.measurePorts = () => { throw Error('measurement failed'); };
+  instance.scheduleSave = () => assert.fail('a rejected layout must not save');
+  assert.throws(() => instance.commit({ ...before, nodes: [...before.nodes, createNode('input', {}, { id: 'new-node' })] }, '生成节点'), /measurement failed/);
+  assert.deepEqual(instance.doc, before); assert.equal(instance.history.length, 0); assert.equal(instance.future.length, 0); assert.equal(restored, true);
+});
+
+test('a queued generated-layout fit cannot change a workflow after undo or navigation', t => {
+  const instance = editor(), frames = []; let fits = 0;
+  globalValue(t, 'requestAnimationFrame', callback => frames.push(callback)); instance.fit = () => fits++;
+  const add = id => instance.commit({ ...instance.doc, nodes: [...instance.doc.nodes, createNode('input', {}, { id })] }, '新增节点');
+  add('undone'); instance.undo(); frames.shift()(); assert.equal(fits, 0);
+  add('inactive'); instance.active = false; frames.shift()(); assert.equal(fits, 0);
+  instance.active = true; add('switched'); instance.doc = createDocument(); frames.shift()(); assert.equal(fits, 0);
+});
+
 test('clicking blank canvas closes properties without applying or discarding the node draft', t => {
   const instance = propertiesEditor(t), before = structuredClone(instance.doc);
   const draft = { title: '未应用的名称', config: structuredClone(instance.doc.nodes[0].config) };
@@ -489,6 +536,27 @@ test('fit and automatic visibility keep boundary-coordinate documents valid', t 
     assert.ok(Math.abs(instance.doc.viewport.x) <= 100000);
     assert.ok(Math.abs(instance.doc.viewport.y) <= 100000);
   }
+});
+
+test('fit excludes an overlaid property drawer and library from the visible canvas width', () => {
+  const doc = documentWith('input', { x: 64, y: 80 }); doc.nodes.push(createNode('output', { x: 404, y: 80 }, { id: 'output' }));
+  const instance = editor(doc); instance.canvas.getBoundingClientRect = () => ({ left: 470, top: 100, width: 640, height: 600 });
+  const drawer = { getBoundingClientRect: () => ({ left: 800, right: 1110, top: 100, bottom: 700, width: 310, height: 600 }) };
+  instance.properties = drawer; instance.settings.propertiesClosed = false;
+  for (const node of doc.nodes) instance.offsets.set(`${node.id}:size`, { width: 270, height: 180 });
+  const fitsBetween = (left, right) => { for (const node of instance.doc.nodes) {
+    assert.ok(node.x * instance.doc.viewport.zoom + instance.doc.viewport.x >= left, node.id);
+    assert.ok((node.x + 270) * instance.doc.viewport.zoom + instance.doc.viewport.x <= right, `${node.id} must not be hidden under a drawer`);
+  } };
+  instance.fit(); fitsBetween(0, 330);
+  instance.settings.propertiesClosed = true; instance.settings.libraryClosed = false;
+  instance.root.querySelector = selector => selector === '.wf-library' ? { getBoundingClientRect: () => ({ left: 470, right: 692, top: 100, bottom: 700, width: 222, height: 600 }) } : null;
+  instance.fit(); fitsBetween(222, 640);
+  instance.settings.libraryClosed = true; instance.settings.propertiesClosed = false;
+  instance.properties = { getBoundingClientRect: () => ({ left: 1110, right: 1420, top: 100, bottom: 700, width: 310, height: 600 }) };
+  instance.fit(); fitsBetween(0, 640); const adjacentZoom = instance.doc.viewport.zoom;
+  instance.settings.propertiesClosed = true; instance.fit();
+  assert.equal(instance.doc.viewport.zoom, adjacentZoom, 'an adjacent desktop panel does not reduce canvas width twice');
 });
 
 test('fit includes 25 business nodes and bottom learning nodes in the current short canvas without moving graph data', () => {

@@ -1,5 +1,5 @@
 import { validateDocument } from '../shared/workflow/workflow-model.mjs';
-import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
+import { documentFingerprint, sameDocumentContent } from '../shared/workflow/workflow-conversation-commands.mjs';
 
 const element = (tag, className = '', text) => { const node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; };
 const button = (text, action) => { const node = element('button', 'wf-button', text); node.type = 'button'; node.addEventListener('click', action); return node; };
@@ -93,7 +93,7 @@ export class WorkflowExamplesUI {
     try {
       const result = recovering ? session.prepared : await this.api(`/api/workflow-examples/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: { workflowId: session.source.id } });
       if (!recovering) this.assertCurrent(session);
-      const document = validateDocument(result.document);
+      let document = validateDocument(result.document);
       if (result.example?.id !== id || result.example.kind !== example.kind || document.id !== session.source.id || document.mode !== example.kind || !document.nodes.length
         || typeof result.ready !== 'boolean' || !Array.isArray(result.requirements) || result.requirements.some(item => typeof item !== 'string')) throw Error('示例准备结果与当前工作流不匹配，未载入。');
       const learning = this.editor.runtime?.learning;
@@ -102,7 +102,10 @@ export class WorkflowExamplesUI {
         session.prepared = { example: { id, kind: example.kind }, document: structuredClone(document),
           learningConfig: structuredClone(result.learningConfig), ready: result.ready, requirements: [...result.requirements] };
         if (this.editor.commit(document, '载入示例') === false) throw Error('示例草稿未保存。');
-        session.applied = true; this.editor.settings.propertiesClosed = true; this.editor.applySettings?.();
+        session.applied = true;
+        if (!sameDocumentContent(this.editor.doc, session.prepared.document)) throw Error('已提交的示例内容发生变化，未应用学习配置。');
+        document = structuredClone(this.editor.doc); session.prepared.document = structuredClone(document);
+        this.editor.settings.propertiesClosed = true; this.editor.applySettings?.();
       }
       await this.editor.runtime?.syncWorkflow?.();
       if (!this.appliedCurrent(session, document)) return false;

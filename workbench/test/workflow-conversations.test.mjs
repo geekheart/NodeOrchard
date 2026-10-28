@@ -318,6 +318,42 @@ test('freeform planning is asynchronous, proposal only, and exact command receip
   assert.equal(f.app.workflowLibrary.list().length, 0); assert.deepEqual(f.app.workflows.list(), []);
 });
 
+test('generated-node receipts allow only current-layer layout changes after exact candidate validation', async t => {
+  const f = await fixture(t), document = graph(), operations = [{ op: 'add-node', ref: 'new-code', type: 'tool', x: 5000, y: 4000,
+    config: { executionMode: 'code', language: 'javascript', inputType: 'text', outputType: 'text', code: 'return input;' } }];
+  f.app.conversations.planner = async () => ({ text: '添加业务节点', operations, baseFingerprint: documentFingerprint(document) });
+  const response = await settledMessage(f, document.id, message(document, '添加一个业务代码节点', { intent: 'workflow' })), turn = response.turn;
+  let generated = 0; const expected = applyWorkflowOperations(document, operations, { idFactory: prefix => `${prefix}-${turn.id}-${++generated}` }).document;
+  const validation = await f.app.conversations.validateProposal(document.id, turn.id, { planFingerprint: turn.assistant.baseFingerprint });
+  assert.equal(validation.resultFingerprint, documentFingerprint(expected), 'Pre-application validation stays exact, including positions');
+  const actual = copy(expected); actual.nodes = actual.nodes.map((node, index) => ({ ...node, x: 64 + index * 340, y: 80 })); actual.viewport = { x: 11, y: 22, zoom: 0.8 };
+  const receipt = value => ({ action: 'mark-applied', actionId: turn.actions[0].id, planFingerprint: turn.assistant.baseFingerprint, document: value });
+  const changes = [
+    value => { value.nodes.at(-1).config.code = 'return "changed";'; },
+    value => { value.edges.pop(); },
+    value => { value.nodes.at(-1).origin = { kind: 'preset', id: 'other-preset', version: 1, title: '其他派生', baseType: 'tool' }; },
+    value => { value.mode = 'learn'; },
+    value => { value.nodes[0].title = '未经提案的名称'; },
+  ];
+  for (const change of changes) { const invalid = copy(actual); change(invalid); await assert.rejects(f.app.conversations.action(document.id, turn.id, receipt(invalid)), /画布内容/); }
+  assert.equal(f.app.conversations.get(document.id).conversation.turns.at(-1).outcome, undefined);
+  const done = await f.app.conversations.action(document.id, turn.id, receipt(actual));
+  assert.equal(done.turn.outcome.status, 'complete'); assert.equal(done.turn.outcome.documentFingerprint, documentFingerprint(actual));
+  assert.deepEqual((await f.app.conversations.action(document.id, turn.id, receipt(actual))).turn.outcome, done.turn.outcome);
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
+test('a non-generating proposal cannot use the layout exception to alter node positions', async t => {
+  const f = await fixture(t), document = graph(), operations = [{ op: 'set-title', title: '只修改标题' }];
+  f.app.conversations.planner = async () => ({ text: '仅改名', operations, baseFingerprint: documentFingerprint(document) });
+  const { turn } = await settledMessage(f, document.id, message(document, '修改标题', { intent: 'workflow' }));
+  const expected = applyWorkflowOperations(document, operations).document, actual = copy(expected); actual.nodes[0].x += 48;
+  const body = { action: 'mark-applied', actionId: turn.actions[0].id, planFingerprint: turn.assistant.baseFingerprint };
+  await assert.rejects(f.app.conversations.action(document.id, turn.id, { ...body, document: actual }), /画布内容/);
+  assert.equal((await f.app.conversations.action(document.id, turn.id, { ...body, document: expected })).turn.outcome.status, 'complete');
+  assert.deepEqual(f.app.workflows.list(), []); assert.deepEqual(f.adapter.calls, []);
+});
+
 test('planning excludes learning runs and restart interrupts unfinished turns without replay', async t => {
   const f = await fixture(t), document = graph(); let calls = 0;
   f.app.conversations.planner = async () => { calls++; return new Promise(() => {}); };
