@@ -46,6 +46,17 @@ test('late first output is diagnosed from the real turn checkpoint instead of th
   assert.deepEqual(db.prepare('SELECT * FROM runs').all(), before);
 });
 
+test('a finished workflow candidate is reported as proposed rather than an unknown conversation state', async t => {
+  const { diagnostics, db } = fixture(t), current = turn();
+  current.status = 'proposed';
+  current.assistant.text = 'Candidate is ready for review.';
+  db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'complete',
+    startedAt: start, submittedAt: start, firstOutputAt: output, lastOutputAt: end, completedAt: end }));
+  const result = await diagnostics.inspect({ workflowId: 'workflow-one', turn: current });
+  assert.equal(result.status, 'proposed');
+  assert.equal(result.calls[0].complete, true);
+});
+
 test('persistent model records carry authoritative timeouts, character counts and usage without private content', async t => {
   const { diagnostics, db } = fixture(t);
   db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'complete',

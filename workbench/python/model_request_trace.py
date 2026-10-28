@@ -9,8 +9,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import functools
+import errno
 import inspect
+import math
 import re
+import socket
+import ssl
 import threading
 import time
 import uuid
@@ -38,9 +42,34 @@ _REQUEST_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
 _SECRET_REQUEST_ID = re.compile(r'(?:sk-|gh[pousr]_|github_pat_|eyJ|bearer)', re.IGNORECASE)
 _FACTORIES = ('_create_openai_client', '_build_direct_anthropic_client', '_build_anthropic_client_for_key')
 _TRANSPORT_PHASES = {'connection.connect_tcp': 'connectMs', 'connection.start_tls': 'tlsMs', 'proxy.start_tls': 'tlsMs'}
+FAILED_PHASES = frozenset({'connection.connect_tcp.failed', 'connection.start_tls.failed', 'proxy.start_tls.failed'} |
+    {protocol + '.' + phase + '.failed' for protocol in ('http11', 'http2')
+     for phase in ('send_request_headers', 'send_request_body', 'receive_response_headers', 'receive_response_body', 'response_closed')})
 # Bound only the added observer's work. The SDK still owns decompression and the
 # original chunks; this observer never allocates a second decompressed body.
 MAX_SSE_OBSERVED_BYTES = 8 * 1024 * 1024
+CAUSE_CLASSES = frozenset(module + '.' + name for module, names in {
+    'httpx': ('TimeoutException', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError', 'ReadError', 'WriteError', 'CloseError', 'RemoteProtocolError', 'LocalProtocolError', 'ProxyError', 'DecodingError', 'TransportError', 'HTTPStatusError'),
+    'httpcore': ('TimeoutException', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError', 'ReadError', 'WriteError', 'RemoteProtocolError', 'LocalProtocolError', 'ProxyError', 'ConnectionNotAvailable'),
+    'ssl': ('SSLError', 'SSLEOFError', 'SSLZeroReturnError', 'SSLCertVerificationError'),
+    'builtins': ('ConnectionResetError', 'ConnectionAbortedError', 'ConnectionRefusedError', 'BrokenPipeError', 'TimeoutError', 'EOFError', 'InterruptedError', 'PermissionError', 'OSError', 'KeyboardInterrupt'),
+    'socket': ('gaierror', 'herror'),
+    'openai': ('APIConnectionError', 'APITimeoutError', 'APIStatusError', 'APIError'),
+    'anthropic': ('APIConnectionError', 'APITimeoutError', 'APIStatusError', 'APIError'),
+    'asyncio': ('CancelledError',), 'concurrent.futures': ('CancelledError',),
+}.items() for name in names) | {'unknown'}
+ERRNO_NAMES = ('ECONNRESET', 'ECONNABORTED', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH',
+    'ENETUNREACH', 'ENETDOWN', 'ENETRESET', 'ENOTCONN', 'ESHUTDOWN', 'EIO', 'EBADF', 'EAGAIN',
+    'EINTR', 'EACCES', 'EPERM', 'EADDRNOTAVAIL', 'EADDRINUSE', 'ENOBUFS', 'ENOMEM', 'EMFILE', 'ENFILE')
+ERRNO_VALUES = frozenset({1, 4, 5, 9, 11, 12, 13, 23, 24, 32, 35, 48, 49, 50, 51, 52, 53, 54, 55,
+    57, 58, 60, 61, 65, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 110, 111, 113,
+    10004, 10013, 10024, 10035, 10048, 10049, 10050, 10051, 10052, 10053, 10054, 10055,
+    10057, 10058, 10060, 10061, 10065})
+_ERRNO_BY_VALUE = {getattr(errno, name): name for name in ERRNO_NAMES
+                   if getattr(errno, name, None) in ERRNO_VALUES}
+_CLASS_MODULES = {'httpx._exceptions': 'httpx', 'httpcore._exceptions': 'httpcore',
+    'openai._exceptions': 'openai', 'anthropic._exceptions': 'anthropic', '_ssl': 'ssl',
+    'asyncio.exceptions': 'asyncio', 'concurrent.futures._base': 'concurrent.futures'}
 
 
 def _iso():
@@ -52,6 +81,44 @@ def _error_type(error, *, sdk=False):
     if any(name in {'CancelledError', 'KeyboardInterrupt'} for name in names):
         return 'CancelledError'
     return next((name for name in names if name in ERROR_TYPES), 'SDKError' if sdk else 'UnknownError')
+
+
+def _cause_details(error):
+    if not isinstance(error, BaseException):
+        return {'causeChain': None, 'causeChainTruncated': None}
+    chain, seen, current = [], set(), error
+    while isinstance(current, BaseException) and id(current) not in seen and len(chain) < 6:
+        seen.add(id(current)); class_name = 'unknown'
+        for cls in type.__getattribute__(type(current), '__mro__')[:16]:
+            module = type.__getattribute__(cls, '__module__')
+            name = type.__getattribute__(cls, '__name__')
+            if not isinstance(module, str) or not isinstance(name, str) or len(module) > 64 or len(name) > 64: continue
+            name = _CLASS_MODULES.get(module, module) + '.' + name
+            if name in CAUSE_CLASSES:
+                class_name = name; break
+        code, symbol = None, None
+        # SSL and DNS use their own errno domains; do not label SSL_ERROR_SSL=1
+        # as EPERM or retain provider-specific fields/messages from an error.
+        if isinstance(current, OSError) and not isinstance(current, (ssl.SSLError, socket.gaierror, socket.herror)):
+            candidate = OSError.errno.__get__(current, type(current))
+            if type(candidate) is int and candidate in _ERRNO_BY_VALUE:
+                code, symbol = candidate, _ERRNO_BY_VALUE[candidate]
+        chain.append({'class': class_name, 'errno': code, 'errnoName': symbol})
+        following = BaseException.__cause__.__get__(current, type(current))
+        if following is None and not BaseException.__suppress_context__.__get__(current, type(current)):
+            following = BaseException.__context__.__get__(current, type(current))
+        current = following
+    return {'causeChain': chain, 'causeChainTruncated': isinstance(current, BaseException)}
+
+
+def _sdk_retry_policy(client):
+    try:
+        fields = object.__getattribute__(client, '__dict__')
+        value = fields.get('max_retries') if type(fields) is dict else None
+        if type(value) is int and 0 <= value <= 100:
+            return {'maxRetries': value, 'source': 'sdk-client'}
+    except Exception: pass
+    return None
 
 
 def _response_format(value):
@@ -67,11 +134,12 @@ class SSECounter:
     def __init__(self):
         self.events, self.other = {}, 0
         self.framed = False
+        self.event_timings = {}
         self.truncated = False
         self._prefix, self._event_value = bytearray(), bytearray()
         self._mode, self._event, self._data, self._line_seen = 'prefix', None, False, False
 
-    def feed(self, chunk):
+    def feed(self, chunk, *, at_ms=None):
         start = 0
         while start < len(chunk):
             end = chunk.find(b'\n', start)
@@ -79,7 +147,7 @@ class SSECounter:
             self._piece(memoryview(chunk)[start:stop])
             if end < 0:
                 break
-            self._end_line()
+            self._end_line(at_ms)
             start = end + 1
 
     def _piece(self, piece):
@@ -103,7 +171,7 @@ class SSECounter:
             if len(piece) - index > room:
                 self._mode = 'oversized'; self._event_value.clear(); self.truncated = True
 
-    def _end_line(self):
+    def _end_line(self, at_ms=None):
         if not self._line_seen:
             if self._data:
                 self.framed = True
@@ -112,6 +180,9 @@ class SSECounter:
                     count = self.events.get(event, 0)
                     if count < 1_000_000: self.events[event] = count + 1
                     else: self.truncated = True
+                    if type(at_ms) in (int, float) and 0 <= at_ms <= 9007199254740991 and math.isfinite(at_ms):
+                        timing = self.event_timings.setdefault(event, {'firstMs': at_ms, 'lastMs': at_ms})
+                        timing['lastMs'] = max(timing['lastMs'], at_ms)
                 elif self.other < 1_000_000: self.other += 1
                 else: self.truncated = True
             self._event, self._data = None, False
@@ -126,20 +197,24 @@ class SSECounter:
         self._mode, self._line_seen = 'prefix', False
 
     def snapshot(self):
-        return {'events': dict(self.events), 'otherEvents': self.other, 'truncated': self.truncated}
+        return {'events': dict(self.events), 'otherEvents': self.other, 'truncated': self.truncated,
+                'eventTimings': {} if self.truncated else {key: dict(value) for key, value in self.event_timings.items()}}
 
 
 class _Request:
-    def __init__(self, owner, index):
+    def __init__(self, owner, index, sdk_retry_policy=None):
         self.owner, self.index = owner, index
         self.request_id = owner.request_id
+        self.sdk_retry_policy = dict(sdk_retry_policy) if sdk_retry_policy is not None else None
         self.id, self.started_at, self.start = str(uuid.uuid4()), _iso(), time.monotonic()
         self.status, self.code, self.done, self.body_complete = 'running', None, False, None
         self.timings = {key: None for key in ('connectMs', 'tlsMs', 'headersMs', 'firstBodyByteMs', 'lastBodyByteMs')}
         self.observable = {key: 'unavailable' for key in ('dns', 'connect', 'tls', 'headers', 'sse')}
         self.http = {'status': None, 'requestId': None, 'requestIdHeader': None, 'retryAfterSeconds': None,
                      'responseFormat': 'unknown', 'contentEncoding': None}
-        self.error = {'source': None, 'type': None}
+        self.error = {'source': None, 'type': None, **_cause_details(None)}
+        self.transport_failures = [] if index > 0 else None
+        self.transport_failures_truncated = False if index > 0 else None
         self.counter, self.sse, self.sse_probe, self.phases = SSECounter(), False, False, {}
         self.sse_unavailable_reason = 'unknown'
         self.decoded_started, self.decoded_active, self.final_pending = False, False, False
@@ -156,7 +231,11 @@ class _Request:
                 'status': self.status, 'startedAt': self.started_at, 'updatedAt': _iso(), 'durationMs': self.elapsed(),
                 'transport': 'httpx', 'observability': dict(self.observable), 'timings': dict(self.timings),
                 'http': dict(self.http), 'sse': {**self.counter.snapshot(), 'unavailableReason': self.sse_unavailable_reason}, 'error': dict(self.error),
-                'bodyComplete': self.body_complete, **({'code': self.code} if self.code else {})}
+                'bodyComplete': self.body_complete, 'sdkRetryPolicy': dict(self.sdk_retry_policy) if self.sdk_retry_policy is not None else None,
+                'transportFailures': None if self.transport_failures is None else [
+                    {**value, 'causeChain': [dict(cause) for cause in value['causeChain']]} for value in self.transport_failures],
+                'transportFailuresTruncated': self.transport_failures_truncated,
+                **({'code': self.code} if self.code else {})}
 
     def emit(self, *, final=False):
         with self.lock:
@@ -166,9 +245,20 @@ class _Request:
             snapshot = self.snapshot()
         self.owner.emit(snapshot)
 
-    def core(self, event):
+    def core(self, event, info=None):
         with self.lock:
             if self.done: return
+            if event in FAILED_PHASES and type(info) is dict and self.transport_failures is not None:
+                error = info.get('exception')
+                if isinstance(error, BaseException):
+                    # Project before httpcore re-raises from None. This remains
+                    # independent phase evidence, never joined to final causes.
+                    value = {'phase': event, 'atMs': self.elapsed(), **_cause_details(error)}
+                    previous = next((row for row in self.transport_failures if row['phase'] == event), None)
+                    if previous is not None:
+                        previous.update(value); self.transport_failures_truncated = True
+                    elif len(self.transport_failures) < 4: self.transport_failures.append(value)
+                    else: self.transport_failures_truncated = True
             for phase, key in _TRANSPORT_PHASES.items():
                 if event == phase + '.started': self.phases[phase] = time.monotonic()
                 elif event == phase + '.complete' and phase in self.phases:
@@ -196,7 +286,7 @@ class _Request:
             self.sse_probe = self.http['responseFormat'] == 'unknown'
             self.sse_unavailable_reason = ('decoded-stream-unobserved' if self.sse else
                                           'unknown' if self.http['responseFormat'] == 'unknown' else 'not-event-stream')
-            if status is not None and status >= 400: self.error = {'source': 'http', 'type': 'HTTPStatusError'}
+            if status is not None and status >= 400: self.error.update(source='http', type='HTTPStatusError')
         self.emit()
 
     def body(self, chunk):
@@ -230,7 +320,7 @@ class _Request:
                 publish = True
             else:
                 self.sse_bytes += len(chunk)
-                self.counter.feed(chunk)
+                self.counter.feed(chunk, at_ms=self.elapsed())
                 detected = self.sse_probe and self.counter.framed
                 if detected:
                     # Some real Responses endpoints omit Content-Type. Observe
@@ -257,7 +347,7 @@ class _Request:
                 # EOF fact while recording only a fixed decoder/SDK error type.
                 if not self.done: self.body_complete = False
                 kind = _error_type(error, sdk=True)
-                self.error = {'source': 'cancelled' if kind == 'CancelledError' else 'sdk', 'type': kind}
+                self.error = {'source': 'cancelled' if kind == 'CancelledError' else 'sdk', 'type': kind, **_cause_details(error)}
                 self.status = 'cancelled' if kind == 'CancelledError' else 'error'
                 self.done, self.final_pending = True, True
             publish, self.final_pending = self.final_pending, False
@@ -269,7 +359,7 @@ class _Request:
             self.done = True; self.body_complete = complete
             if error is not None:
                 kind = _error_type(error)
-                self.error = {'source': 'cancelled' if kind == 'CancelledError' else 'transport', 'type': kind}
+                self.error = {'source': 'cancelled' if kind == 'CancelledError' else 'transport', 'type': kind, **_cause_details(error)}
                 self.status = 'cancelled' if kind == 'CancelledError' else 'error'
             else:
                 self.status = 'error' if self.error['source'] == 'http' else 'complete'
@@ -290,6 +380,7 @@ class ModelRequestTracer:
         self.unavailable_record, self.unavailable_seen = None, set()
         self.lock = threading.RLock()
         self.requests = weakref.WeakKeyDictionary()
+        self.sdk_clients = weakref.WeakKeyDictionary()
 
     def emit(self, snapshot):
         try: self._emit(snapshot)
@@ -306,7 +397,7 @@ class ModelRequestTracer:
             value = self.unavailable_record.snapshot()
         value.update(status='unavailable', transport='unavailable', code=code)
         if error is not None:
-            value['error'] = {'source': 'cancelled' if kind == 'CancelledError' else 'sdk', 'type': kind}
+            value['error'] = {'source': 'cancelled' if kind == 'CancelledError' else 'sdk', 'type': kind, **_cause_details(error)}
         self.emit(value)
 
     def set_request_id(self, value):
@@ -328,7 +419,7 @@ class ModelRequestTracer:
         finally:
             with self.lock: self.active -= 1
 
-    def _request(self, request):
+    def _request(self, request, sdk_retry_policy=None):
         # Never observe authentication, model catalogs, images, or other tools.
         if request.method != 'POST': return
         with self.lock:
@@ -339,10 +430,10 @@ class ModelRequestTracer:
                 if not self.limit_reported:
                     self.limit_reported = True; self.unavailable('TRACE_REQUEST_LIMIT')
                 return
-            self.index += 1; record = _Request(self, self.index); self.requests[request] = record
+            self.index += 1; record = _Request(self, self.index, sdk_retry_policy); self.requests[request] = record
         previous = request.extensions.get('trace')
         def trace(event, info):
-            try: record.core(event)
+            try: record.core(event, info)
             except Exception: pass
             if callable(previous): return previous(event, info)
         request.extensions['trace'] = trace
@@ -361,8 +452,11 @@ class ModelRequestTracer:
             original = client.send
             if inspect.iscoroutinefunction(original):
                 self.unavailable('TRACE_TRANSPORT_UNAVAILABLE'); return False
+            client_ref = weakref.ref(client)
             def request_hook(request):
-                try: self._request(request)
+                try:
+                    with self.lock: sdk_ref = self.sdk_clients.get(client_ref())
+                    self._request(request, _sdk_retry_policy(sdk_ref() if sdk_ref is not None else None))
                 except Exception: self.unavailable('TRACE_HOOK_UNAVAILABLE')
             def response_hook(response):
                 try:
@@ -430,7 +524,12 @@ class ModelRequestTracer:
             self.unavailable('TRACE_HOOK_UNAVAILABLE'); return False
 
     def attach_sdk_client(self, client):
-        return self.attach_http_client(getattr(client, '_client', None))
+        http_client = getattr(client, '_client', None)
+        if http_client is not None:
+            try:
+                with self.lock: self.sdk_clients[http_client] = weakref.ref(client)
+            except TypeError: pass  # Unusual/non-weakref SDKs keep policy unknown.
+        return self.attach_http_client(http_client)
 
     def attach_agent(self, agent):
         attached = False

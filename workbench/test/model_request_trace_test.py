@@ -2,11 +2,16 @@
 import asyncio
 from contextlib import contextmanager
 import gzip
+import errno
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
 import threading
+import ssl
+import socket
+import struct
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -23,6 +28,80 @@ except ImportError:
 
 
 class SSECounterTests(unittest.TestCase):
+    def test_failed_phases_are_independent_bounded_metadata_not_joined_into_final_causes(self):
+        tracer = ModelRequestTracer(lambda value: None, request_id=str(uuid.uuid4()))
+        record = trace_module._Request(tracer, 1); clock = [1.0]
+        record.elapsed = lambda: clock[0]
+        reset = ConnectionResetError(errno.ECONNRESET, 'PRIVATE_HOST')
+        record.core('PRIVATE_PHASE.failed', {'exception': reset, 'PRIVATE_HEADERS': 'PRIVATE'})
+        self.assertEqual(record.snapshot()['transportFailures'], [])
+        phases = ['connection.connect_tcp.failed', 'connection.start_tls.failed', 'proxy.start_tls.failed',
+                  'http11.receive_response_body.failed', 'http2.receive_response_body.failed']
+        for index, phase in enumerate(phases):
+            clock[0] = index + 2.0; record.core(phase, {'exception': reset, 'PRIVATE_INFO': 'PRIVATE'})
+        value = record.snapshot()
+        self.assertEqual(len(value['transportFailures']), 4)
+        self.assertTrue(value['transportFailuresTruncated'])
+        clock[0] = 8.0; record.core(phases[0], {'exception': reset})
+        self.assertEqual(record.snapshot()['transportFailures'][0]['atMs'], 8.0)
+        self.assertIsNone(record.snapshot()['error']['causeChain'])
+        self.assertNotIn('PRIVATE', json.dumps(record.snapshot()))
+    def test_event_times_follow_complete_frame_observation_and_ignore_unknown_event_names(self):
+        counter = SSECounter()
+        counter.feed(b'event: response.output_text.delta\ndata: PRIVATE', at_ms=100)
+        counter.feed(b'\n\n', at_ms=125)
+        counter.feed(b'event: response.output_text.delta\ndata: PRIVATE\n\nevent: PRIVATE_EVENT\ndata: PRIVATE\n\n', at_ms=300)
+        self.assertEqual(counter.snapshot()['eventTimings'], {'response.output_text.delta': {'firstMs': 125, 'lastMs': 300}})
+        self.assertNotIn('PRIVATE', json.dumps(counter.snapshot()))
+
+    def test_cause_chain_is_bounded_sanitized_and_does_not_confuse_ssl_errno_with_os(self):
+        reset = ConnectionResetError(errno.ECONNRESET, 'PRIVATE_ADDRESS_SECRET')
+        eof = ssl.SSLEOFError(8, 'PRIVATE_TLS_MESSAGE')
+        eof.__cause__ = reset
+        value = trace_module._cause_details(eof)
+        self.assertEqual(value['causeChain'], [
+            {'class': 'ssl.SSLEOFError', 'errno': None, 'errnoName': None},
+            {'class': 'builtins.ConnectionResetError', 'errno': errno.ECONNRESET, 'errnoName': 'ECONNRESET'}])
+        self.assertFalse(value['causeChainTruncated'])
+        self.assertNotIn('PRIVATE', json.dumps(value))
+        unknown = type('PRIVATE_CLASS', (Exception,), {})('PRIVATE_MESSAGE')
+        unknown.__context__ = reset
+        unknown.__suppress_context__ = True
+        self.assertEqual(trace_module._cause_details(unknown)['causeChain'], [{'class': 'unknown', 'errno': None, 'errnoName': None}])
+        unknown.__cause__ = unknown
+        self.assertTrue(trace_module._cause_details(unknown)['causeChainTruncated'])
+        current = unknown = Exception('PRIVATE')
+        for _ in range(20):
+            current.__cause__ = Exception('PRIVATE'); current = current.__cause__
+        self.assertEqual(len(trace_module._cause_details(unknown)['causeChain']), 6)
+        self.assertTrue(trace_module._cause_details(unknown)['causeChainTruncated'])
+
+    def test_maximum_trace_metadata_stays_within_existing_eight_kib_budget(self):
+        tracer = ModelRequestTracer(lambda value: None, request_id=str(uuid.uuid4()))
+        record = trace_module._Request(tracer, 1, {'maxRetries': 100, 'source': 'sdk-client'})
+        record.elapsed = lambda: 999999999999.999
+        record.observable['sse'] = 'observed'; record.sse_unavailable_reason = None
+        record.http.update(status=599, requestId='r' * 128, requestIdHeader='x-request-id',
+                           responseFormat='event-stream', contentEncoding='gzip', retryAfterSeconds=999999999)
+        record.timings = {key: 999999999999.999 for key in record.timings}
+        record.transport_failures = [
+            {'phase': phase, 'atMs': 999999999999.999, 'causeChain': [
+                {'class': 'builtins.ConnectionAbortedError', 'errno': 10053, 'errnoName': 'ECONNABORTED'} for _ in range(6)],
+             'causeChainTruncated': True} for phase in ('http11.receive_response_headers.failed',
+                'http2.receive_response_headers.failed', 'http11.send_request_headers.failed', 'http2.send_request_headers.failed')]
+        record.transport_failures_truncated = True
+        for event in sorted(trace_module.SSE_TYPES):
+            record.counter.feed(('event: ' + event + '\ndata: PRIVATE\n\n').encode(), at_ms=999999999998.111)
+            record.counter.feed(('event: ' + event + '\ndata: PRIVATE\n\n').encode(), at_ms=999999999999.001)
+            record.counter.events[event] = 1_000_000
+        error = current = ConnectionResetError(errno.ECONNRESET, 'PRIVATE')
+        for _ in range(8):
+            current.__cause__ = ConnectionResetError(errno.ECONNRESET, 'PRIVATE'); current = current.__cause__
+        record.finish(error)
+        encoded = json.dumps(record.snapshot(), separators=(',', ':'))
+        self.assertLessEqual(len(encoded.encode()), 8192)
+        self.assertNotIn('PRIVATE', encoded)
+
     def test_fragmented_events_keep_only_fixed_types_and_never_retain_data(self):
         counter = SSECounter()
         for chunk in [b'event: response.reasoning_summary_text.', b'delta\ndata: PRIVATE_THINKING\n\n',
@@ -39,7 +118,7 @@ class SSECounterTests(unittest.TestCase):
     def test_oversized_unknown_event_and_counts_are_bounded(self):
         counter = SSECounter()
         counter.feed(b'event:' + b'PRIVATE' * 1000 + b'\ndata: ignored\n\n')
-        self.assertEqual(counter.snapshot(), {'events': {}, 'otherEvents': 1, 'truncated': True})
+        self.assertEqual(counter.snapshot(), {'events': {}, 'otherEvents': 1, 'truncated': True, 'eventTimings': {}})
         counter.events['message'] = 1_000_000
         counter.feed(b'data\n\n')
         self.assertEqual(counter.snapshot()['events']['message'], 1_000_000)
@@ -60,7 +139,7 @@ class SSECounterTests(unittest.TestCase):
 
 
 @contextmanager
-def synthetic_server(payload=None, encoding=None, content_type='text/event-stream'):
+def synthetic_server(payload=None, encoding=None, content_type='text/event-stream', reset_after=None):
     payload = payload if payload is not None else (b'event: response.created\r\ndata: PRIVATE_BODY\r\n\r\n'
                b'event: response.reasoning_text.delta\ndata: PRIVATE_THINKING\n\n'
                b'event: PRIVATE_EVENT\ndata: PRIVATE_SECRET\n\n'
@@ -72,7 +151,7 @@ def synthetic_server(payload=None, encoding=None, content_type='text/event-strea
             self.rfile.read(int(self.headers.get('content-length', '0')))
             self.send_response(200)
             if content_type is not None: self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(wire_payload)))
+            self.send_header('Content-Length', str(len(wire_payload) + (100 if reset_after is not None else 0)))
             if encoding: self.send_header('Content-Encoding', encoding)
             self.send_header('x-request-id', 'synthetic-request-123')
             self.send_header('Retry-After', '2')
@@ -81,6 +160,12 @@ def synthetic_server(payload=None, encoding=None, content_type='text/event-strea
             self.end_headers()
             for start in range(0, len(wire_payload), 11):
                 self.wfile.write(wire_payload[start:start + 11]); self.wfile.flush()
+            if reset_after is not None:
+                reset_after.wait(timeout=3)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                self.close_connection = True
+                self.rfile.close(); self.wfile.close(); self.connection.close()
+                self.wfile = io.BytesIO()  # Base handler's final flush is harmless after the deliberate reset.
         def log_message(self, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -96,6 +181,82 @@ def synthetic_server(payload=None, encoding=None, content_type='text/event-strea
 class HttpTraceTests(unittest.TestCase):
     def tracer(self, events):
         return ModelRequestTracer(events.append, request_id=str(uuid.uuid4()))
+
+    def test_sdk_retry_policy_is_actual_client_number_frozen_per_http_attempt(self):
+        events = []; tracer = self.tracer(events)
+        class SDK:
+            def __init__(self, client): self._client, self.max_retries = client, 2
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'PRIVATE'))) as client:
+            sdk = SDK(client)
+            tracer.attach_sdk_client(sdk)
+            with tracer.turn():
+                client.post('https://private.invalid/v1/responses')
+                sdk.max_retries = 0
+                client.post('https://private.invalid/v1/responses')
+                sdk.max_retries = 'PRIVATE_NOT_A_NUMBER'
+                client.post('https://private.invalid/v1/responses')
+        actual = [event for event in events if event['status'] == 'complete']
+        self.assertEqual([event['sdkRetryPolicy'] for event in actual], [
+            {'maxRetries': 2, 'source': 'sdk-client'}, {'maxRetries': 0, 'source': 'sdk-client'}, None])
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_httpx_httpcore_reset_chain_is_retained_without_messages(self):
+        import httpcore
+        events = []; tracer = self.tracer(events)
+        reset = ConnectionResetError(errno.ECONNRESET, 'PRIVATE_RESET_ADDRESS')
+        middle = httpcore.ReadError('PRIVATE_CORE'); middle.__cause__ = reset
+        error = httpx.ReadError('PRIVATE_HTTPX'); error.__cause__ = middle
+        class Broken(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b'event: response.output_text.delta\ndata: PRIVATE\n\n'
+                raise error
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+                200, headers={'Content-Type': 'text/event-stream'}, stream=Broken()))) as client:
+            tracer.attach_http_client(client)
+            with self.assertRaises(httpx.ReadError) as caught, tracer.turn():
+                client.post('https://private.invalid/v1/responses')
+            self.assertIs(caught.exception, error)
+        final = [event for event in events if event['requestIndex'] == 1][-1]
+        self.assertEqual([item['class'] for item in final['error']['causeChain']], [
+            'httpx.ReadError', 'httpcore.ReadError', 'builtins.ConnectionResetError'])
+        self.assertEqual(final['error']['causeChain'][-1]['errnoName'], 'ECONNRESET')
+        self.assertEqual(final['error']['type'], 'ReadError')
+        self.assertNotIn('PRIVATE', json.dumps(events))
+
+    def test_installed_sdk_localhost_midstream_reset_records_real_transport_causes_without_retrying(self):
+        try:
+            from openai import OpenAI
+        except ImportError:
+            self.skipTest('existing Hermes OpenAI SDK dependency is required')
+        payload = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"PRIVATE_RESULT"}\n\n'
+        received = threading.Event(); events = []; tracer = self.tracer(events)
+        with synthetic_server(payload, content_type=None, reset_after=received) as (url, _), httpx.Client(trust_env=False, timeout=3) as transport:
+            with OpenAI(api_key='synthetic-not-a-real-key', base_url=url.rsplit('/responses', 1)[0] + '/',
+                        http_client=transport, max_retries=0) as sdk:
+                tracer.attach_agent(SimpleNamespace(client=sdk))
+                with self.assertRaises((httpx.ReadError, httpx.RemoteProtocolError)), tracer.turn():
+                    for event in sdk.responses.create(model='synthetic-model', input='PRIVATE_PROMPT', stream=True):
+                        self.assertEqual(event.delta, 'PRIVATE_RESULT'); received.set()
+        self.assertTrue(received.is_set())
+        actual = [event for event in events if event['requestIndex'] == 1]
+        final = actual[-1]
+        self.assertEqual(final['status'], 'error')
+        self.assertEqual(final['sdkRetryPolicy'], {'maxRetries': 0, 'source': 'sdk-client'})
+        classes = [item['class'] for item in final['error']['causeChain']]
+        self.assertTrue(classes[0] in ('httpx.ReadError', 'httpx.RemoteProtocolError'))
+        self.assertTrue(any(name.startswith('httpcore.') for name in classes))
+        failures = final['transportFailures']
+        self.assertTrue(failures)
+        self.assertTrue(all(0 <= failure['atMs'] <= final['durationMs'] for failure in failures))
+        if final['error']['type'] == 'ReadError':
+            self.assertTrue(any(item['errnoName'] == 'ECONNRESET' for failure in failures for item in failure['causeChain']))
+            self.assertFalse(any(item['errnoName'] == 'ECONNRESET' for item in final['error']['causeChain']))
+        # httpcore may explicitly re-raise from None, removing the OS cause.
+        # That absence remains unknown; the observer never invents a reset errno.
+        self.assertEqual(final['sse']['events'], {'response.output_text.delta': 1})
+        self.assertIn('response.output_text.delta', final['sse']['eventTimings'])
+        self.assertEqual(tracer.index, 1)
+        self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_real_local_stream_cross_thread_has_only_metadata_and_preserves_existing_hooks(self):
         events, original_hooks, core_events, failures, output = [], [], [], [], []
@@ -220,7 +381,7 @@ class HttpTraceTests(unittest.TestCase):
                     with self.assertRaises(type(error)), tracer.turn():
                         client.post('https://private.invalid/v1/responses', content=b'PRIVATE')
                 finals = [value for value in events if value['requestIndex'] == 1]
-                self.assertEqual(finals[-1]['error'], {'type': kind, 'source': source})
+                self.assertEqual({key: finals[-1]['error'][key] for key in ('type', 'source')}, {'type': kind, 'source': source})
                 self.assertFalse(finals[-1]['bodyComplete'])
                 self.assertNotIn('PRIVATE', json.dumps(events))
         events = []; tracer = self.tracer(events)
@@ -228,7 +389,7 @@ class HttpTraceTests(unittest.TestCase):
                 headers={'Retry-After': '3', 'x-request-id': 'sk-PRIVATE_KEY', 'request-id': 'safe-456'}, content=b'PRIVATE'))) as client:
             tracer.attach_http_client(client)
             with tracer.turn(): client.post('https://private.invalid/v1/messages')
-        self.assertEqual(events[-1]['error'], {'type': 'HTTPStatusError', 'source': 'http'})
+        self.assertEqual(events[-1]['error'], {'type': 'HTTPStatusError', 'source': 'http', 'causeChain': None, 'causeChainTruncated': None})
         self.assertEqual(events[-1]['http']['retryAfterSeconds'], 3)
         self.assertEqual(events[-1]['http']['requestId'], 'safe-456')
         class TwoChunks(httpx.SyncByteStream):
@@ -345,7 +506,8 @@ class HttpTraceTests(unittest.TestCase):
         actual = [event for event in events if event['requestIndex'] == 1]
         self.assertEqual(actual[-1]['status'], 'error')
         self.assertTrue(actual[-1]['bodyComplete'])
-        self.assertEqual(actual[-1]['error'], {'source': 'sdk', 'type': 'SDKError'})
+        self.assertEqual(actual[-1]['error'], {'source': 'sdk', 'type': 'SDKError',
+            'causeChain': [{'class': 'httpx.DecodingError', 'errno': None, 'errnoName': None}], 'causeChainTruncated': False})
         self.assertEqual(sum(event['status'] == 'error' for event in actual), 1)
         self.assertNotIn('PRIVATE', json.dumps(events))
 
@@ -360,7 +522,7 @@ class HttpTraceTests(unittest.TestCase):
         actual = [event for event in events if event['requestIndex'] == 1]
         self.assertEqual(actual[-1]['status'], 'complete')
         self.assertEqual(actual[-1]['observability']['sse'], 'unavailable')
-        self.assertEqual(actual[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'parser-error'})
+        self.assertEqual(actual[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'parser-error', 'eventTimings': {}})
         self.assertNotIn('PRIVATE', json.dumps(events))
 
     def test_compressed_observation_quota_falls_back_unknown_without_interrupting_sdk_bytes(self):
@@ -375,7 +537,7 @@ class HttpTraceTests(unittest.TestCase):
             with tracer.turn():
                 self.assertEqual(client.post('https://private.invalid/v1/responses').content, expected)
         self.assertEqual(events[-1]['observability']['sse'], 'unavailable')
-        self.assertEqual(events[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'observation-limit'})
+        self.assertEqual(events[-1]['sse'], {'events': {}, 'otherEvents': 0, 'truncated': True, 'unavailableReason': 'observation-limit', 'eventTimings': {}})
         self.assertEqual(events[-1]['status'], 'complete')
         self.assertNotIn('PRIVATE', json.dumps(events))
 
@@ -418,6 +580,11 @@ class HttpTraceTests(unittest.TestCase):
         self.assertEqual(events[-1]['http']['responseFormat'], 'event-stream')
         self.assertEqual(events[-1]['http']['contentEncoding'], 'gzip')
         self.assertIsNone(events[-1]['sse']['unavailableReason'])
+        self.assertEqual(events[-1]['sdkRetryPolicy'], {'maxRetries': 0, 'source': 'sdk-client'})
+        self.assertEqual(set(events[-1]['sse']['eventTimings']), set(events[-1]['sse']['events']))
+        for timing in events[-1]['sse']['eventTimings'].values():
+            self.assertLessEqual(timing['firstMs'], timing['lastMs'])
+            self.assertLessEqual(timing['lastMs'], events[-1]['durationMs'])
         self.assertEqual(events[-1]['status'], 'complete')
         self.assertNotIn('PRIVATE', json.dumps(events))
 

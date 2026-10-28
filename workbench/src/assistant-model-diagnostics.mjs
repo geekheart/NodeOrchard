@@ -3,7 +3,7 @@ import { readModelRequestTraces } from './model-request-traces.mjs';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MAX_CALLS = 12;
 const MAX_BYTES = 16384;
-const STATUSES = new Set(['queued', 'thinking', 'running', 'waiting', 'complete', 'completed', 'timeout', 'error', 'failed', 'interrupted', 'cancelled', 'unknown']);
+const STATUSES = new Set(['queued', 'thinking', 'running', 'waiting', 'complete', 'completed', 'proposed', 'timeout', 'error', 'failed', 'interrupted', 'cancelled', 'unknown']);
 const OWNER_ENDED = new Set(['complete', 'completed', 'error', 'failed', 'interrupted', 'cancelled', 'dismissed', 'applied', 'proposed', 'awaiting_action']);
 const STAGES = new Set(['create-session', 'prepare-model', 'prepare-images', 'submit-model', 'model-response', 'model-output', 'read-result']);
 const TIMEOUTS = new Set(['first-response', 'output-idle', 'duration', 'total', 'absolute', 'legacy-timeout']);

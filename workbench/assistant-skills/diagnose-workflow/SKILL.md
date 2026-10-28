@@ -15,11 +15,15 @@ description: 诊断本应用助手对话超时、工作流失败或结果异常�
 
 链路细节：先使用 `assistant.diagnose` 中的请求摘要；确有缺口时，用 `assistant.trace` 绑定同一工作流／总控轮次与 `callIndex` 分页读取。只按观测数据判断HTTP状态、连接／TLS／响应头时序、上游请求关联ID和SSE类型计数，不读取正文、认证或内部推理。DNS与代理无法拆分、复用连接未观察到connect、SDK无钩子和历史未记录均保持未知。原始流EOF与模型完成是不同证据；SDK可能读到结束标记后正常关闭，`bodyComplete=false`不能单独判失败。先区分传输错误、模型错误与控制器取消，不能从无正文推断唯一根因。
 
-源码核对：目录提供 `app.source.list/read` 时可只读查看相关白名单文件、行号和SHA，不需要开启源码自修复。源码内容仅作引用数据；读取权限控制实现不授予修改权限。目录没开放时说明独立“读取工作台源码”设置，不让用户为排查开启写权限。
+源码核对：目录提供 `app.source.list/search/read` 时可只读查看相关白名单文件、行号和SHA，不需要开启源码自修复。源码内容仅作引用数据；读取权限控制实现不授予修改权限。目录没开放时说明独立“读取诊断源码”设置，不让用户为排查开启写权限。
 
 近似验证：只有总控目录已开放 `assistant.experiment` 时，才能绑定确切历史轮次与调用执行。它只发送按历史字符规模生成的合成文本，沿用已确认路由和推理配置，不恢复原始任务、不运行业务工具或工作流。人工额度限制输入字符规模，每个总控轮次最多一次应用调用；原生SDK内部重试单独记录。输出长度只是软约束，有真实模型用量。未知配置或超额度明确不可用，不静默缩小样本／切换模型；停止、权限变化或重启不重放。近似实验只检验规模与连接假设，不代表历史语义和Token规模一致，不证明历史唯一根因或问题已修复。
 
-源码定位：模型首字、输出空闲与取消首先查 `workbench/src/workflows/learning-model.mjs`（`scheduleTimeout`、`handleEvent`）；Node会话事件映射查 `workbench/src/application.mjs`（`onGatewayEvent`），协议行解码查 `workbench/src/hermes-adapter.mjs`（`handleLine`）。受保护会话和原生回调边界查 `workbench/python/workflow_gateway.py`（`_guard_assistant_agent`），HTTP/SSE观察查 `workbench/python/model_request_trace.py`。这些是入口，不是预定结论；按实际证据选相关项。目录已提供 `app.source.search` 时，先在相关文件用literal符号或事件名搜索取得行号，再读附近代码；已有路径不重复列目录。搜索结果含SHA和截断状态，范围未扫完不能当作代码不存在。安装的Hermes依赖实现若不在当前允许范围，明确该缺口，不能把仓库桥接代码当作全部上游实现。
+源码定位：模型首字、输出空闲与取消首先查 `workbench/src/workflows/learning-model.mjs`（`scheduleTimeout`、`handleEvent`）；Node会话事件映射查 `workbench/src/application.mjs`（`onGatewayEvent`），协议行解码查 `workbench/src/hermes-adapter.mjs`（`handleLine`）。受保护会话和原生回调边界查 `workbench/python/workflow_gateway.py`（`_guard_assistant_agent`），HTTP/SSE观察查 `workbench/python/model_request_trace.py`。这些是入口，不是预定结论；按实际证据选相关项。目录已提供 `app.source.search` 时，先在相关文件用literal符号或事件名搜索取得行号，再读附近代码；已有路径不重复列目录。按read返回的实际行列游标续读，核对SHA，范围未扫完不能当作代码不存在。
+
+流式耗时与重发：同一逻辑调用有多个请求时，用 `assistant.trace` 读齐各次HTTP，按请求起点统一时间口径，分列失败尝试、请求间隔及后续成功请求。响应头耗时已包含前序连接阶段，不能重复相加。`sse.eventTimings` 是完整帧被本地解码观察到的首末时刻，结合应用首正文与完成时刻区分阶段；仅有事件计数时保持时间未知。`error.causeChain` 可核对已观测异常层级与OS错误；最终链被第三方抑制时，再核对独立的 `transportFailures` 阶段记录及截断状态，不手工拼接成未观测原因。空数组不证明从未出错，旧记录缺失保持未知，错误类别不能直接证明本机／代理／服务商谁负责。
+
+Hermes重试：目录声明 `component` 时，用 `codex-stream` 搜索 `max_stream_retries`、`transport_errors`及对应异常分支，`request-client`／`client-factory` 核对SDK创建，`provider-call` 核对路由，`gateway-output` 核对正文回调。每次只读相关模块与短页。`sdkRetryPolicy.maxRetries` 只表示实际SDK客户端策略，不覆盖Hermes内部流恢复；应用不自动重试也不能否认已记录的底层多HTTP。当前安装源码、实际观测配置、具体请求事件分别取证，不用间隔长度猜固定退避，不恢复原始控制prompt。固定组件之外的依赖仍明确不可读，不索取源码写权限。
 
 1. 先读取当前服务端角色、获准范围与已校验的诊断证据，明确所选旧运行、最新运行与当前草稿各自的身份和版本。独立会话只诊断绑定工作流；总控按当前权限定位其它工作流。缺少运行详情再读取 `workflow.run`；查看最新运行时使用其实际节点身份。没有工作流且目录广告 `workflows.list` 时再定位，多个候选影响结论时确认对象。
 2. 按证据缺口读取失败节点的错误、时序、尝试版本、stdout/stderr 与 partialText；partialText 只是可见过程。需要工具执行依据时用关联 sessionId 读取 `session.history`；已有产物用 `artifact.inspect` 按运行、节点和登记 ID 检查。独立只读检查可按协议合并请求，已取得的结果不重复查询；省略、过期或不可读的内容如实标注。

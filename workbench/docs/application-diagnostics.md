@@ -32,7 +32,7 @@
 | `workflow.propose` | 生成经过编辑器命令校验的业务流程修改候选，在原聊天中应用 |
 | `workflow.copy` / `workflow.create-test` / `workflow.delete` | 总控在明确授权下复制、创建测试草稿或移入可恢复回收站，不自动运行 |
 | `app.logs` | 总控按权限读取持久分级软件日志；当前进程 Hermes 窗口单独标识 |
-| `app.source.list` / `app.source.read` | 人工独立开启源码只读后，按白名单与行号读取当前版本；不取得写入／测试权限 |
+| `app.source.list` / `app.source.search` / `app.source.read` | 人工独立开启源码只读后，搜索和分页读取受控仓库及固定Hermes模块；不取得写入／测试权限 |
 | `app.source.patch` / `app.source.test` / `app.source.history` / `app.source.rollback` | 人工另行开启实验性总控源码修复后，版本绑定修改、隔离相关测试与记录回滚，见[总控源码自修复](application-source-repair.md) |
 | `conversations.list` | 总控读取工作流独立会话的有界目录摘要，不合并历史 |
 | `conversation.inspect` | 按工作流读取有界脱敏消息和待处理元数据，不附带学习材料、节点代码配置或检查点 |
@@ -89,6 +89,16 @@
 `assistant.experiment` 必须指定已登记历史turnId与callIndex；先核对目标归属、已确认模型／提供商／推理配置和字符规模，仅发送固定合成内容。超过人工输入额度、历史规模过小或配置未知则明确不可用，不缩小样本或读原始提示词。新会话准备后再次核对实际推理配置，不一致时不提交模型请求。它没有业务工具，不生成或运行工作流；真实模型用量仍会发生，输出长度只靠固定短JSON指令软约束，不能声称有Token／费用硬上限。比较结果只检验路由与字符规模，不能替代原任务语义和真实Token分布，不能证明历史唯一根因。实验默认无本地时间截止，可手动停止；权限改变立即结束，已有准入不会自动续发。
 
 请求格式枚举仅表示头部声明的MIME与编码，不能保证上游未错标。缺少MIME时，在同一观察额度内检查解码流的SSE帧边界，遇到完整事件帧才启用计数；格式枚举仍为unknown，不保存data内容。明确声明JSON／其它格式时不探测。SSE不可观测原因分别标为not-event-stream、decoded-stream-unobserved、observation-limit、parser-error或unknown；旧记录没有这些字段保持unknown／null。源码只读提供有界literal搜索 `app.source.search`，用于先定位符号行号再分页读取，避免反复列目录耗尽诊断额度。
+
+新请求的 `sse.eventTimings` 记录白名单事件完整帧被解码观察到的 `firstMs`／`lastMs`，均相对该次HTTP请求开始。相同解码块内的多帧可能同一时刻，不是服务商的生成时刻；历史未采集时为null。结合应用首次输出时刻，分别判断响应头前、已接收控制／推理事件但尚无正文、正文流及最终读回的耗时。只有累计计数的旧记录无法补造这条时间线。
+
+`error.causeChain` 最多六项，仅保留限定异常类名、白名单OS错误数字及符号；未知类收敛为unknown，循环或超长由 `causeChainTruncated` 标记。SSL和DNS自有编号不按OS errno解释。无原始异常消息、参数、端点或配置；历史缺失保持null。即使观测到ECONNRESET，也只证明连接重置，不能凭它认定责任在本机、代理或服务商。
+
+第三方可能抑制最终异常的底层原因。`transportFailures` 独立记录最多四个固定httpcore失败阶段、相对时刻及当时的受限原因链，避免事后从已抑制的异常补猜。只允许连接／TLS，以及HTTP/1.1或HTTP/2的请求头、请求体、响应头、响应体、关闭阶段的 `.failed`；不保留原异常对象或其它trace info。重复阶段覆盖及超过四阶段时 `transportFailuresTruncated=true`。它不拼接或改写最终异常链；空数组仅表示未捕获这些阶段的失败，旧记录及不可观测请求为null。仍使用每条8192字节和原快照额度，不扩大采集窗口。
+
+`sdkRetryPolicy` 仅在实际SDK客户端的 `max_retries` 数字可读时记录；每个HTTP请求冻结一次，未知为null。它与应用层是否自动重试、Hermes内部流恢复分别解释。一次逻辑模型调用可包含多个HTTP请求：按同一调用身份逐次读取，区分失败尝试、观测的请求间隔、后续成功请求，避免将整个输出区间当成一次连续流；不从间隔长度猜固定退避策略或重复计费。
+
+核对原生重试实现时，`app.source.read/search` 的固定 `component` 入口只开放指定Hermes模块，与仓库 `path/prefix` 互斥，继续受源码只读开关约束。它不读取安装配置、凭据或任意文件；当前模块SHA与实际调用时观测的客户端策略分开报告，不能把静态代码当作已确认的动态配置。具体组件及分页见[诊断源码读取](application-source-repair.md)。
 
 ## 截图与录制
 
