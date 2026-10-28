@@ -1,3 +1,5 @@
+import { PendingNoticeDismissals, requestNoticeKey } from './pending-notice-dismissals.js';
+
 const GROUPS = [
   { id: 'draft', title: '待完善', hint: '补齐节点与配置' },
   { id: 'ready', title: '可运行', hint: '已具备执行条件' },
@@ -51,6 +53,7 @@ export class WorkflowBoard {
   constructor(container, { api, onOpen, onCreate, getRequests = () => [], taskURL }) {
     this.container = container; this.api = api; this.onOpen = onOpen; this.onCreate = onCreate; this.getRequests = getRequests; this.taskURL = taskURL;
     this.active = false; this.workflows = []; this.cards = new Map(); this.pendingCards = new Map(); this.columns = new Map(); this.projections = new Map();
+    this.pendingNotices = new PendingNoticeDismissals('requests');
     this.lifecycle = 'active'; this.lifecycleTabs = new Map(); this.openMenu = null; this.dialog = null;
     this.loading = false; this.loaded = false; this.creating = false; this.opening = new Set(); this.eventRevision = 0; this.requestSequence = 0; this.reloadNeeded = false; this.reloadTimer = null; this.loadPromise = null;
     this.mount(); this.render();
@@ -74,6 +77,10 @@ export class WorkflowBoard {
     this.refreshButton = button('刷新', () => void this.load()); this.refreshButton.prepend(icon('refresh')); toolbar.append(searchLabel, filterLabel, this.filterContext, this.summary, this.refreshButton);
     this.notice = element('div', 'wf-board-notice'); this.notice.hidden = true; this.notice.setAttribute('role', 'status'); this.noticeText = element('span'); this.retryButton = button('重试', () => void this.load(), 'button small'); this.notice.append(this.noticeText, this.retryButton);
     this.pending = element('section', 'wf-board-pending'); this.pending.hidden = true; this.pending.setAttribute('aria-label', '待处理审批与澄清'); const pendingHeading = element('div', 'wf-board-pending-heading'); this.pendingTitle = element('h2', '', '待处理'); pendingHeading.append(element('span', 'wf-board-pending-dot'), this.pendingTitle); this.pendingList = element('div', 'wf-board-pending-list'); this.pending.append(pendingHeading, this.pendingList);
+    this.pendingClose = button('×', () => { this.pendingNotices.hide((this.getRequests() || []).map(requestNoticeKey)); this.renderPending(); }, 'wf-board-notice-close');
+    this.pendingClose.title = '关闭当前待处理提示'; this.pendingClose.setAttribute('aria-label', '关闭当前待处理提示');
+    this.pendingRestore = button('', () => { this.pendingNotices.restore((this.getRequests() || []).map(requestNoticeKey)); this.renderPending(); }, 'wf-board-notice-restore');
+    pendingHeading.append(this.pendingRestore, this.pendingClose);
     this.empty = element('section', 'wf-board-empty'); this.empty.hidden = true; this.emptyIcon = icon('workflow'); this.emptyTitle = element('h2'); this.emptyText = element('p'); this.emptyCreate = button('新建工作流', () => void this.create(), 'button primary'); this.emptyClear = button('清除搜索与筛选', () => this.clearFilters()); this.empty.append(this.emptyIcon, this.emptyTitle, this.emptyText, this.emptyCreate, this.emptyClear);
     this.viewport = element('div', 'wf-board-viewport'); this.viewport.setAttribute('aria-label', '按实际状态分组的工作流'); this.columnGrid = element('div', 'wf-board-columns');
     for (const group of GROUPS) {
@@ -251,10 +258,17 @@ export class WorkflowBoard {
     finally { state.pending = false; if (state.closeAfterPending) this.closeDialog(false); this.renderDialog(); this.render(); }
   }
   renderPending() {
-    const requests = this.getRequests() || [], ids = new Set(); this.pending.hidden = !requests.length; this.pendingTitle.textContent = `待处理 · ${requests.length}`;
+    const requests = this.getRequests() || [], ids = new Set(), hidden = requests.filter(request => this.pendingNotices.isHidden(requestNoticeKey(request)));
+    const visible = requests.length - hidden.length;
+    this.pending.hidden = !requests.length; this.pendingTitle.textContent = visible ? `待处理 · ${visible}` : '待处理'; this.pendingTitle.hidden = !visible;
+    this.pendingClose.hidden = !visible; this.pendingList.hidden = !visible;
+    this.pendingRestore.hidden = !hidden.length; this.pendingRestore.textContent = `显示已隐藏 · ${hidden.length}`;
     for (const [index, request] of requests.entries()) {
       const id = String(request.id ?? `${request.sessionId}:${request.method}:${index}`); ids.add(id); let row = this.pendingCards.get(id);
-      if (!row) { const card = element('article', 'wf-board-request'), title = element('strong'), description = element('p'), link = element('a', 'wf-board-request-link', '前往处理 →'); card.append(title, description, link); this.pendingList.append(card); row = { card, title, description, link }; this.pendingCards.set(id, row); }
+      if (!row) { const card = element('article', 'wf-board-request'), title = element('strong'), description = element('p'), link = element('a', 'wf-board-request-link', '前往处理 →'); row = { card, title, description, link };
+        row.close = button('×', () => { this.pendingNotices.hide([row.noticeKey]); this.renderPending(); }, 'wf-board-notice-close'); row.close.title = '关闭此待处理提示'; row.close.setAttribute('aria-label', '关闭此待处理提示');
+        card.append(title, row.close, description, link); this.pendingList.append(card); this.pendingCards.set(id, row); }
+      row.noticeKey = requestNoticeKey(request); row.card.hidden = this.pendingNotices.isHidden(row.noticeKey);
       const params = request.params || {}; row.title.textContent = /approv/i.test(request.method || '') ? '执行审批' : '需要补充信息';
       row.description.textContent = clean(params.description || params.question || params.questions?.[0]?.question || params.command || '打开关联任务处理请求。').slice(0, 240); row.description.title = row.description.textContent;
       row.link.hidden = !request.sessionId; if (request.sessionId) { row.link.href = this.taskURL(request.sessionId); row.link.setAttribute('aria-label', `${row.title.textContent}：${row.description.textContent}`); }

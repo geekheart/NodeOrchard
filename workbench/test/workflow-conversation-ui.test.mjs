@@ -318,6 +318,76 @@ test('pending list counts an exact current review once while unmatched or unknow
   ui.renderPending(conversationTurnGroups([turn, latest])); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 2/);
 });
 
+test('a review notice can be hidden and restored without approving, stopping, posting or losing feedback', t => {
+  pendingDOM(t); const { ui, run } = revisionHandoffFixture(); ui.pendingHost = new PendingElement('section'); ui.editor.libraryReadOnly = true;
+  const context = { runId: run.id, nodeId: 'gate', attempt: 2, attemptId: 'human-two', artifactHashes: run.nodes.gate.review.artifactHashes };
+  ui.state().pending = [{ id: 'review-one', kind: 'review', label: '审核产物', context }]; ui.attachment = { ...context, workflowId: ui.workflowId };
+  ui.state().conversation.turns = [{ id: 'history', status: 'complete', assistant: { text: '保留聊天原文' } }];
+  ui.sendReview = () => assert.fail('Hiding a notice cannot review'); ui.dismissTurn = () => assert.fail('Hiding a notice cannot end a turn'); ui.api = () => assert.fail('Hiding a notice cannot call the server');
+  ui.renderPending(conversationTurnGroups(ui.state().conversation.turns));
+  let all = pendingDOMDescendants(ui.pendingHost); const feedback = all.find(node => node.tagName === 'textarea'); feedback.value = '保留这份修改意见'; feedback.listeners.input();
+  const before = structuredClone({ pending: ui.state().pending, turns: ui.state().conversation.turns, run });
+  const close = all.find(node => node.attributes['aria-label'] === '隐藏此审核提示'); assert.ok(close); assert.notEqual(close.disabled, true); close.listeners.click();
+  all = pendingDOMDescendants(ui.pendingHost); assert.equal(all.some(node => node.textContent === '审核产物'), false);
+  assert.equal(ui.pendingHost.hidden, false); const restore = all.find(node => node.textContent === '显示已隐藏 · 1'); assert.ok(restore); restore.listeners.click();
+  all = pendingDOMDescendants(ui.pendingHost); assert.equal(all.find(node => node.tagName === 'textarea').value, '保留这份修改意见');
+  assert.deepEqual({ pending: ui.state().pending, turns: ui.state().conversation.turns, run }, before);
+});
+
+test('hidden review identity survives refresh and sorted artifact hashes but a new attempt or artifact version appears', t => {
+  pendingDOM(t); const { ui, document } = harness(); ui.pendingHost = new PendingElement('section');
+  const hashes = [{ id: 'b', sha256: 'b'.repeat(64) }, { id: 'a', sha256: 'a'.repeat(64) }];
+  const review = { id: 'review-one', kind: 'review', label: '审核产物', context: { runId: 'run-one', nodeId: 'trim', attempt: 2, attemptId: 'attempt-two', artifactHashes: hashes } };
+  ui.state().pending = [review]; ui.renderPending(conversationTurnGroups([]));
+  pendingDOMDescendants(ui.pendingHost).find(node => node.attributes['aria-label'] === '隐藏此审核提示').listeners.click();
+  const reloaded = harness().ui; reloaded.workflowId = document.id; reloaded.editor.doc = document; reloaded.pendingHost = new PendingElement('section');
+  reloaded.state().pending = [{ ...structuredClone(review), context: { ...review.context, artifactHashes: [...hashes].reverse().map(hash => ({ ...hash, sha256: hash.sha256.toUpperCase() })) } }]; reloaded.renderPending(conversationTurnGroups([]));
+  assert.ok(pendingDOMDescendants(reloaded.pendingHost).some(node => node.textContent === '显示已隐藏 · 1'));
+  reloaded.state().pending[0].context.attemptId = 'attempt-three'; reloaded.renderPending(conversationTurnGroups([]));
+  assert.ok(pendingDOMDescendants(reloaded.pendingHost).some(node => node.textContent === '审核产物'));
+  reloaded.state().pending[0].context = { ...review.context, artifactHashes: [{ id: 'a', sha256: 'c'.repeat(64) }, hashes[0]] }; reloaded.renderPending(conversationTurnGroups([]));
+  assert.ok(pendingDOMDescendants(reloaded.pendingHost).some(node => node.textContent === '审核产物'));
+});
+
+test('hiding every current notice leaves one recovery control and preserves actual issues, reviews and failed runs', t => {
+  pendingDOM(t); const { ui, run } = harness(); ui.pendingHost = new PendingElement('section'); run.status = 'error'; run.completedAt = '2026-10-28T01:00:00Z';
+  const turn = { id: 'old-error', status: 'error', updatedAt: '2026-10-28T01:00:00Z', user: { text: '原始事项' } }, latest = { id: 'latest', status: 'complete' };
+  ui.state().conversation.turns = [turn, latest]; ui.state().pending = [{ id: 'review', kind: 'review', label: '待审核', context: { runId: run.id, nodeId: 'trim', attempt: 2, attemptId: 'attempt-two' } }];
+  const before = structuredClone({ pending: ui.state().pending, turns: ui.state().conversation.turns, run });
+  ui.api = () => assert.fail('Local close cannot call any API'); ui.dismissTurn = () => assert.fail('Local close cannot resolve issues'); ui.sendReview = () => assert.fail('Local close cannot review');
+  ui.renderPending(conversationTurnGroups(ui.state().conversation.turns));
+  const all = pendingDOMDescendants(ui.pendingHost); assert.equal(all.filter(node => /^隐藏此/.test(node.attributes['aria-label'] || '')).length, 3);
+  all.find(node => node.attributes['aria-label'] === '隐藏当前全部提示').listeners.click();
+  assert.ok(pendingDOMDescendants(ui.pendingHost).some(node => node.textContent === '显示已隐藏 · 3')); assert.equal(ui.pendingHost.children[0].hidden, true);
+  assert.deepEqual({ pending: ui.state().pending, turns: ui.state().conversation.turns, run }, before);
+  pendingDOMDescendants(ui.pendingHost).find(node => node.textContent === '显示已隐藏 · 3').listeners.click();
+  assert.match(ui.pendingHost.children[0].textContent, /待处理 · 3/); assert.equal(ui.pendingHost.children[1].hidden, true, 'Restoring notices keeps the collapse preference');
+});
+
+test('hidden chat issues and failures reappear only when their own status or version changes', t => {
+  pendingDOM(t); const { ui, run } = harness(); ui.pendingHost = new PendingElement('section'); run.status = 'error'; run.completedAt = '2026-10-28T01:00:00Z';
+  const turn = { id: 'old-error', status: 'error', updatedAt: '2026-10-28T01:00:00Z', user: { text: '旧正文不会用作身份' } };
+  ui.state().conversation.turns = [turn, { id: 'latest', status: 'complete' }]; ui.renderPending(conversationTurnGroups(ui.state().conversation.turns));
+  pendingDOMDescendants(ui.pendingHost).find(node => node.attributes['aria-label'] === '隐藏此聊天事项提示').listeners.click();
+  pendingDOMDescendants(ui.pendingHost).find(node => node.attributes['aria-label'] === '隐藏此运行异常提示').listeners.click();
+  turn.user.text = '正文不同但仍是同一版本'; ui.renderPending(conversationTurnGroups(ui.state().conversation.turns));
+  assert.ok(pendingDOMDescendants(ui.pendingHost).some(node => node.textContent === '显示已隐藏 · 2'));
+  turn.updatedAt = '2026-10-28T01:01:00Z'; ui.renderPending(conversationTurnGroups(ui.state().conversation.turns)); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 1/);
+  run.completedAt = '2026-10-28T01:02:00Z'; ui.renderPending(conversationTurnGroups(ui.state().conversation.turns)); assert.match(ui.pendingHost.children[0].textContent, /待处理 · 2/);
+});
+
+test('hidden current reviews do not expose their duplicate historical review choice and conversation types remain isolated', t => {
+  pendingDOM(t); const { ui, document } = harness(); ui.pendingHost = new PendingElement('section');
+  const context = { runId: 'run-one', nodeId: 'trim', attempt: 2, attemptId: 'attempt-two' }, review = { id: 'review', kind: 'review', label: '待审核', context };
+  const old = { id: 'old-review', status: 'awaiting_action', actions: [{ kind: 'review-approve', context }] };
+  ui.state().pending = [review]; ui.state().conversation.turns = [old, { id: 'latest', status: 'complete' }]; ui.renderPending(conversationTurnGroups(ui.state().conversation.turns));
+  pendingDOMDescendants(ui.pendingHost).find(node => node.attributes['aria-label'] === '隐藏此审核提示').listeners.click();
+  assert.ok(pendingDOMDescendants(ui.pendingHost).some(node => node.textContent === '显示已隐藏 · 1'));
+  const supervisor = harness().ui; supervisor.workflowId = document.id; supervisor.editor.doc = document; supervisor.fileAttachments = { scope: 'supervisor' }; supervisor.states.delete(document.id); supervisor.pendingHost = new PendingElement('section');
+  supervisor.state().pending = [structuredClone(review)]; supervisor.renderPending(conversationTurnGroups([]));
+  assert.ok(pendingDOMDescendants(supervisor.pendingHost).some(node => node.textContent === '待审核'));
+});
+
 test('a retry targets its failed turn only while text and captured context remain unchanged', async () => {
   const { ui, document, run } = harness(), failed = { id: 'failed-turn', status: 'error', user: { text: '检查采集失败', context: { runId: run.id, nodeId: 'trim' } } }; let request;
   ui.state().conversation.turns = [failed]; ui.beginRetry(failed);

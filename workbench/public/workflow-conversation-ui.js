@@ -5,6 +5,7 @@ import { setToolbarControl } from './workflow-toolbar-controls.js';
 import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
 import { bindChatSendShortcut, updateChatShortcutHints } from './keyboard-shortcuts.js';
 import { ConversationAttachments } from './conversation-attachments.js';
+import { PendingNoticeDismissals, pendingNoticeKey } from './pending-notice-dismissals.js';
 
 export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -20,6 +21,12 @@ const settled = turn => ['resolved', 'superseded'].includes(turn?.pendingState?.
 const turnStatus = turn => settled(turn) && turn.pendingState.label || TURN_STATUS[turn.status] || '已记录';
 const contextKey = value => JSON.stringify(Object.fromEntries(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b))));
 const reviewContextKey = value => contextKey(Object.fromEntries(['runId', 'nodeId', 'attempt', 'attemptId'].map(key => [key, value?.[key]])));
+const pendingReviewNoticeKey = item => pendingNoticeKey(item.kind === 'review' ? 'review' : 'pending', item.id ?? null,
+  ...['runId', 'nodeId', 'attempt', 'attemptId'].map(key => item.context?.[key] ?? null),
+  (Array.isArray(item.context?.artifactHashes) ? item.context.artifactHashes : []).map(hash => [hash?.id ?? null, typeof hash?.sha256 === 'string' ? hash.sha256.toLowerCase() : null]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+  ...(item.kind === 'review' ? [] : [item.kind ?? null, item.status ?? null, item.updatedAt ?? null, item.version ?? null]));
+const pendingTurnNoticeKey = turn => pendingNoticeKey('turn', turn.id, turn.status, turn.updatedAt ?? null, turn.version ?? null);
+const pendingFailureNoticeKey = run => pendingNoticeKey('failure', run.id, run.status, run.completedAt ?? null);
 const coveredReview = (turn, pending) => {
   const actions = turn.actions || [];
   return actions.length > 0 && actions.every(action => action.kind?.startsWith('review-') && action.context?.runId && action.context?.nodeId
@@ -90,7 +97,9 @@ export class WorkflowConversationUI {
       let pendingExpanded = false; try { pendingExpanded = localStorage.getItem(PENDING_PREFERENCE + id) === 'true'; } catch { /* Keep the current preference in memory. */ }
       this.states.set(id, { conversation: { workflowId: id, revision: 0, turns: [] }, pending: [], pendingExpanded, draft: '', intent: 'auto', loading: false, loaded: false, sending: false, request: 0, error: '', retry: null, retryOfTurnId: null, retryTarget: null, issueReplyTarget: null, expanded: new Set(), messageEdit: 0 });
     }
-    return this.states.get(id);
+    const state = this.states.get(id);
+    state.pendingNotices ||= new PendingNoticeDismissals(pendingNoticeKey('conversation', this.fileAttachments?.scope || 'workflow', id));
+    return state;
   }
   setPendingExpanded(expanded, id = this.workflowId) {
     this.state(id).pendingExpanded = expanded;
@@ -494,13 +503,27 @@ export class WorkflowConversationUI {
     this.pendingHost.replaceChildren(); const state = this.state(), pending = state.pending || [], other = groups.unresolved.filter(turn => turn.id !== groups.latest?.id && !['thinking', 'queued'].includes(turn.status) && !coveredReview(turn, pending));
     const failedRun = this.runtime?.currentRun?.(), failure = !failedRun?.importedArchive && failedRun?.workflowId === this.currentDocument()?.id && ['error', 'interrupted', 'unknown'].includes(failedRun.status) ? failedRun : null;
     this.pendingHost.hidden = !pending.length && !other.length && !failure; if (this.pendingHost.hidden) return;
-    const reviewCount = pending.filter(item => item.kind === 'review').length, contentId = `wf-conversation-pending-${this.workflowId}`;
-    const title = button(`待处理 · ${pending.length + other.length + Number(Boolean(failure))}${reviewCount ? ` · 审核 ${reviewCount}` : ''}`, () => {
+    const owner = this.workflowId, keys = [...pending.map(pendingReviewNoticeKey), ...other.map(pendingTurnNoticeKey), ...(failure ? [pendingFailureNoticeKey(failure)] : [])];
+    const hidden = keys.filter(key => state.pendingNotices.isHidden(key)), visible = new Set(keys.filter(key => !state.pendingNotices.isHidden(key)));
+    const shownPending = pending.filter(item => visible.has(pendingReviewNoticeKey(item))), shownOther = other.filter(turn => visible.has(pendingTurnNoticeKey(turn)));
+    const shownFailure = failure && visible.has(pendingFailureNoticeKey(failure)), reviewCount = shownPending.filter(item => item.kind === 'review').length, contentId = `wf-conversation-pending-${this.workflowId}`;
+    const refresh = () => { if (this.workflowId === owner) this.renderPending(conversationTurnGroups(state.conversation.turns)); };
+    const closeNotice = (keys, label, group = false) => {
+      const control = button('×', () => { state.pendingNotices.hide(keys); refresh(); }, 'wf-conversation-pending-close' + (group ? ' is-group' : ''));
+      control.title = label; control.setAttribute('aria-label', label); return control;
+    };
+    const title = button(`待处理 · ${visible.size}${reviewCount ? ` · 审核 ${reviewCount}` : ''}`, () => {
       this.setPendingExpanded(!state.pendingExpanded); body.hidden = !state.pendingExpanded; title.setAttribute('aria-expanded', String(state.pendingExpanded));
     }, 'wf-conversation-pending-toggle'); title.setAttribute('aria-expanded', String(state.pendingExpanded)); title.setAttribute('aria-controls', contentId);
-    const body = element('div', 'wf-conversation-pending-body'); body.id = contentId; body.hidden = !state.pendingExpanded; this.pendingHost.append(title, body);
-    if (failure) body.append(button(`运行异常 · ${STUDIO_STATUS[failure.status] || '待核对'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'));
-    for (const item of pending) {
+    title.hidden = !visible.size;
+    const body = element('div', 'wf-conversation-pending-body'); body.id = contentId; body.hidden = !state.pendingExpanded || !visible.size; this.pendingHost.append(title, body);
+    if (visible.size) this.pendingHost.append(closeNotice(keys, '隐藏当前全部提示', true));
+    if (hidden.length) this.pendingHost.append(button(`显示已隐藏 · ${hidden.length}`, () => { state.pendingNotices.restore(hidden); refresh(); }, 'wf-conversation-link wf-conversation-pending-restore'));
+    if (shownFailure) {
+      const row = element('div', 'wf-conversation-pending-item');
+      row.append(button(`运行异常 · ${STUDIO_STATUS[failure.status] || '待核对'} · ${shortId(failure.id)} · 查看并回复`, () => { this.resultOpen = failure.id; this.focusContext({ runId: failure.id }); state.intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'), closeNotice([pendingFailureNoticeKey(failure)], '隐藏此运行异常提示')); body.append(row);
+    }
+    for (const item of shownPending) {
       const revision = this.reviewRevisionForContext(item.context), reviewKey = reviewContextKey(item.context);
       const row = element('div', 'wf-conversation-pending-item'), selected = this.attachment?.runId === item.context?.runId && this.attachment?.nodeId === item.context?.nodeId && this.attachment?.attempt === item.context?.attempt;
       row.classList.toggle('is-selected', selected); const target = button(item.label || '待审核产物', () => { this.focusContext(item.context); this.activeReview = item.id; this.state().intent = 'auto'; this.render(); }, 'wf-conversation-pending-target'); target.title = this.describeContext(item.context).join(' / '); row.append(target);
@@ -526,9 +549,9 @@ export class WorkflowConversationUI {
           candidate.disabled = state.sending || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(candidate);
         }
       }
-      body.append(row);
+      row.append(closeNotice([pendingReviewNoticeKey(item)], item.kind === 'review' ? '隐藏此审核提示' : '隐藏此待办提示')); body.append(row);
     }
-    for (const turn of other) {
+    for (const turn of shownOther) {
       const row = element('div', 'wf-conversation-pending-item'); row.append(button(`${turnStatus(turn)} · ${truncate(turn.user?.text, 30)}`, () => {
         state.expanded.add(turn.id); this.focusIssue(turn); this.render(); this.messages.querySelector(`[data-turn-id="${CSS.escape(turn.id)}"]`)?.scrollIntoView({ block: 'nearest' });
       }, 'wf-conversation-pending-target'));
@@ -538,7 +561,7 @@ export class WorkflowConversationUI {
           control.title = '只结束此对话事项，运行与人工审核状态保持原样。'; control.disabled = this.actionPending.has(`${this.workflowId}:${turn.id}:dismiss`) || this.editor.libraryReadOnly || Boolean(this.editor.nodeLibrary?.nested); actions.append(control); }
         row.append(actions);
       }
-      body.append(row);
+      row.append(closeNotice([pendingTurnNoticeKey(turn)], '隐藏此聊天事项提示')); body.append(row);
     }
   }
   artifactGallery(items, context) {

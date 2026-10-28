@@ -86,6 +86,25 @@ test('pending requests remain linked to real tasks, update in place and disappea
   requests[0].params.description = '需要批准'; ui.handleEvent({ type: 'request.open' }); assert.equal(ui.pendingCards.get('approval-a'), row); assert.equal(row.description.textContent, '需要批准'); requests.length = 0; ui.handleEvent({ type: 'request.cancel' }); assert.equal(ui.pending.hidden, true); assert.equal(ui.pendingCards.size, 0);
 });
 
+test('pending notice close buttons hide and restore without acknowledging requests, and fresh native requests reappear', t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), values = new Map();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) } });
+  t.after(() => descriptor ? Object.defineProperty(globalThis, 'localStorage', descriptor) : delete globalThis.localStorage);
+  const { ui, requests, calls } = mounted(t);
+  requests.push({ id: 'approval-a', method: 'approval', sessionId: 'session-a', params: { session_id: 'native-a' } }, { id: 'clarify-b', method: 'clarify', sessionId: 'session-b' });
+  const before = structuredClone(requests); ui.renderPending();
+  const row = ui.pendingCards.get('approval-a'); row.close.emit('click');
+  assert.equal(row.card.hidden, true); assert.equal(ui.pendingCards.get('clarify-b').card.hidden, false);
+  assert.equal(ui.pendingRestore.textContent, '显示已隐藏 · 1'); assert.deepEqual(requests, before); assert.equal(calls.length, 0);
+  const reloaded = new WorkflowBoard(new FakeElement('section'), { api: () => assert.fail('Display preferences cannot call the backend'), onOpen() {}, onCreate() {}, getRequests: () => requests, taskURL: id => '#/task/' + id });
+  t.after(() => reloaded.deactivate());
+  assert.equal(reloaded.pendingCards.get('approval-a').card.hidden, true);
+  requests[0].params.session_id = 'native-new'; ui.renderPending(); assert.equal(row.card.hidden, false);
+  ui.pendingClose.emit('click'); assert.equal(ui.pendingList.hidden, true); assert.equal(ui.pendingRestore.textContent, '显示已隐藏 · 2');
+  ui.pendingRestore.emit('click'); assert.equal(ui.pendingList.hidden, false); assert.equal(row.card.hidden, false);
+  assert.equal(ui.pendingCards.get('clarify-b').card.hidden, false); assert.equal(calls.length, 0);
+});
+
 test('failed or malformed reads retain existing cards and provide retry without a false empty-library state', async t => {
   const { ui, setRecords } = mounted(t); setRecords([summary('a')]); await ui.load(); const card = ui.cards.get('a').card;
   ui.api = async () => { throw new Error('temporarily unavailable'); }; await ui.load(); assert.equal(ui.cards.get('a').card, card); assert.match(ui.noticeText.textContent, /读取失败/); assert.equal(ui.retryButton.hidden, false); assert.equal(ui.empty.hidden, true);

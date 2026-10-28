@@ -220,6 +220,24 @@ test('streamed task links retain the focused anchor while approval counts and st
   assert.equal(instance.nodeTask.children.at(-1), link); assert.equal(link.href, '#/task/first-session');
 });
 
+test('runtime pending notice closes locally, preserves the task link and returns for a new request identity', t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), values = new Map();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) } });
+  t.after(() => descriptor ? Object.defineProperty(globalThis, 'localStorage', descriptor) : delete globalThis.localStorage);
+  fakeDOM(t); const value = run(), instance = headless(value);
+  const requests = [{ id: 'approval', method: 'approval', sessionId: 'second-session', params: { session_id: 'native-one' } }];
+  instance.getRequests = () => requests; instance.api = () => assert.fail('Closing a notice cannot call an action endpoint');
+  const before = JSON.stringify({ value, requests }); instance.renderApproval();
+  const parts = instance.taskLinks.get(instance.approval); parts.close.listeners.get('click')();
+  assert.equal(parts.notice.hidden, true); assert.equal(parts.close.hidden, true); assert.equal(parts.restore.hidden, false);
+  assert.equal(parts.link.hidden, false); assert.equal(parts.link.textContent, '打开任务并处理'); assert.equal(parts.link.href, '#/task/second-session');
+  instance.renderApproval(); assert.equal(parts.notice.hidden, true); assert.equal(JSON.stringify({ value, requests }), before);
+  const reloaded = headless(value); reloaded.getRequests = () => requests; reloaded.renderApproval();
+  assert.equal(reloaded.taskLinks.get(reloaded.approval).notice.hidden, true);
+  requests[0].params.session_id = 'native-two'; instance.renderApproval(); assert.equal(parts.notice.hidden, false);
+  parts.close.listeners.get('click')(); parts.restore.listeners.get('click')(); assert.equal(parts.notice.hidden, false);
+});
+
 test('terminal state cannot regress under a late running or conflicting terminal event', () => {
   const value = run(undefined, { status: 'error' }), instance = headless(value);
   instance.storeRun({ ...value, status: 'running' }); assert.equal(instance.runs.get(value.id).status, 'error');

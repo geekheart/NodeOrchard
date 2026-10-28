@@ -20,14 +20,19 @@
 .wf-conversation-notice { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 11px; overflow-wrap: anywhere; flex-shrink: 1; min-height: 34px; max-height: 130px; overflow-y: auto; }
 .wf-conversation-error { color: var(--red); white-space: pre-wrap; overflow-wrap: anywhere; }
 .wf-conversation-notice .wf-button { margin-top: 7px; }
-.wf-conversation-pending { padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--line); flex-shrink: 1; min-height: 42px; max-height: 38%; overflow: auto; scrollbar-width: thin; }
-.wf-conversation-pending-toggle { display: flex; align-items: center; gap: 7px; width: 100%; padding: 1px 0; border: 0; background: transparent; color: var(--orange); text-align: left; font-size: 11px; font-weight: 600; }
+.wf-conversation-pending { position: relative; padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--line); flex-shrink: 1; min-height: 42px; max-height: 38%; overflow: auto; scrollbar-width: thin; }
+.wf-conversation-pending-toggle { display: flex; align-items: center; gap: 7px; width: 100%; padding: 1px 25px 1px 0; border: 0; background: transparent; color: var(--orange); text-align: left; font-size: 11px; font-weight: 600; }
 .wf-conversation-pending-toggle::before { content: '›'; display: inline-block; flex-shrink: 0; font-size: 15px; }
 .wf-conversation-pending-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
 .wf-conversation-pending-body { margin-top: 6px; }
 .wf-conversation-pending-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
-.wf-conversation-pending-item { margin-top: 6px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.wf-conversation-pending-item { position: relative; margin-top: 6px; padding: 8px 31px 8px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .wf-conversation-pending-item.is-selected { border-color: var(--strong-line); }
+.wf-conversation-pending-close { position: absolute; right: 6px; top: 8px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; }
+.wf-conversation-pending-close.is-group { top: 8px; right: 12px; }
+.wf-conversation-pending-close:hover { background: var(--hover); color: var(--text); }
+.wf-conversation-pending-close:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.wf-conversation-pending-restore { display: block; margin-top: 5px; }
 .wf-conversation-pending-target { display: block; width: 100%; min-width: 0; border: 0; border-radius: 4px; padding: 4px 0; background: transparent; text-align: left; color: var(--secondary); font-size: 11px; overflow-wrap: anywhere; }
 .wf-conversation-pending-target:hover { color: var(--text); text-decoration: underline; }
 .wf-conversation-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 15px; scroll-behavior: smooth; scrollbar-width: thin; }

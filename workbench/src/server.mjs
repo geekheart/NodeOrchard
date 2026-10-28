@@ -431,6 +431,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/workflow-studio-ui.css': ['workflow-studio-ui.css', 'text/css'],
         '/workflow-versioning-ui.js': ['workflow-versioning-ui.js', 'text/javascript'],
         '/workflow-conversation-ui.js': ['workflow-conversation-ui.js', 'text/javascript'],
+        '/pending-notice-dismissals.js': ['pending-notice-dismissals.js', 'text/javascript'],
         '/conversation-attachments.js': ['conversation-attachments.js', 'text/javascript'],
         '/workflow-attachment-input.js': ['workflow-attachment-input.js', 'text/javascript'],
         '/workflow-examples-ui.js': ['workflow-examples-ui.js', 'text/javascript'],

@@ -6,6 +6,7 @@ import { WorkflowFeedbackUI } from './workflow-feedback-ui.js';
 import { STUDIO_STATUS, isV2, inputEntries } from '../shared/workflow/workflow-studio-utils.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
+import { PendingNoticeDismissals, pendingNoticeKey, requestNoticeKey } from './pending-notice-dismissals.js';
 
 const ACTIVE = new Set(['queued', 'preparing', 'running', 'waiting', 'waiting_review']);
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
@@ -481,15 +482,23 @@ export class WorkflowRuntimeUI {
     let parts = this.taskLinks.get(container);
     if (!parts) {
       parts = { notice: node('span'), link: node('a', 'wf-runtime-task-link') };
-      container.append(parts.notice, parts.link); this.taskLinks.set(container, parts);
+      const refresh = () => { this.renderTaskLink(container, parts.sessionId, parts.status); this.renderApproval(); };
+      parts.close = button('×', () => { this.requestNotices.hide(parts.keys); refresh(); }, 'wf-runtime-notice-close'); parts.close.title = '关闭此待处理提示'; parts.close.setAttribute('aria-label', '关闭此待处理提示');
+      parts.restore = button('', () => { this.requestNotices.restore(parts.keys); refresh(); }, 'wf-runtime-notice-restore');
+      container.append(parts.notice, parts.close, parts.restore, parts.link); this.taskLinks.set(container, parts);
     }
-    parts.notice.hidden = !waiting;
-    const notice = waiting ? requests.length ? `${requests.length} 项审批或澄清待处理` : '等待人工处理' : '';
+    this.requestNotices ||= new PendingNoticeDismissals('requests');
+    parts.sessionId = sessionId; parts.status = status;
+    parts.keys = requests.length ? requests.map(requestNoticeKey) : waiting ? [pendingNoticeKey('waiting', this.currentRun()?.id, sessionId, status)] : [];
+    const visible = parts.keys.filter(key => !this.requestNotices.isHidden(key)), hidden = parts.keys.length - visible.length;
+    parts.notice.hidden = !visible.length; parts.close.hidden = !visible.length;
+    parts.restore.hidden = !hidden; parts.restore.textContent = `显示已隐藏 · ${hidden}`;
+    const notice = visible.length ? requests.length ? `${visible.length} 项审批或澄清待处理` : '等待人工处理' : '';
     const label = waiting ? '打开任务并处理' : '查看该步骤关联任务', href = this.taskURL(sessionId);
     if (parts.notice.textContent !== notice) parts.notice.textContent = notice;
     if (parts.link.textContent !== label) parts.link.textContent = label;
     if (parts.link.getAttribute('href') !== href) parts.link.setAttribute('href', href);
-    container.classList.toggle('waiting', waiting);
+    container.classList.toggle('waiting', visible.length > 0);
   }
   renderTrace() {
     const run = this.currentRun(); this.nodeInspection.hidden = !run; if (!run) { this.trace.replaceChildren(); this.traceElements.clear(); this.traceRunId = null; return; }

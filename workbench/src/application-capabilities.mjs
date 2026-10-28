@@ -62,7 +62,7 @@ const FEATURES = [
   { id: 'conversation-lifecycle', status: 'available', channel: 'conversation-response', tools: [],
     note: '会话响应只读投影待处理状态；明确关联的成功重试接续旧聊天失败，审核按真实运行与尝试核对，不回写旧历史或业务状态。' },
   { id: 'conversation-pending-controls', status: 'ui-only', tools: [],
-    note: '同一聊天界面折叠待处理区、明确重试或手动结束聊天关注；模型没有结束事项、批准审核或清除业务失败的工具。' },
+    note: '待处理与审核提示支持单项或整组本地隐藏、恢复；同版本刷新保持隐藏，新审核尝试或产物版本重新提示。隐藏不改变事项、运行或审核。聊天仍可折叠、明确重试或结束关注；模型没有隐藏提示、结束事项、批准审核或清除业务失败的工具。' },
   { id: 'conversation-issue-resolution', status: 'available', channel: 'conversation-command', tools: [],
     note: '用户明确说“这个问题解决了”或“不用处理了”，由本地会话指令结束明确关联或唯一的聊天事项；歧义时按原对话编号选择。此入口不调用模型，不改变运行或人工审核。' },
   { id: 'workflow-editing', status: 'proposal-only', channel: 'conversation-request', tools: ['node.describe', 'workflow.propose'],
