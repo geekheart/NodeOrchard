@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WorkflowLibraryClient } from '../public/workflow-library-client.js';
+import { WorkflowEditor } from '../public/workflow-editor.js';
 import { createDocument, createNode, validateDocument } from '../shared/workflow/workflow-model.mjs';
 
 const ACK_KEY = 'workbench.workflow-library-ack.v1';
@@ -13,6 +14,11 @@ const failure = (message, httpStatus) => Object.assign(new Error(message), { htt
 function document(id = 'local-flow', title = '本地草稿') { return { ...createDocument({ title }), id }; }
 function record(document, revision = 1, origin = 'saved') {
   return { id: document.id, document: copy(document), revision, origin, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: `2026-01-01T00:00:${String(revision).padStart(2, '0')}.000Z` };
+}
+function fittedPersistence(editor) {
+  Object.assign(editor, { settings: { libraryClosed: true, propertiesClosed: true }, canvas: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 600 }) },
+    measurePorts() {}, nodeSize: () => ({ width: 224, height: 125 }), panelSettings() { return this.settings; },
+    fitGeometry: WorkflowEditor.prototype.fitGeometry, persistenceDocument: WorkflowEditor.prototype.persistenceDocument });
 }
 
 function storage(t, entries = []) {
@@ -299,8 +305,40 @@ test('after reloading B, a stale A acknowledgement with only local viewport chan
   const editor = reloadedEditor(b.id), remote = backend([record(a, 2), record(b)]), client = new WorkflowLibraryClient(editor, { api: remote.api });
   await client.initialize(); await client.open(a.id);
   assert.equal(client.currentId, a.id); assert.deepEqual(editor.doc, localA); assert.equal(remote.records.size, 2);
-  assert(remote.posts().every(call => call.options.body.document.id === a.id && call.options.body.expectedRevision === 2));
-  assert.deepEqual(remote.records.get(a.id).document, localA); assert.equal(editor.toasts.length, 0);
+  assert.equal(remote.posts().length, 0, 'a viewport-only legacy draft does not write or claim a new server revision');
+  assert.deepEqual(remote.records.get(a.id).document, a); assert.equal(editor.toasts.length, 0);
+});
+
+test('view-only queue, leave and same-workflow reopen neither persist nor POST and reopening requests a visible fit', async t => {
+  storage(t); const doc = document('view-only'); doc.nodes = [createNode('tool', { x: 30, y: 45 }, { id: 'view-node' })];
+  const editor = new FakeEditor(document('placeholder')), remote = backend([record(doc)]); fittedPersistence(editor);
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(doc.id);
+  let persists = 0, fits = 0; editor.unsaved = false; editor.persist = () => { persists++; return true; }; editor.requestDocumentFit = () => { fits++; };
+  editor.doc.viewport = { x: 950, y: -240, zoom: .3 }; const live = copy(editor.doc.viewport);
+  client.queue(editor.doc); await client.flush(); client.leave(); assert.equal(persists, 0); assert.equal(remote.posts().length, 0);
+  await client.open(doc.id); assert.equal(fits, 1); assert.equal(remote.records.get(doc.id).revision, 1); assert.deepEqual(editor.doc.viewport, live);
+  assert.deepEqual(remote.records.get(doc.id).document.nodes, doc.nodes);
+});
+
+test('real node movement queues a fitted copy while retaining the live camera and exact node positions', async t => {
+  storage(t); const doc = document('position-save'); doc.nodes = [createNode('tool', { x: 30, y: 45 }, { id: 'position-node' })];
+  const editor = new FakeEditor(document('placeholder')), remote = backend([record(doc)]); fittedPersistence(editor);
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(doc.id);
+  editor.doc.viewport = { x: -1200, y: 720, zoom: .2 }; editor.doc.nodes[0].x = 330;
+  const live = copy(editor.doc), projected = editor.persistenceDocument(); client.queue(editor.doc); await client.flush();
+  assert.equal(remote.posts().length, 1); assert.deepEqual(remote.posts()[0].options.body.document, projected); assert.equal(remote.posts()[0].options.body.document.nodes[0].x, 330);
+  assert.deepEqual(editor.doc, live); assert.notDeepEqual(projected.viewport, live.viewport);
+});
+
+test('a refused dirty save retains a fitted fallback and title drafts still trigger persistence', async t => {
+  storage(t); const doc = document('refused-view'); doc.nodes = [createNode('tool', { x: 80, y: 60 }, { id: 'fallback-node' })];
+  const editor = new FakeEditor(document('placeholder')), remote = backend([record(doc)]); fittedPersistence(editor);
+  const client = new WorkflowLibraryClient(editor, { api: remote.api }); await client.open(doc.id);
+  let persists = 0; editor.unsaved = false; editor.titleDraft = { documentId: doc.id, value: '待提交标题' }; editor.persist = () => { persists++; return true; };
+  client.rememberCurrent(); assert.equal(persists, 1, 'a title draft counts as an actual edit even before dirty is set');
+  editor.titleDraft = null; editor.unsaved = true; editor.doc.nodes[0].x = 480; editor.doc.viewport = { x: 900, y: 700, zoom: .2 }; editor.persist = () => { persists++; return false; };
+  const projected = editor.persistenceDocument(), live = copy(editor.doc); client.rememberCurrent();
+  assert.deepEqual(client.slot(doc.id).queued, projected); assert.deepEqual(editor.doc, live); assert.equal(remote.posts().length, 0);
 });
 
 test('opening a non-current unreadable scoped draft preserves the original cache and the current canvas', async t => {

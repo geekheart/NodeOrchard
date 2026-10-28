@@ -246,6 +246,30 @@ test('applying nested edits commits only the new fixed snapshot and retains pare
   ui.openNested(fixture.node.id); const internal = ui.editor.doc.nodes.find(node => node.id === 'first'); internal.title = '修改后的第一步'; await ui.applyNested(); assert.equal(ui.nested, undefined); assert.equal(committed.id, original.id); assert.equal(committed.nodes.find(node => node.id === fixture.node.id).config.document.nodes.find(node => node.id === 'first').title, '修改后的第一步'); assert.deepEqual(parent, original, 'the previous parent snapshot is immutable'); assert.deepEqual(committed.edges, original.edges);
 });
 
+test('applying a nested camera-only change preserves the parent snapshot without committing or saving content', async t => {
+  const { fixture, editor, ui } = nestedHarness(t);
+  fixture.document.nodes.find(node => node.id === fixture.node.id).config.document.viewport = { x: 9000, y: -6000, zoom: .3 };
+  const before = structuredClone(fixture.document); let commits = 0, saves = 0;
+  editor.commit = () => { commits++; }; editor.scheduleSave = () => { saves++; };
+  ui.openNested(fixture.node.id); editor.doc.viewport = { x: -420, y: 390, zoom: 1.6 };
+  await ui.applyNested();
+  assert.equal(ui.nested, undefined); assert.equal(commits, 0); assert.equal(saves, 0);
+  assert.deepEqual(editor.doc, before); assert.deepEqual(fixture.document, before);
+});
+
+test('applying real nested node movement preserves its position and saves only the child fitted viewport', async t => {
+  const { fixture, editor, ui } = nestedHarness(t), parent = structuredClone(fixture.document); let committed;
+  editor.commit = next => { committed = next; editor.doc = next; };
+  ui.openNested(fixture.node.id);
+  const moved = editor.doc.nodes.find(node => node.id === 'first'); moved.x += 240; moved.y += 80;
+  editor.doc.viewport = { x: 7000, y: -4000, zoom: .3 };
+  const actual = structuredClone(moved), fitted = editor.persistenceDocument();
+  await ui.applyNested();
+  const child = committed.nodes.find(node => node.id === fixture.node.id).config.document;
+  assert.deepEqual(child.nodes.find(node => node.id === 'first'), actual); assert.deepEqual(child.viewport, fitted.viewport);
+  assert.deepEqual(committed.viewport, parent.viewport); assert.deepEqual(parent, fixture.document);
+});
+
 test('invalid boundary edits stay in the nested editor and never replace the parent', async t => {
   const previous = globalThis.requestAnimationFrame; globalThis.requestAnimationFrame = callback => callback(); t.after(() => { if (previous) globalThis.requestAnimationFrame = previous; else delete globalThis.requestAnimationFrame; });
   const ui = library(), fixture = componentFixture(), parent = fixture.document; let message = '', commits = 0;

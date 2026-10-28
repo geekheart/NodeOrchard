@@ -3,6 +3,7 @@ import { builtinNodePresets, instantiatePreset, presetDefinitionFromNode, preset
 import { vacantNodePosition, portCompatible } from '../shared/workflow/workflow-studio-utils.mjs';
 import * as components from '../shared/workflow/workflow-components.mjs';
 import { validationRules } from '../shared/workflow/workflow-validation.mjs';
+import { documentFingerprint } from '../shared/workflow/workflow-conversation-commands.mjs';
 
 const el = (tag, className = '', text) => { const item = document.createElement(tag); item.className = className; if (text !== undefined) item.textContent = String(text); return item; };
 const button = (title, handler, className = 'wf-button') => { const item = el('button', className, title); item.type = 'button'; item.addEventListener('click', handler); return item; };
@@ -221,17 +222,25 @@ export class WorkflowNodeLibraryUI {
       const parent = this.flushNodeDrafts(), node = parent.nodes.find(item => item.id === id); if (!node?.config.document) throw new Error('此节点尚未保存子流程快照。');
       if (this.nestedStack.length >= 7) throw new Error('最多进入 7 层内部编辑。');
       clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection();
-      this.nestedStack.push({ parent, nodeId: id, state: editor.captureDocumentState(), runStates: editor.runStates, validationDraftErrors: editor.validationDraftErrors, unsaved: editor.unsaved, storageKey: editor.storageKey, storageValue: editor.storageValue, studioView: editor.studio.view });
-      editor.doc = validateDocument(copy(node.config.document)); editor.history = []; editor.future = []; editor.selection.clear(); editor.selectedEdge = null; editor.propertyDrafts.clear(); editor.validationDraftErrors = new Map(); editor.runStates = {}; editor.titleDraft = null; editor.unsaved = false;
-      editor.studio.setView('edit'); this.paintNested(); requestAnimationFrame(() => editor.fit());
+      this.nestedStack.push({ parent, nodeId: id, state: editor.captureDocumentState(), runStates: editor.runStates, validationDraftErrors: editor.validationDraftErrors, unsaved: editor.unsaved, storageKey: editor.storageKey, storageValue: editor.storageValue, studioView: editor.studio.view, pendingFitDocumentId: editor.pendingFitDocumentId });
+      editor.doc = validateDocument(copy(node.config.document)); editor.history = []; editor.future = []; editor.selection.clear(); editor.selectedEdge = null; editor.propertyDrafts.clear(); editor.validationDraftErrors = new Map(); editor.runStates = {}; editor.titleDraft = null; editor.unsaved = false; editor.pendingFitDocumentId = null;
+      editor.studio.setView('edit'); this.paintNested();
+      if (editor.requestDocumentFit) editor.requestDocumentFit();
+      else { const child = editor.doc; requestAnimationFrame(() => { if (editor.doc === child) editor.fit(); }); }
     } catch (error) { editor.toast(error.message, true); }
   }
   restoreParent(session) {
-    const editor = this.editor; clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection(); editor.doc = session.parent; editor.history = copy(session.state.history); editor.future = copy(session.state.future); editor.selection = new Set(session.state.selection); editor.selectedEdge = session.state.selectedEdge; editor.propertyDrafts = new Map(copy(session.state.propertyDrafts)); editor.validationDraftErrors = session.validationDraftErrors; editor.runStates = session.runStates; editor.unsaved = session.unsaved; editor.titleDraft = null; editor.storageKey = session.storageKey; editor.storageValue = session.storageValue;
+    const editor = this.editor; clearTimeout(editor.saveTimer); editor.cancelGesture(); editor.cancelConnection(); editor.doc = session.parent; editor.history = copy(session.state.history); editor.future = copy(session.state.future); editor.selection = new Set(session.state.selection); editor.selectedEdge = session.state.selectedEdge; editor.propertyDrafts = new Map(copy(session.state.propertyDrafts)); editor.validationDraftErrors = session.validationDraftErrors; editor.runStates = session.runStates; editor.unsaved = session.unsaved; editor.titleDraft = null; editor.storageKey = session.storageKey; editor.storageValue = session.storageValue; editor.pendingFitDocumentId = session.pendingFitDocumentId;
   }
   async applyNested() {
     const session = this.nested; if (!session) return;
-    try { const child = copy(this.flushNodeDrafts()), next = await components.updateEmbeddedWorkflow(session.parent, session.nodeId, child); if (this.nested !== session) return; this.nestedStack.pop(); this.restoreParent(session); this.editor.commit(next, '修改子流程内部节点'); this.paintNested(); this.editor.toast('内部修改已应用到当前流程。'); }
+    try {
+      const document = this.flushNodeDrafts(), previous = session.parent.nodes.find(node => node.id === session.nodeId)?.config.document;
+      if (documentFingerprint(document) === documentFingerprint(previous)) { this.nestedStack.pop(); this.restoreParent(session); this.paintNested(); if (!this.nested && this.editor.unsaved) this.editor.scheduleSave(); return; }
+      const child = this.editor.persistenceDocument?.(document) || copy(document), next = await components.updateEmbeddedWorkflow(session.parent, session.nodeId, child);
+      if (this.nested !== session) return;
+      this.nestedStack.pop(); this.restoreParent(session); this.editor.commit(next, '修改子流程内部节点'); this.paintNested(); this.editor.toast('内部修改已应用到当前流程。');
+    }
     catch (error) { this.editor.toast(error.message, true); }
   }
   cancelNested(all = false) { if (!this.nested) return; do { const session = this.nestedStack.pop(); this.restoreParent(session); } while (all && this.nested); this.paintNested(); if (!all && !this.nested && this.editor.unsaved) this.editor.scheduleSave(); }

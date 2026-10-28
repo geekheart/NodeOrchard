@@ -54,6 +54,7 @@ const FEATURES = [
   { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
   { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置，认证继续由Hermes管理。创建全局可执行资源保留人工入口，业务Skill和应用助手均无skill_manage或配置写工具。' },
   { id: 'workflow-property-inspector', status: 'ui-only', tools: [], note: '属性面板随当前视图的有效节点或连线选择打开，取消选择后自动关闭；未应用的节点属性草稿保留。此为本地界面选择状态，不提供助手操作工具。' },
+  { id: 'workflow-canvas-view', status: 'ui-only', tools: [], note: '画布平移、缩放及窗口尺寸变化只更新临时视角，不触发工作流保存；保存使用适应画布的视角，重新打开时按当前可见区域适应画布。节点坐标、连线和属性编辑仍正常保存。视角为本地界面状态，不提供助手写工具。' },
   { id: 'workflow-examples', status: 'ui-only', inspect: 'workbench.inspect', tools: [], note: '空画布的示例目录提供执行与学习模板；载入前核对实际 Skill 版本，附默认输入与学习数据，保留当前工作流身份，不自动执行。' },
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
   { id: 'conversation-management', status: 'available', roles: ['supervisor'], tools: ['conversations.list', 'conversation.inspect', 'conversation.delegate'],

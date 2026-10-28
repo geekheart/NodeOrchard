@@ -90,6 +90,8 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.equal(interfaces.features.find(row => row.id === 'execution').status, 'ui-only');
   const inspector = interfaces.features.find(row => row.id === 'workflow-property-inspector');
   assert.equal(inspector.status, 'ui-only'); assert.deepEqual(inspector.tools, []);
+  const camera = interfaces.features.find(row => row.id === 'workflow-canvas-view');
+  assert.equal(camera.status, 'ui-only'); assert.deepEqual(camera.tools, []); assert.match(camera.note, /不触发工作流保存/);
   assert.equal(interfaces.features.find(row => row.id === 'business-code').status, 'proposal-only');
   assert.match(interfaces.features.find(row => row.id === 'workflow-editing').apply, /新增节点后自动按依赖布局/);
   assert.match(interfaces.features.find(row => row.id === 'workflow-editing').apply, /连线新增、删除或改接后也自动重排/);

@@ -2,7 +2,7 @@ import { validateDocument } from '../shared/workflow/workflow-model.mjs';
 
 const MAX_PACKAGE_BYTES = 256 * 1024 * 1024;
 const copy = value => structuredClone(value);
-const signature = value => JSON.stringify(value);
+const signature = value => JSON.stringify({ ...validateDocument(value), viewport: null });
 const fileName = value => String(value || '工作流').replace(/[\\/:*?"<>|\x00-\x1f]/g, '-').slice(0, 80).replace(/\.workflow$/i, '') + '.workflow';
 const element = (tag, className = '', text) => { const node = document.createElement(tag); node.className = className; if (text !== undefined) node.textContent = text; return node; };
 const button = (label, click, className = 'wf-button') => { const node = element('button', className, label); node.type = 'button'; node.addEventListener('click', click); return node; };
@@ -57,7 +57,8 @@ export class WorkflowPackageUI {
     this.editor.toast(message, error);
   }
   async saveSnapshot({ properties = false } = {}) {
-    const context = this.context(), document = properties ? this.editor.prepareRun({ operation: '导出' }) : copy(this.editor.doc);
+    const context = this.context(), prepared = properties ? this.editor.prepareRun({ operation: '导出' }) : copy(this.editor.doc);
+    const document = this.editor.persistenceDocument?.(prepared) || validateDocument(prepared);
     if (this.editor.persist() === false) throw Error('当前草稿未保存，请先处理本地保存错误；不会导出旧版本。');
     this.libraryClient.queue(document); await this.libraryClient.flush(document.id);
     if (!this.sameContext(context) || signature(this.editor.doc) !== signature(document) || properties && this.editor.propertyDrafts?.size) throw Error('工作流草稿已变化，当前编辑已保留，请重新导出。');

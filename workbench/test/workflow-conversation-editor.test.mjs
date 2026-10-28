@@ -7,6 +7,7 @@ import { documentFingerprint } from '../shared/workflow/workflow-conversation-co
 function editor() {
   const item = Object.create(WorkflowEditor.prototype);
   Object.assign(item, { doc: createDocument({ schemaVersion: 2 }), libraryLifecycle: 'active', nodeLibrary: {},
+    nodeElements: new Map(), offsets: new Map(), settings: { canvasClosed: false },
     propertyDrafts: new Map(), history: [], future: [], selection: new Set(), selectedEdge: null,
     cancelGesture() {}, cancelConnection() {}, renderGraph() {}, renderProperties() {}, renderHeader() {}, scheduleSave() {}, fit() {} });
   return item;

@@ -57,7 +57,7 @@ export class WorkflowEditor {
     this.libraryLifecycle = 'active'; this.lifecycleDisabled = new WeakMap(); this.documentLoaded = true;
     this.settings = { snap: true, reduceMotion: false, canvasClosed: false, libraryClosed: true, propertiesClosed: true };
     this.doc = createDocument({ schemaVersion: 2 }); this.doc.viewport = { x: 48, y: 90, zoom: 1 };
-    this.restore(); this.mount();
+    this.restore(); this.pendingFitDocumentId = this.doc.id; this.mount();
     this.studio = new WorkflowStudioUI(this);
     this.nodeLibrary = new WorkflowNodeLibraryUI(this);
     this.renderLibrary(); this.renderGraph(); this.renderProperties(); this.renderHeader(); this.applySettings();
@@ -85,6 +85,7 @@ export class WorkflowEditor {
       const record = JSON.parse(raw);
       if (record.version !== 1) throw new Error('草稿版本不支持');
       this.doc = validateDocument(record.document);
+      this.pendingFitDocumentId = this.doc.id;
       for (const key of Object.keys(this.settings)) if (typeof record.ui?.[key] === 'boolean') this.settings[key] = record.ui[key];
       this.recordCanvasSize(record.ui?.canvasSize || {});
     } catch {
@@ -208,7 +209,7 @@ export class WorkflowEditor {
     this.history = clone(state?.history || []); this.future = clone(state?.future || []);
     this.propertyDrafts = new Map(clone(state?.propertyDrafts || [])); this.validationDraftErrors = new Map(clone(state?.validationDraftErrors || [])); this.selection = new Set(state?.selection || []); this.selectedEdge = state?.selectedEdge || null;
     this.runStates = {}; this.canvasSize = null; this.offsets.clear();
-    this.pruneSelection(); this.renderGraph(); this.renderProperties(); this.renderHeader(); this.requestGeometry();
+    this.pruneSelection(); this.renderGraph(); this.renderProperties(); this.renderHeader(); this.requestDocumentFit();
     if (persist && !this.libraryReadOnly) this.persist();
   }
 
@@ -218,6 +219,7 @@ export class WorkflowEditor {
     clearTimeout(this.saveTimer); clearTimeout(this.toastTimer);
     if (this.geometryFrame) cancelAnimationFrame(this.geometryFrame);
     this.saveTimer = null; this.toastTimer = null; this.geometryFrame = null;
+    this.pendingFitDocumentId = null;
     if (this.contextMenu) this.contextMenu.hidden = true;
     if (this.dialog?.open) this.dialog.close();
     this.clearPulses();
@@ -453,7 +455,18 @@ export class WorkflowEditor {
 
   requestGeometry() {
     if (this.geometryFrame) return;
-    this.geometryFrame = requestAnimationFrame(() => { this.geometryFrame = null; this.measurePorts(); this.updateGeometry(); });
+    this.geometryFrame = requestAnimationFrame(() => { this.geometryFrame = null; this.measurePorts(); this.updateGeometry(); this.consumeDocumentFit(); });
+  }
+  requestDocumentFit() {
+    if (this.documentLoaded === false) return;
+    this.pendingFitDocumentId = this.doc.id; this.requestGeometry();
+  }
+  consumeDocumentFit() {
+    if (this.pendingFitDocumentId !== this.doc.id || this.active === false || this.documentLoaded === false
+      || this.studio?.view === 'run' || this.canvas?.offsetParent === null || this.gesture) return false;
+    const size = this.canvas?.getBoundingClientRect?.();
+    if (!(size?.width > 0 && size.height > 0)) return false;
+    return this.fit();
   }
   recordCanvasSize({ width, height }) {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
@@ -461,6 +474,7 @@ export class WorkflowEditor {
   }
   onCanvasResize() {
     if (this.studio?.view === 'run' || this.canvas.offsetParent === null) return;
+    if (this.consumeDocumentFit()) { this.requestGeometry(); return; }
     const previous = this.canvasSize, size = this.canvas.getBoundingClientRect();
     if (this.recordCanvasSize(size) && previous) {
       const dx = (size.width - previous.width) / 2, dy = (size.height - previous.height) / 2;
@@ -469,7 +483,7 @@ export class WorkflowEditor {
         // or node positions. Gesture baselines must retain the same camera shift.
         const views = new Set([this.doc.viewport, this.gesture?.kind === 'pan' ? this.gesture.viewport : null, this.gesture?.kind === 'nodes' ? this.gesture.before?.viewport : null]);
         for (const view of views) if (view) { view.x = clamp(view.x + dx, -100000, 100000); view.y = clamp(view.y + dy, -100000, 100000); }
-        this.applyViewport(); this.scheduleSave();
+        this.applyViewport();
       }
     }
     this.requestGeometry();
@@ -514,34 +528,46 @@ export class WorkflowEditor {
     this.recordCanvasSize(r);
     const cx = clientX ?? r.left + r.width / 2, cy = clientY ?? r.top + r.height / 2, point = this.worldPoint(cx, cy);
     this.doc.viewport = { x: clamp(cx - r.left - point.x * zoom, -100000, 100000), y: clamp(cy - r.top - point.y * zoom, -100000, 100000), zoom };
-    this.applyViewport(); this.scheduleSave();
+    this.applyViewport();
   }
-  fit() {
-    this.cancelConnection();
-    if (!this.doc.nodes.length) { this.doc.viewport = { x: 48, y: 90, zoom: 1 }; this.applyViewport(); this.scheduleSave(); return; }
-    const r = this.canvas.getBoundingClientRect(); if (!r.width || !r.height) return; this.measurePorts();
-    this.recordCanvasSize(r);
+  fitGeometry(document = this.doc, { fallback = false } = {}) {
+    if (!document.nodes.length) return { viewport: { x: 48, y: 90, zoom: 1 } };
+    const measured = this.canvas?.getBoundingClientRect?.(), visible = measured?.width > 0 && measured.height > 0;
+    const r = visible ? measured : fallback ? { left: 0, top: 0, ...(this.canvasSize || { width: 1200, height: 800 }) } : null;
+    if (!r) return null;
     let visibleLeft = 0, visibleRight = r.width;
-    const panels = this.panelSettings(), canvasLeft = r.left ?? 0, canvasTop = r.top ?? 0;
+    const panels = this.studio?.view === 'run' ? this.settings : this.panelSettings(), canvasLeft = r.left ?? 0, canvasTop = r.top ?? 0;
     for (const [element, closed, side] of [[this.properties, panels.propertiesClosed, 'right'], [this.root?.querySelector?.('.wf-library'), panels.libraryClosed, 'left']]) {
-      if (closed) continue;
+      if (closed || !visible) continue;
       const panel = element?.getBoundingClientRect?.();
       if (!(panel?.width > 0 && panel.height > 0 && panel.left < canvasLeft + r.width && panel.right > canvasLeft && panel.top < canvasTop + r.height && panel.bottom > canvasTop)) continue;
       if (side === 'right') visibleRight = Math.min(visibleRight, panel.left - canvasLeft);
       else visibleLeft = Math.max(visibleLeft, panel.right - canvasLeft);
     }
-    const visibleWidth = visibleRight - visibleLeft; if (visibleWidth <= 0) return;
-    const bounds = this.doc.nodes.map(node => ({ x: node.x, y: node.y, ...this.nodeSize(node.id) }));
+    const visibleWidth = visibleRight - visibleLeft; if (visibleWidth <= 0) return null;
+    const bounds = document.nodes.map(node => ({ x: node.x, y: node.y, ...(document.id === this.doc.id ? this.nodeSize(node.id) : { width: 224, height: 125 }) }));
     const left = Math.min(...bounds.map(b => b.x)), top = Math.min(...bounds.map(b => b.y)), right = Math.max(...bounds.map(b => b.x + b.width)), bottom = Math.max(...bounds.map(b => b.y + b.height));
     const width = right - left, height = bottom - top, padding = Math.min(32, visibleWidth * .05, r.height * .08), topPadding = Math.min(56, r.height * .2);
     const availableWidth = Math.max(1, visibleWidth - padding * 2), availableHeight = Math.max(1, r.height - topPadding - padding);
     const zoom = clamp(Math.min(availableWidth / width, availableHeight / height, 1), .1, 2), scaledHeight = height * zoom;
     // At the minimum zoom, relax padding before allowing a node to be clipped.
     const y = scaledHeight <= r.height ? clamp(topPadding + (availableHeight - scaledHeight) / 2, 0, r.height - scaledHeight) : (r.height - scaledHeight) / 2;
-    this.doc.viewport = { x: clamp(visibleLeft + (visibleWidth - width * zoom) / 2 - left * zoom, -100000, 100000), y: clamp(y - top * zoom, -100000, 100000), zoom };
-    this.applyViewport(); this.scheduleSave();
-    const v = this.doc.viewport;
-    if (left * zoom + v.x < visibleLeft - .5 || right * zoom + v.x > visibleRight + .5 || top * zoom + v.y < -.5 || bottom * zoom + v.y > r.height + .5) this.toast('已缩至当前可用比例，仍有节点超出画布。请平移查看，或收起底部面板后再次适应画布。');
+    const viewport = { x: clamp(visibleLeft + (visibleWidth - width * zoom) / 2 - left * zoom, -100000, 100000), y: clamp(y - top * zoom, -100000, 100000), zoom };
+    return { viewport, size: r, clipped: left * zoom + viewport.x < visibleLeft - .5 || right * zoom + viewport.x > visibleRight + .5 || top * zoom + viewport.y < -.5 || bottom * zoom + viewport.y > r.height + .5 };
+  }
+  fit() {
+    this.cancelConnection(); this.measurePorts();
+    const fitted = this.fitGeometry(); if (!fitted) return false;
+    this.doc.viewport = fitted.viewport; if (fitted.size) this.recordCanvasSize(fitted.size);
+    if (this.pendingFitDocumentId === this.doc.id) this.pendingFitDocumentId = null;
+    this.applyViewport();
+    if (fitted.clipped) this.toast('已缩至当前可用比例，仍有节点超出画布。请平移查看，或收起底部面板后再次适应画布。');
+    return true;
+  }
+  persistenceDocument(document = this.doc) {
+    const clean = validateDocument(document);
+    if (clean.id === this.doc.id) this.measurePorts();
+    return validateDocument({ ...clean, viewport: this.fitGeometry(clean, { fallback: true })?.viewport || { x: 48, y: 90, zoom: 1 } });
   }
   nodeSize(id) { return this.offsets.get(`${id}:size`) || { width: 224, height: 125 }; }
 
@@ -598,6 +624,7 @@ export class WorkflowEditor {
 
   recoverCanvasViewport() {
     if (!this.active || this.studio?.view === 'run' || this.canvas.offsetParent === null || this.gesture) return false;
+    if (this.consumeDocumentFit()) return true;
     const { width, height } = this.canvas.getBoundingClientRect(); if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || !this.doc.nodes.length) return false;
     this.onCanvasResize();
     const v = this.doc.viewport, valid = v && [v.x, v.y, v.zoom].every(Number.isFinite) && v.zoom > 0;
@@ -1059,7 +1086,7 @@ export class WorkflowEditor {
     } else if (gesture.kind === 'nodes' && gesture.dragged) {
       for (const card of this.nodeElements.values()) card.classList.remove('dragging'); this.commit(this.doc, '移动节点', gesture.before);
     } else if (gesture.kind === 'pan') {
-      if (!gesture.dragged) { this.selection.clear(); this.selectedEdge = null; this.renderSelection(); this.renderProperties(); } this.scheduleSave();
+      if (!gesture.dragged) { this.selection.clear(); this.selectedEdge = null; this.renderSelection(); this.renderProperties(); }
     } else if (gesture.kind === 'box') {
       const left = Math.min(event.clientX, gesture.start.x), top = Math.min(event.clientY, gesture.start.y), right = Math.max(event.clientX, gesture.start.x), bottom = Math.max(event.clientY, gesture.start.y);
       this.selection = new Set(gesture.previousSelection); this.selectedEdge = null;
@@ -1192,7 +1219,7 @@ export class WorkflowEditor {
         this.storageKey = DRAFT_PREFIX + committed.id; this.storageValue = localStorage.getItem(this.storageKey); localStorage.setItem(ACTIVE_KEY, committed.id);
       }
       if (localStorage.getItem(this.storageKey || STORAGE_KEY) !== this.storageValue) { this.storageConflict = true; this.renderRecovery(); this.renderHeader(); return false; }
-      document = validateDocument(committed);
+      document = this.persistenceDocument(committed);
       const raw = JSON.stringify({ version: 1, document, ui: { ...this.settings, canvasSize: this.canvasSize || null }, savedAt: new Date().toISOString() });
       if (new Blob([raw]).size > MAX_FILE_BYTES) throw new Error('草稿过大');
       localStorage.setItem(this.storageKey || STORAGE_KEY, raw); this.storageValue = raw; this.unsaved = false; this.saveError = ''; this.renderHeader(); return true;

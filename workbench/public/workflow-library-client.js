@@ -3,8 +3,8 @@ import { createDocument, validateDocument } from '../shared/workflow/workflow-mo
 const ACK_KEY = 'workbench.workflow-library-ack.v1';
 const DRAFT_PREFIX = 'workbench.workflow-document.v1:';
 const copy = value => structuredClone(value);
-const signature = document => JSON.stringify(document);
-const content = document => JSON.stringify({ ...document, viewport: null });
+const signature = document => JSON.stringify({ ...validateDocument(document), viewport: null });
+const content = signature;
 const unwrap = value => value?.workflow || value;
 const lifecycle = record => record?.lifecycle === 'archived' ? 'trashed' : ['active', 'trashed', 'deleted'].includes(record?.lifecycle) ? record.lifecycle : 'active';
 
@@ -25,6 +25,7 @@ export class WorkflowLibraryClient {
     return this.slots.get(id);
   }
   documentId() { return this.editor.documentLoaded === false ? null : this.editor.nodeLibrary?.rootDocument?.id || this.editor.doc?.id || null; }
+  persistenceDocument(document) { return this.editor.persistenceDocument?.(document) || validateDocument(document); }
   unload({ preserveNavigation = false } = {}) {
     const changed = this.currentId !== null || this.editor.documentLoaded !== false;
     this.unloadEpoch++;
@@ -92,6 +93,7 @@ export class WorkflowLibraryClient {
   queue(document) {
     if (this.suppressed || this.editor.documentLoaded === false || !document?.id) return;
     if (this.editor.nodeLibrary?.nested && document.id !== this.documentId()) return;
+    document = this.persistenceDocument(document);
     const slot = this.slot(document.id), next = signature(document);
     if (slot.lifecycle !== 'active' || slot.refreshRequired || (this.editor.doc.id === document.id && this.editor.libraryLifecycle && this.editor.libraryLifecycle !== 'active')) { slot.queued = null; this.status(); return; }
     this.currentId = document.id;
@@ -173,6 +175,7 @@ export class WorkflowLibraryClient {
       this.adopt(record); this.slot(record.id).wasInactive = true;
       return null;
     }
+    document = this.persistenceDocument(document);
     if (!record || record.origin === 'history' || content(record.document) === content(document) || acknowledgement === record.revision) {
       if (record) this.adopt(record);
       if (!record || record.origin === 'history' || signature(record.document) !== signature(document)) {
@@ -198,7 +201,7 @@ export class WorkflowLibraryClient {
   }
   async create() {
     await this.initialize();
-    const document = createDocument({ title: '新工作流', schemaVersion: 2 });
+    const document = this.persistenceDocument(createDocument({ title: '新工作流', schemaVersion: 2 }));
     this.slot(document.id).queued = document; await this.flush(document.id);
     return document.id;
   }
@@ -207,9 +210,9 @@ export class WorkflowLibraryClient {
     this.editor.nodeLibrary?.cancelNestedForExternalChange?.();
     this.editor.cancelGesture(); this.editor.cancelConnection();
     const slot = this.slot(this.editor.doc.id);
-    if (slot.lifecycle === 'active' && !slot.refreshRequired && this.editor.persist() === false) {
+    if (slot.lifecycle === 'active' && !slot.refreshRequired && (this.editor.unsaved !== false || this.editor.titleDraft) && this.editor.persist() === false) {
       const slot = this.slot(this.editor.doc.id);
-      slot.queued = copy(this.editor.doc); slot.error ||= '本地缓存尚未确认，当前编辑已保留，请保存或导出。';
+      slot.queued = this.persistenceDocument(this.editor.doc); slot.error ||= '本地缓存尚未确认，当前编辑已保留，请保存或导出。';
     }
     this.states.set(this.editor.doc.id, this.editor.captureDocumentState());
   }
@@ -255,7 +258,7 @@ export class WorkflowLibraryClient {
           this.use(record.document, undefined, { persist: false }); return true;
         }
         if (local.queued && local.error) { this.use(copy(local.queued), this.states.get(id)); return true; }
-        if (same && record && record.revision === local.revision) { this.status(); return true; }
+        if (same && record && record.revision === local.revision) { this.editor.requestDocumentFit?.(); this.status(); return true; }
         const cached = same ? copy(this.editor.doc) : this.cached(id);
         const document = cached ? await this.reconcile(cached, record, acknowledgement) : this.adopt(record).document;
         if (generation !== this.generation) return false;

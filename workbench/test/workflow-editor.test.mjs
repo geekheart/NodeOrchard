@@ -529,7 +529,7 @@ test('duplicating only an approval gate clears its now-unconnected external retr
   assert.equal(instance.doc.nodes.find(node => instance.selection.has(node.id)).config.reviewTargetNodeId, ''); assert.equal(instance.doc.nodes.find(node => node.id === 'gate').config.reviewTargetNodeId, 'producer'); assert.match(message, /1 个.*外部审核.*已清空/);
 });
 
-test('autosave writes committed node and pan snapshots, and cancellation matches durable state', t => {
+test('autosave excludes node and pan previews and stores only the fitted committed document', t => {
   const raw = storage(t);
   for (const kind of ['nodes', 'pan']) {
     const instance = editor();
@@ -542,10 +542,12 @@ test('autosave writes committed node and pan snapshots, and cancellation matches
     else instance.doc.viewport = { x: 520, y: -240, zoom: 1 };
 
     assert.equal(instance.persist(), true, 'the pending autosave may finish during a gesture');
-    assert.deepEqual(JSON.parse(raw()).document, before, 'preview movement must not become durable');
+    const stored = JSON.parse(raw()).document;
+    assert.deepEqual(stored, editor(before).persistenceDocument(), 'preview movement must not become durable');
     instance.cancelGesture();
     assert.equal(instance.gesture, null);
-    assert.deepEqual(instance.doc, JSON.parse(raw()).document, 'Escape/blur cancellation agrees with storage');
+    assert.deepEqual(instance.doc, before, 'Escape/blur keeps the original content and live camera');
+    assert.deepEqual(instance.doc.nodes, stored.nodes);
   }
 });
 
@@ -682,6 +684,30 @@ test('zoom keeps the world point under the pointer fixed with an offset canvas',
   const after = instance.worldPoint(client.x, client.y);
   assert.ok(Math.abs(after.x - before.x) < 1e-9);
   assert.ok(Math.abs(after.y - before.y) < 1e-9);
+});
+
+test('canvas pan, zoom, fit and resize change only the live view without scheduling a save or marking content dirty', () => {
+  const instance = editor(), nodes = structuredClone(instance.doc.nodes); let saves = 0, width = 1200;
+  instance.unsaved = false; instance.scheduleSave = () => { saves++; instance.unsaved = true; };
+  instance.requestGeometry = () => {}; instance.canvas.getBoundingClientRect = () => ({ left: 137, top: 59, width, height: 800 });
+  instance.zoomAt(.7, 500, 300);
+  instance.gesture = { kind: 'pan', pointerId: 7, dragged: true, viewport: structuredClone(instance.doc.viewport) };
+  instance.doc.viewport.x += 220; instance.onPointerUp({ pointerId: 7 });
+  instance.fit(); width = 900; instance.onCanvasResize();
+  assert.equal(saves, 0); assert.equal(instance.unsaved, false); assert.equal(instance.history.length, 0);
+  assert.deepEqual(instance.doc.nodes, nodes);
+});
+
+test('content persistence stores a fitted viewport while retaining the live manual view and actual node positions', t => {
+  const values = new Map(); globalValue(t, 'localStorage', { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) });
+  const instance = editor(documentWith('input', { x: 1900, y: 1300 })), expected = editor(structuredClone(instance.doc));
+  expected.fit(); instance.doc.viewport = { x: 7000, y: -4000, zoom: .3 };
+  const before = structuredClone(instance.doc); let published;
+  instance.onPersist = document => { published = document; };
+  assert.equal(instance.persist(), true);
+  const stored = JSON.parse(values.get(instance.storageKey)).document;
+  assert.deepEqual(stored.viewport, expected.doc.viewport); assert.deepEqual(stored.nodes, before.nodes);
+  assert.deepEqual(published, stored); assert.deepEqual(instance.doc, before);
 });
 
 test('Save works from a text field while its Undo remains native and gesture shortcuts stay paused', t => {
@@ -900,8 +926,8 @@ test('canvas panel resize preserves the centre world point, user zoom and diagra
   const centre = () => ({ x: (width / 2 - instance.doc.viewport.x) / instance.doc.viewport.zoom, y: (height / 2 - instance.doc.viewport.y) / instance.doc.viewport.zoom });
   const before = structuredClone(instance.doc.viewport), anchor = centre(); instance.onCanvasResize(); assert.deepEqual(instance.doc.viewport, before, 'first measurement only records the canvas size');
   width = 920; height = 280; instance.onCanvasResize(); assert.deepEqual(centre(), anchor); assert.equal(instance.doc.viewport.zoom, .75); assert.deepEqual(instance.doc.nodes, nodes); assert.equal(instance.history.length, 0);
-  width = 1200; height = 700; instance.onCanvasResize(); assert.deepEqual(instance.doc.viewport, before); assert.equal(saved, 2);
-  instance.onCanvasResize(); assert.equal(saved, 2, 'unchanged dimensions do not create repeated saves');
+  width = 1200; height = 700; instance.onCanvasResize(); assert.deepEqual(instance.doc.viewport, before); assert.equal(saved, 0);
+  instance.onCanvasResize(); assert.equal(saved, 0, 'viewport changes never schedule content saves');
 });
 
 test('hidden canvas measurements are ignored and gesture camera baselines survive a resize', () => {
@@ -921,22 +947,37 @@ test('explicit fit at the new canvas size is not shifted again by a queued resiz
   instance.onCanvasResize(); height = 280; instance.fit(); const fitted = structuredClone(instance.doc.viewport); instance.onCanvasResize(); assert.deepEqual(instance.doc.viewport, fitted);
 });
 
-test('persisted canvas dimensions compensate the first restored layout and later panel expansion', t => {
+test('restored workflows fit once at the first visible canvas without saving or changing node positions', t => {
   const raw = storage(t), original = editor(); original.doc.viewport = { x: 776, y: 130, zoom: 1.25 }; original.canvasSize = { width: 1420, height: 568.875 }; const before = structuredClone(original.doc);
   assert.equal(original.persist(), true); const record = JSON.parse(raw()); assert.deepEqual(record.ui.canvasSize, original.canvasSize); assert.equal(Object.hasOwn(record.document, 'canvasSize'), false, 'viewport size is local UI metadata rather than graph schema');
-  const restored = editor(); restored.restore(); assert.deepEqual(restored.canvasSize, original.canvasSize); assert.deepEqual(restored.doc, before);
+  const restored = editor(); restored.restore(); assert.deepEqual(restored.canvasSize, original.canvasSize); assert.deepEqual(restored.doc, record.document); assert.deepEqual(original.doc, before);
   let width = 1420, height = 0; restored.canvas.getBoundingClientRect = () => ({ width, height }); restored.requestGeometry = () => {};
-  const anchor = { x: (original.canvasSize.width / 2 - before.viewport.x) / before.viewport.zoom, y: (original.canvasSize.height / 2 - before.viewport.y) / before.viewport.zoom };
-  restored.onCanvasResize(); assert.deepEqual(restored.canvasSize, original.canvasSize, 'hidden initial page retains the saved size');
-  width = 1280; height = 1080; restored.onCanvasResize(); assert.equal((width / 2 - restored.doc.viewport.x) / restored.doc.viewport.zoom, anchor.x); assert.equal((height / 2 - restored.doc.viewport.y) / restored.doc.viewport.zoom, anchor.y);
-  width = 1420; height = 568.875; restored.onCanvasResize(); assert.deepEqual(restored.doc.viewport, before.viewport); assert.deepEqual(restored.doc.nodes, before.nodes); assert.equal(restored.history.length, 0);
+  const savedRaw = raw(); let saves = 0; restored.scheduleSave = () => saves++;
+  restored.onCanvasResize(); assert.deepEqual(restored.canvasSize, original.canvasSize, 'hidden initial page retains the saved size'); assert.equal(restored.pendingFitDocumentId, restored.doc.id);
+  width = 1280; height = 1080; const fitted = restored.fitGeometry().viewport; restored.onCanvasResize(); assert.deepEqual(restored.doc.viewport, fitted); assert.equal(restored.pendingFitDocumentId, null);
+  const anchor = { x: (width / 2 - fitted.x) / fitted.zoom, y: (height / 2 - fitted.y) / fitted.zoom };
+  width = 1420; height = 568.875; restored.onCanvasResize(); assert.equal((width / 2 - restored.doc.viewport.x) / restored.doc.viewport.zoom, anchor.x); assert.equal((height / 2 - restored.doc.viewport.y) / restored.doc.viewport.zoom, anchor.y); assert.deepEqual(restored.doc.nodes, before.nodes); assert.equal(restored.history.length, 0); assert.equal(saves, 0); assert.equal(raw(), savedRaw);
 });
 
-test('legacy or invalid saved canvas sizes leave the first nonzero restored viewport unchanged', t => {
+test('legacy or invalid saved canvas sizes still fit the first visible restored canvas', t => {
   const raw = storage(t), before = documentWith(); before.viewport = { x: 250, y: 135, zoom: .8 };
   for (const canvasSize of [undefined, null, { width: 0, height: 500 }, { width: '1000', height: 500 }]) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, document: before, ui: { canvasSize } }));
-    const restored = editor(); restored.restore(); restored.canvas.getBoundingClientRect = () => ({ width: 1200, height: 1080 }); restored.requestGeometry = () => {}; restored.onCanvasResize();
-    assert.deepEqual(restored.doc.viewport, before.viewport); assert.deepEqual(restored.canvasSize, { width: 1200, height: 1080 }); assert.equal(restored.corruptDraft, null); assert.ok(raw());
+    const restored = editor(); restored.restore(); restored.canvas.getBoundingClientRect = () => ({ width: 1200, height: 1080 }); restored.requestGeometry = () => {}; const fitted = restored.fitGeometry().viewport, savedRaw = raw(); restored.onCanvasResize();
+    assert.deepEqual(restored.doc.viewport, fitted); assert.deepEqual(restored.doc.nodes, before.nodes); assert.deepEqual(restored.canvasSize, { width: 1200, height: 1080 }); assert.equal(restored.corruptDraft, null); assert.equal(raw(), savedRaw);
   }
+});
+
+test('document fit waits for an active visible edit canvas and preserves manual views until explicitly reopened', () => {
+  const instance = editor(); let width = 0, frames = 0, saves = 0;
+  instance.doc.viewport = { x: 9000, y: -6000, zoom: .3 }; instance.unsaved = false;
+  instance.canvas.getBoundingClientRect = () => ({ width, height: 700 }); instance.requestGeometry = () => frames++; instance.scheduleSave = () => saves++;
+  instance.requestDocumentFit(); assert.equal(frames, 1); assert.equal(instance.consumeDocumentFit(), false);
+  width = 1200; instance.active = false; assert.equal(instance.consumeDocumentFit(), false);
+  instance.active = true; instance.studio = { view: 'run' }; assert.equal(instance.consumeDocumentFit(), false);
+  instance.studio.view = 'edit'; assert.equal(instance.consumeDocumentFit(), true); assert.equal(instance.pendingFitDocumentId, null);
+  const fitted = structuredClone(instance.doc.viewport); instance.doc.viewport = { x: -250, y: 190, zoom: 1.2 };
+  assert.equal(instance.consumeDocumentFit(), false); assert.deepEqual(instance.doc.viewport, { x: -250, y: 190, zoom: 1.2 });
+  instance.requestDocumentFit(); assert.equal(instance.consumeDocumentFit(), true); assert.deepEqual(instance.doc.viewport, fitted);
+  assert.equal(saves, 0); assert.equal(instance.unsaved, false);
 });
