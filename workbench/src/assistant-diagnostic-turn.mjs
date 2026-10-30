@@ -8,6 +8,8 @@ export const ASSISTANT_DIAGNOSTIC_LIMITS = Object.freeze({ batchQueries: 4, tool
 const STATIC = new Set(['node.describe', 'app.capabilities', 'assistant.skills.list', 'assistant.skills.read']);
 const REUSABLE = new Set([...STATIC, 'workflow.inspect', 'workflow.run', 'session.history', 'tools.catalog', 'runtime.inspect']);
 const terminal = status => ['complete', 'completed', 'error', 'interrupted', 'cancelled', 'blocked', 'skipped'].includes(status);
+export const completedStaticCodeCheck = (tool, value) => tool === 'runtime.code.check' && value?.analysisOnly === true
+  && value.executed === false && ['valid', 'invalid'].includes(value.status) && typeof value.body?.valid === 'boolean';
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 export const diagnosticRequestKey = (tool, args) => hash([tool, canonical(args)]);
@@ -162,7 +164,7 @@ export class AssistantDiagnosticTurn {
   }
   record(tool, args, value, { cached = false, key, collectedAt, cacheable = true } = {}) {
     const at = now(), result = safe(value);
-    const failed = value?.executed === false && value?.proposed !== true;
+    const failed = value?.executed === false && value?.proposed !== true && !completedStaticCodeCheck(tool, value);
     const uncertain = ['unknown', 'partial'].includes(value?.status);
     const step = this.steps.at(-1);
     if (failed && step?.status === 'running') { step.status = 'error'; step.completedAt = at; step.elapsedMs = Date.now() - Date.parse(step.startedAt);
@@ -175,7 +177,7 @@ export class AssistantDiagnosticTurn {
       this.state.mutationReceipts = [...(this.state.mutationReceipts || []).filter(item => item.operationId !== receipt.operationId), receipt].slice(-8);
     }
     if (!cacheable || uncertain) this.observations.push(row);
-    else if (!cached && value?.executed !== false && result?.available !== false && !result?.restricted && !result?.partial) this.cache.set(key, row);
+    else if (!cached && (value?.executed !== false || completedStaticCodeCheck(tool, value)) && result?.available !== false && !result?.restricted && !result?.partial) this.cache.set(key, row);
     this.publish(); return result;
   }
   transcript() { return [...this.cache.values(), ...this.observations].map(({ tool, arguments: args, result, collectedAt, restored }) => ({ tool, arguments: args,

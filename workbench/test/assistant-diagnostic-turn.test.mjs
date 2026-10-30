@@ -60,3 +60,14 @@ test('a changed current draft invalidates an older checkpoint even before target
   const before = evidence(), after = evidence(); after.workflow.document.nodes[0].config.defaultValue = 'changed by user';
   assert.deepEqual(resume('workflow.inspect', { workflowId: document.id }, before.workflow, { current: after, savedScope: scope(before) }), []);
 });
+
+test('analysis-only code checks complete as observations while keeping user code unexecuted', () => {
+  const turn = new AssistantDiagnosticTurn({ scope: 'static-fixture' }), args = { workflowId: document.id, nodeId: 'code' };
+  turn.phase('tool-read', '检查语法');
+  const result = { analysisOnly: true, executed: false, status: 'invalid', body: { valid: false, error: { type: 'SyntaxError' } } };
+  turn.record('runtime.code.check', args, result, { key: diagnosticRequestKey('runtime.code.check', args) });
+  assert.equal(turn.evidence[0].status, 'complete'); assert.equal(turn.transcript()[0].result.executed, false);
+  assert.deepEqual(resume('runtime.code.check', args, result), [], 'static results never restore across turns');
+  turn.record('runtime.code.check', args, { error: 'validator unavailable', executed: false }, { key: 'failed' });
+  assert.equal(turn.evidence[1].status, 'error');
+});
