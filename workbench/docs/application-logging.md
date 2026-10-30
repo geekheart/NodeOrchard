@@ -28,6 +28,8 @@ Skill 创建、提供商选择及删除通过 `skill.integration.*` 记录操作
 
 助手模型新增 `assistant.model.state` 事件，保存会话身份、阶段、调用总耗时、等待／输出耗时、字符数量和超时分类；流块不逐块持久。对应 `application_model_calls` 保存数字调用快照，供按归属聚合诊断，旧快照的 running 不证明重启后仍在执行。`assistant.probe.started/completed/failed` 记录固定短探测结果；不保存探测正文。`assistant.turn.state.durationMs` 为轮次时长，原 `elapsedMs` 为进度观察值，不能用最后阶段耗时推算全轮。
 
+独立会话升级总控记录 `conversation.escalation.*` 的登记、权限阻塞、启动、未知和中断阶段，仅保存来源工作流／轮次、操作／总控主题ID和状态；摘要、软件路径、代码、权限值及子模型正文不入通用日志。升级详情在私有记录和只读子会话中保存，原聊天只取得受控结论。软件与静态检查复用现有助手工具阶段记录，不把“没有执行业务”误标为检查失败。
+
 Hermes 子进程启动记录 `hermes.proxy.environment`，仅含 `component: hermes`、固定枚举 `source/status/code` 与协议数量 `count`。它区分显式环境保留、系统静态代理采用及未采用原因，不保存代理地址、绕过列表、PAC 内容或凭据。该记录说明启动环境的来源，不证明网络、认证或模型任务成功；继承规则见[代理继承](hermes-protocol.md#代理继承)。
 
 ## 全局助手读取

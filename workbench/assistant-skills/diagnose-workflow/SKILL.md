@@ -32,6 +32,12 @@ Hermes重试：目录声明 `component` 时，用 `codex-stream` 搜索 `max_str
 
 完成标准：结论对应具体运行、节点、版本和证据，区分事实与推测，并说明下一步可以验证什么。读取失败应报告工具给出的原因；不让用户补贴仍可通过现有工具读取的日志。提出方案不代表已经修复或重跑。
 
+软件故障用 `runtime.software.inspect`分别核对发现、可执行、PATH与版本启动；`verifyLaunch:true`只在临时HOME跑固定版本命令。macOS已发现但PATH不可见时，用返回的可执行路径准备候选。失败分类不证明责任方，探测环境与业务兼容分别说明。
+
+Python用 `runtime.code.check`绑定节点，旧运行另带 `runId`；按SHA与来源区分冻结代码和当前草稿。真实AST包装保持字符串，`pythonScriptVariables`只填明确的Python子脚本变量；文本不作脚本，模板检查不执行replace，动态内容保持未知。语法通过不证明依赖、启动或产物正确。实现入口为 `python/workflow_code_validation.py`、`python/workflow_code_worker.py`，读取沿用本轮权限。
+
+独立助手缺全局证据时，在本轮排错请求下用 `conversation.escalate`提交已查摘要和本流程身份。`start:false`登记，`start:true`启动一次有模型用量的总控只读诊断；原聊天用 `conversation.escalation`按需读进度／结论，新轮可查最近任务，无需用户贴ID。blocked说明具体缺少的人工读取权限；停止或重启不重放。子诊断锁定来源业务对象，保留获准软件日志／源码只读，禁止写入或反向委派。诊断完成后仍由原会话生成候选、人工应用和明确运行。完整边界见 `docs/application-diagnostics.md` 的“软件与脚本诊断”。
+
 实验源码修复仅按已开放工具使用 `repair-application`。
 
 权限不足时说明具体缺少的能力及设置入口，由用户调整；助手不能修改权限设置。运行、会话、产物归属和工作文件夹限制继续有效，不能通过其它目标 ID、截图代理或业务代码取得被拒绝的内容。软件日志仅在总控目录实际广告对应工具时读取。

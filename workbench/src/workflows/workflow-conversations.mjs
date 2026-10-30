@@ -730,7 +730,11 @@ export class WorkflowConversations {
     if (this.mutations.has(key)) fail('此回复正在处理中，请稍候。', 409);
     const { turn, privateValue } = this.readTurn(workflowId, turnId);
     if (privateValue.readOnly && !['interrupt-turn', 'dismiss-turn'].includes(input.action)) fail('只读委派没有运行、审核、学习或应用修改的权限。', 403);
-    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return this.response(workflowId, turn); }
+    if (input.action === 'interrupt-turn') {
+      this.active.get(turnId)?.abort();
+      await this.app.applicationAssistant?.hub?.interruptEscalations?.(workflowId, turnId);
+      return this.response(workflowId, turn);
+    }
     if (input.action === 'dismiss-turn') {
       if (turn.status === 'dismissed') return this.response(workflowId, turn);
       if (!['proposed', 'error', 'interrupted', 'awaiting_action'].includes(turn.status)) fail('只能结束尚未解决的建议或失败事项。', 409);

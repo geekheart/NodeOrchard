@@ -14,10 +14,10 @@ const EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.tsx', '.jsx', '.py',
 const PROTECTED = new Set([
   'agents.md', 'context.md', 'workbench/package.json', 'workbench/package-lock.json',
   ...['application.mjs', 'server.mjs', 'main.mjs', 'store.mjs', 'config.mjs', 'assistant-permission-settings.mjs', 'application-assistant-permissions.mjs',
-    'application-assistant.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-runtime-sources.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
+    'application-assistant.mjs', 'application-conversation-hub.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-runtime-sources.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),
   ...['assistant-permissions-ui.js', 'source-repair-ui.js', 'app.js'].map(name => 'workbench/public/' + name),
   ...['application-source-repairs.test.mjs', 'application-source-tools.test.mjs', 'application-runtime-sources.test.mjs', 'source-repair-ui.test.mjs', 'assistant-permission-settings.test.mjs',
-    'application-assistant-permissions.test.mjs', 'assistant-permissions-ui.test.mjs'].map(name => 'workbench/test/' + name),
+    'application-assistant-permissions.test.mjs', 'application-conversation-hub.test.mjs', 'application-diagnostic-escalation.test.mjs', 'assistant-permissions-ui.test.mjs'].map(name => 'workbench/test/' + name),
 ]);
 const own = (value, key) => Object.hasOwn(value, key);
 const hash = value => 'sha256:' + createHash('sha256').update(value).digest('hex');

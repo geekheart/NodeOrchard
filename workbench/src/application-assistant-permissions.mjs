@@ -11,10 +11,10 @@ export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
   workflow: Object.freeze({ ...DEFAULT_WORKFLOW }),
   supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRead: false, sourceRepair: false, modelExperiment: false }),
 });
-const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
-const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect']);
+const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
+const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect', 'runtime.code.check']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
-const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate']);
+const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate', 'conversation.escalate', 'conversation.escalation']);
 const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.search', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
 const SOURCE_READ = new Set(['app.source.list', 'app.source.read', 'app.source.search']);
 const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment']);
@@ -66,15 +66,16 @@ export class ApplicationAssistantPermissions {
   constructor(app, { readSettings = () => app.assistantPermissionSettings?.get?.() } = {}) {
     this.app = app; this.readSettings = readSettings; this.scopes = new WeakSet();
   }
-  async bind({ role, workflowId, document, readOnly = false } = {}) {
+  async bind({ role, workflowId, document, readOnly = false, workflowBound = false } = {}) {
     if (!['workflow', 'supervisor'].includes(role)) fail('助手角色必须由服务端明确绑定。');
     if (workflowId !== undefined && !id(workflowId)) fail('助手工作流范围无效。', 400);
     if (role === 'workflow' && !workflowId) fail('独立会话必须绑定当前工作流。');
     if (document && document.id !== workflowId) fail('助手草稿与当前工作流不一致。', 409);
+    if (typeof workflowBound !== 'boolean' || workflowBound && (role !== 'supervisor' || !readOnly || !workflowId)) fail('来源绑定诊断范围无效。', 403);
     const settings = settingsValue(await this.readSettings());
-    const actual = await workingFolder(this.app, role === 'workflow' ? workflowId : undefined);
+    const actual = await workingFolder(this.app, role === 'workflow' || workflowBound ? workflowId : undefined);
     if (typeof readOnly !== 'boolean') fail('助手诊断模式无效。');
-    const scope = Object.freeze({ role, readOnly, workflowId: workflowId || null, workingFolder: actual,
+    const scope = Object.freeze({ role, readOnly, workflowBound, workflowId: workflowId || null, workingFolder: actual,
       revision: settings.revision, permissions: Object.freeze(settings[role]), baseDocument: document ? structuredClone(document) : null });
     this.scopes.add(scope); return scope;
   }
@@ -86,7 +87,7 @@ export class ApplicationAssistantPermissions {
     this.check(scope);
     const settings = settingsValue(await this.readSettings());
     if (settings.revision !== scope.revision || JSON.stringify(settings[scope.role]) !== JSON.stringify(scope.permissions)) fail('助手权限已变化，请重新发送消息。', 409);
-    if (await workingFolder(this.app, scope.role === 'workflow' ? scope.workflowId : undefined) !== scope.workingFolder) fail('助手工作文件夹已变化，请重新发送消息。', 409);
+    if (await workingFolder(this.app, scope.role === 'workflow' || scope.workflowBound ? scope.workflowId : undefined) !== scope.workingFolder) fail('助手工作文件夹已变化，请重新发送消息。', 409);
     return scope;
   }
   allowed(name, scope) {
@@ -95,6 +96,9 @@ export class ApplicationAssistantPermissions {
     if (SOURCE_READ.has(name)) return scope.role === 'supervisor' && (p.sourceRead === true || p.sourceRepair === true);
     if (SOURCE.has(name)) return scope.role === 'supervisor' && p.sourceRepair === true && !scope.readOnly;
     if (name === 'assistant.experiment') return scope.role === 'supervisor' && p.modelExperiment === true && p.workflowRead && p.appLogs && !scope.readOnly;
+    if (name === 'conversation.escalate') return scope.role === 'workflow' && p.workflowRead && !scope.readOnly;
+    if (name === 'conversation.escalation') return scope.role === 'workflow' && p.workflowRead;
+    if (scope.workflowBound && CONVERSATIONS.has(name)) return false;
     if (scope.readOnly && (MANAGE.has(name) || ['workflow.propose', 'conversation.delegate', 'assistant.probe'].includes(name))) return false;
     if (CONVERSATIONS.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.crossWorkflowRead
       && (name !== 'conversation.delegate' || p.manageWorkflows);
@@ -136,7 +140,7 @@ export class ApplicationAssistantPermissions {
   }
   workflow(workflowId, scope) {
     if (!id(workflowId)) fail('必须明确有效的工作流范围。', 400);
-    if (scope.role === 'workflow' || !scope.permissions.crossWorkflowRead) {
+    if (scope.role === 'workflow' || scope.workflowBound || !scope.permissions.crossWorkflowRead) {
       if (!scope.workflowId || workflowId !== scope.workflowId) fail('此助手只能访问当前工作流。');
     }
     return workflowId;
@@ -155,7 +159,7 @@ export class ApplicationAssistantPermissions {
   }
   session(sessionId, scope) {
     if (!id(sessionId)) fail('会话编号无效。', 400);
-    if (scope.role === 'supervisor' && scope.permissions.crossWorkflowRead) return;
+    if (scope.role === 'supervisor' && scope.permissions.crossWorkflowRead && !scope.workflowBound) return;
     const db = this.app.store?.db;
     let owners;
     if (db?.prepare && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_runs'").get()) {
@@ -213,15 +217,15 @@ export class ApplicationAssistantPermissions {
     if (!this.allowed(name, scope)) fail('当前助手权限未开放此工具。');
     if (!args || typeof args !== 'object' || Array.isArray(args) || ![Object.prototype, null].includes(Object.getPrototypeOf(args))
       || Object.getOwnPropertySymbols(args).length || Object.entries(Object.getOwnPropertyDescriptors(args))
-        .some(([key, field]) => ['__proto__', 'constructor', 'prototype', 'role', 'permissions', 'permissionScope', 'workingFolder'].includes(key) || !Object.hasOwn(field, 'value'))) fail('助手工具参数包含不受信任的权限或访问器。', 400);
+        .some(([key, field]) => ['__proto__', 'constructor', 'prototype', 'role', 'permissions', 'permissionScope', 'workingFolder', 'workflowBound'].includes(key) || !Object.hasOwn(field, 'value'))) fail('助手工具参数包含不受信任的权限或访问器。', 400);
     args = { ...args }; context = { ...context, role: scope.role, permissionScope: scope };
-    const scoped = scope.role === 'workflow' || !scope.permissions.crossWorkflowRead;
+    const scoped = scope.role === 'workflow' || scope.workflowBound || !scope.permissions.crossWorkflowRead;
     if (scoped) {
-      if (scope.role === 'workflow' && ['assistant.diagnose', 'assistant.trace'].includes(name) && args.conversationId) fail('当前工作流助手不能读取总控会话。');
+      if ((scope.role === 'workflow' || scope.workflowBound) && ['assistant.diagnose', 'assistant.trace'].includes(name) && args.conversationId) fail('当前工作流助手不能读取总控会话。');
       if (context.workflowId && context.workflowId !== scope.workflowId || context.document && context.document.id !== scope.workflowId) fail('调用上下文越过当前工作流。');
       if (args.workflowId) this.workflow(args.workflowId, scope);
       context.workflowId = scope.workflowId;
-      if (['workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect'].includes(name)) args.workflowId = scope.workflowId;
+      if (['workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'workflow.preflight', 'workflow.propose', 'workbench.inspect', 'runtime.code.check'].includes(name)) args.workflowId = scope.workflowId;
       if (['assistant.diagnose', 'assistant.trace'].includes(name) && scope.workflowId && !args.conversationId) args.workflowId = scope.workflowId;
     }
     const runId = args.runId || (!['session.history', 'tools.catalog'].includes(name) ? context.runId : null);
@@ -253,7 +257,7 @@ export class ApplicationAssistantPermissions {
   }
   project(value, scope) {
     this.check(scope);
-    const scoped = scope.role === 'workflow' || !scope.permissions.crossWorkflowRead;
+    const scoped = scope.role === 'workflow' || scope.workflowBound || !scope.permissions.crossWorkflowRead;
     const ownedRun = run => {
       if (!run || typeof run !== 'object') return false;
       if (run.workflowId === scope.workflowId) return true;

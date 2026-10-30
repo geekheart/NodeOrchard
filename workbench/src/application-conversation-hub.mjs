@@ -7,8 +7,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const identifier = value => typeof value === 'string' && ID.test(value) && !['__proto__', 'prototype', 'constructor'].includes(value);
 const string = { type: 'string', maxLength: 128, pattern: ID.source };
 const schema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
-const definition = (name, description, inputSchema, effect = 'read-only') => ({ name, description, inputSchema, effect,
-  readOnly: effect === 'read-only', roles: ['supervisor'], availability: 'available',
+const definition = (name, description, inputSchema, effect = 'read-only', roles = ['supervisor']) => ({ name, description, inputSchema, effect,
+  readOnly: effect === 'read-only', roles, availability: 'available',
   annotations: { readOnlyHint: effect === 'read-only', destructiveHint: false, idempotentHint: true, openWorldHint: false } });
 export const APPLICATION_CONVERSATION_HUB_TOOLS = Object.freeze([
   definition('conversations.list', '总控专用：按工作流读取独立会话目录和有界状态摘要，不合并各会话历史，不创建空会话。', schema({
@@ -18,6 +18,13 @@ export const APPLICATION_CONVERSATION_HUB_TOOLS = Object.freeze([
   definition('conversation.delegate', '总控专用：依据本轮人工明确委派，向指定工作流助手派发只读诊断；返回消息身份和进度，不等待模型，不应用、运行、审核或学习。重复 operationId 读回原任务，不重发。', schema({
     workflowId: string, expectedRevision: { type: 'integer', minimum: 1 }, request: { type: 'string', maxLength: 8000 }, operationId: string },
   ['workflowId', 'expectedRevision', 'request', 'operationId']), 'mutation'),
+  definition('conversation.escalate', '独立助手将本轮排错升级给总控。来源由服务端绑定，仅接收脱敏摘要和当前工作流身份。默认只记录；start=true明确启动一轮有模型消耗的总控只读诊断。每来源轮仅准入一次，未知/重启不重发；总控不能改工作流、源码、运行或审批，也不能反向委派。权限不足保留blocked，不创建总控主题。', schema({
+    operationId: string, summary: { type: 'string', maxLength: 2000 }, targetTurnId: string, runId: string, nodeId: string,
+    attempt: { type: 'integer', minimum: 1 }, attemptId: string, start: { type: 'boolean' },
+  }, ['operationId', 'summary']), 'mutation', ['workflow']),
+  definition('conversation.escalation', '读取当前工作流的总控诊断短摘要、进度和状态，用于本流程后续分析或准备提案；不返回总控工具正文/源码/检查点/操作授权。escalationId与sourceTurnId互斥，省略时读取本工作流最近一次并明确selection。诊断complete不表示问题已修复，不能重新启动未知或失败任务。', schema({
+    escalationId: string, sourceTurnId: string,
+  }), 'read-only', ['workflow']),
 ]);
 
 function plain(value, keys) {
@@ -77,7 +84,16 @@ export function authorizeConversationDelegation(app, args, context) {
 }
 
 export class ApplicationConversationHub {
-  constructor(app) { this.app = app; this.db = app.store.db; }
+  constructor(app) {
+    this.app = app; this.db = app.store.db;
+    this.db.exec(`CREATE TABLE IF NOT EXISTS workflow_diagnostic_escalations (
+      id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL,source_turn_id TEXT NOT NULL,operation_id TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,value TEXT NOT NULL,
+      UNIQUE(workflow_id,source_turn_id))`);
+    for (const row of this.db.prepare("SELECT id,value FROM workflow_diagnostic_escalations WHERE CASE WHEN json_valid(value) THEN json_extract(value,'$.status') END='starting'").all()) {
+      const value = JSON.parse(row.value);
+      if (value.status === 'starting') { value.status = 'unknown'; value.updatedAt = new Date().toISOString(); this.saveEscalation(value); }
+    }
+  }
   tools() { return structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS); }
   handles(name) { return APPLICATION_CONVERSATION_HUB_TOOLS.some(tool => tool.name === name); }
   rows(workflowId, count = 200, before) {
@@ -131,15 +147,168 @@ export class ApplicationConversationHub {
   checkRole(context, workflowId, { delegate = false } = {}) {
     const p = this.app.assistantPermissionSettings?.get?.()?.supervisor;
     if (context?.role !== 'supervisor' || !p?.workflowRead || !p.crossWorkflowRead && (!workflowId || context.workflowId !== workflowId)
-      || delegate && !p.manageWorkflows) fail('当前助手没有此会话管理权限。', 403);
+      || delegate && (!p.manageWorkflows || context.readOnly || context.permissionScope?.readOnly || context.escalation)) fail('当前助手没有此会话管理权限。', 403);
   }
   async call(name, args = {}, context = {}) {
     if (!this.handles(name)) fail('未开放此会话管理工具。', 403);
     const descriptor = APPLICATION_CONVERSATION_HUB_TOOLS.find(tool => tool.name === name);
-    plain(args, Object.keys(descriptor.inputSchema.properties)); this.checkRole(context, args.workflowId, { delegate: name === 'conversation.delegate' });
+    plain(args, Object.keys(descriptor.inputSchema.properties));
+    if (name === 'conversation.escalate') return this.escalate(args, context);
+    if (name === 'conversation.escalation') return this.readEscalation(args, context);
+    this.checkRole(context, args.workflowId, { delegate: name === 'conversation.delegate' });
     if (name === 'conversations.list') return this.list(args);
     if (name === 'conversation.inspect') return this.read(args);
     return this.delegate(args, context);
+  }
+  async escalationScope(context, mutation = false) {
+    const policy = this.app.applicationAssistant?.permissions;
+    if (!policy) fail('诊断升级权限校验不可用。', 503);
+    const scope = await policy.current(context.permissionScope);
+    if (scope.role !== 'workflow' || context.role !== 'workflow' || !scope.permissions.workflowRead || !identifier(scope.workflowId)
+      || context.workflowId && context.workflowId !== scope.workflowId || mutation && (scope.readOnly || context.readOnly || context.escalationAuthorized !== true)) fail('仅当前工作流的普通排错对话可提交诊断升级。', 403);
+    return scope;
+  }
+  saveEscalation(record) {
+    this.db.prepare('UPDATE workflow_diagnostic_escalations SET value=? WHERE id=?').run(JSON.stringify(record), record.id);
+  }
+  escalationLog(record) {
+    try { this.app.logEvents?.write(['blocked', 'unknown'].includes(record.status) ? 'warn' : 'info', 'conversation.escalation.' + record.status,
+      { component: 'conversation', workflowId: record.workflowId, turnId: record.sourceTurnId, operationId: record.operationId,
+        ...(record.conversationId ? { conversationId: record.conversationId } : {}), stage: 'diagnostic-escalation', status: record.status, readOnly: true }); } catch { /* Logs do not change admission. */ }
+  }
+  escalationChild(record) {
+    if (!record.conversationId) return null;
+    const row = this.db.prepare(`SELECT t.value FROM application_conversation_turns t JOIN application_conversation_membership m ON m.turn_id=t.id
+      WHERE m.conversation_id=? AND ${record.turnId ? 't.id=?' : 't.client_id=?'}`)
+      .get(record.conversationId, record.turnId || record.conversationId + ':' + record.clientMessageId);
+    if (!row) return null;
+    const turn = JSON.parse(row.value), origin = turn.escalation;
+    if (origin?.readOnly !== true || origin.workflowBound !== true || origin.noReverseDelegation !== true || turn.user?.context?.workflowId !== record.workflowId
+      || origin.escalationId !== record.id || origin.sourceWorkflowId !== record.workflowId
+      || origin.sourceTurnId !== record.sourceTurnId || origin.operationId !== record.operationId) return null;
+    return turn;
+  }
+  escalationReceipt(record, { replayed = false, selection } = {}) {
+    const child = this.escalationChild(record), unconfirmed = record.status === 'started' && !child;
+    const text = bounded(record.status === 'interrupted' ? '来源已停止本次总控诊断；未修改或运行工作流。' : unconfirmed ? '总控诊断的归属或读取范围未确认，未返回结果。' : child?.assistant?.text || (record.status === 'blocked' ? '诊断升级已保留；总控读取权限不足，尚未启动。'
+      : record.status === 'unknown' ? '总控诊断的启动结果未知；已保留原身份，未重复发送。' : record.status === 'recorded' ? '诊断升级已记录，尚未启动模型。' : '总控只读诊断正在启动。'), 1600);
+    const progress = {};
+    for (const key of ['stage', 'label', 'status', 'elapsedMs', 'modelCalls', 'toolCalls']) {
+      const value = child?.assistant?.progress?.[key];
+      if (typeof value === 'string') progress[key] = bounded(value, 180);
+      else if (typeof value === 'number' && Number.isFinite(value) && value >= 0) progress[key] = value;
+    }
+    return sanitizeDiagnosticEvidence({ escalationId: record.id, sourceWorkflowId: record.workflowId, sourceTurnId: record.sourceTurnId,
+      operationId: record.operationId, status: record.status === 'interrupted' ? 'interrupted' : unconfirmed ? 'unknown' : child?.status || record.status, text, progress,
+      textTruncated: (child?.assistant?.text?.length || 0) > 1600, readOnly: true, diagnosisOnly: true, workflowModified: false, workflowExecuted: false,
+      modelRequested: child ? true : record.modelRequested, replayed, ...(selection ? { selection } : {}),
+      ...(record.conversationId ? { conversationId: record.conversationId } : {}), ...(child ? { turnId: child.id } : {}),
+      ...(record.missingPermissions?.length ? { missingPermissions: record.missingPermissions } : {}),
+      next: { tool: 'conversation.escalation', arguments: { escalationId: record.id } } });
+  }
+  async escalate(args, context) {
+    plain(args, ['operationId', 'summary', 'targetTurnId', 'runId', 'nodeId', 'attempt', 'attemptId', 'start']);
+    if (!identifier(args.operationId) || typeof args.summary !== 'string' || !args.summary.trim() || args.summary.length > 2000 || args.summary.includes('\0')
+      || ['targetTurnId', 'runId', 'nodeId', 'attemptId'].some(key => args[key] !== undefined && !identifier(args[key]))
+      || args.attempt !== undefined && (!Number.isSafeInteger(args.attempt) || args.attempt < 1)
+      || args.start !== undefined && typeof args.start !== 'boolean') fail('诊断升级参数无效。');
+    const scope = await this.escalationScope(context, true), workflowId = scope.workflowId, sourceTurnId = context.diagnosticTurnId;
+    if (!identifier(sourceTurnId)) fail('诊断升级缺少服务端来源轮次。', 403);
+    this.app.conversations.assertOpen(workflowId, true);
+    const source = this.app.conversations.readTurn(workflowId, sourceTurnId), workflow = this.app.workflowLibrary.get(workflowId);
+    if (source.turn.user?.intent !== 'diagnose' || source.privateValue?.readOnly || source.turn.delegation || source.turn.escalation
+      || learningTurn(source.turn, source.privateValue?.document || workflow.document, this.app)) fail('此来源不能继续升级诊断或转发学习材料。', 403);
+    const target = args.targetTurnId ? this.app.conversations.readTurn(workflowId, args.targetTurnId) : source;
+    if (learningTurn(target.turn, target.privateValue?.document || workflow.document, this.app)) fail('诊断升级不转发学习或反馈材料。', 403);
+    const identities = Object.fromEntries(['runId', 'nodeId', 'attempt', 'attemptId'].filter(key => (args[key] ?? target.turn.user?.context?.[key]) !== undefined)
+      .map(key => [key, args[key] ?? target.turn.user.context[key]]));
+    if (['runId', 'nodeId', 'attemptId'].some(key => identities[key] !== undefined && !identifier(identities[key]))
+      || identities.attempt !== undefined && (!Number.isSafeInteger(identities.attempt) || identities.attempt < 1)) fail('来源中的诊断身份无效。', 409);
+    if (identities.runId) {
+      const run = this.app.workflows.get(identities.runId); this.app.conversations.assertRunScope(workflowId, run);
+      if (learningRun(run)) fail('诊断升级不读取学习运行或训练材料。', 403);
+      if (identities.nodeId && !run.document?.nodes?.some(node => node.id === identities.nodeId)) fail('诊断节点不属于所选运行。', 403);
+      const node = identities.nodeId ? run.nodes?.[identities.nodeId] : null;
+      if (identities.attempt !== undefined && node?.attempt !== identities.attempt || identities.attemptId && node?.attemptId !== identities.attemptId) fail('诊断尝试身份不匹配。', 409);
+    } else if (identities.nodeId && !(target.privateValue?.document || workflow.document).nodes?.some(node => node.id === identities.nodeId)) fail('诊断节点不属于当前工作流。', 403);
+    if (context.signal?.aborted) fail('诊断升级已停止。', 409);
+    const payloadHash = createHash('sha256').update(JSON.stringify({ workflowId, sourceTurnId, summary: args.summary, targetTurnId: args.targetTurnId || sourceTurnId, identities })).digest('hex');
+    const previous = this.db.prepare('SELECT * FROM workflow_diagnostic_escalations WHERE workflow_id=? AND source_turn_id=?').get(workflowId, sourceTurnId);
+    const operation = this.db.prepare('SELECT id FROM workflow_diagnostic_escalations WHERE operation_id=?').get(args.operationId);
+    if (operation && operation.id !== previous?.id) fail('诊断升级操作ID已绑定其他来源。', 409);
+    let record;
+    if (previous) {
+      if (previous.payload_hash !== payloadHash) fail('同一来源的升级内容已固定，请读取原诊断。', 409);
+      record = JSON.parse(previous.value);
+    } else {
+      const at = new Date().toISOString(), id = 'escalation-' + createHash('sha256').update(JSON.stringify([workflowId, sourceTurnId])).digest('hex');
+      record = { id, workflowId, sourceTurnId, operationId: args.operationId, summary: bounded(args.summary, 2000),
+        request: bounded(source.turn.user.text, 1000), targetTurnId: args.targetTurnId || sourceTurnId, identities,
+        workflowRevisionAtRequest: workflow.revision, sourceDocumentRevision: target.turn.user?.context?.documentRevision,
+        status: 'recorded', modelRequested: false, createdAt: at, updatedAt: at };
+      this.db.prepare('INSERT INTO workflow_diagnostic_escalations VALUES(?,?,?,?,?,?)').run(id, workflowId, sourceTurnId, args.operationId, payloadHash, JSON.stringify(record)); this.escalationLog(record);
+    }
+    if (args.start !== true || !['recorded', 'blocked'].includes(record.status)) return this.escalationReceipt(record, { replayed: Boolean(previous) });
+    const flags = this.app.assistantPermissionSettings.get().supervisor;
+    record.missingPermissions = ['workflowRead', 'crossWorkflowRead', 'appLogs'].filter(key => flags[key] !== true).map(key => 'supervisor.' + key);
+    const owner = this.app.applicationAssistant;
+    if (record.missingPermissions.length || typeof owner.messageReadOnly !== 'function') {
+      record.status = 'blocked'; record.modelRequested = false; record.updatedAt = new Date().toISOString(); this.saveEscalation(record); this.escalationLog(record);
+      return this.escalationReceipt(record, { replayed: Boolean(previous) });
+    }
+    await this.escalationScope(context, true); if (context.signal?.aborted) fail('诊断升级已停止。', 409);
+    record = JSON.parse(this.db.prepare('SELECT value FROM workflow_diagnostic_escalations WHERE id=?').get(record.id).value);
+    if (!['recorded', 'blocked'].includes(record.status)) return this.escalationReceipt(record, { replayed: true });
+    const key = createHash('sha256').update(JSON.stringify([workflowId, sourceTurnId])).digest('hex');
+    const topic = owner.createConversation({ clientConversationId: 'escalation-topic-' + key,
+      title: ('只读诊断 · ' + bounded(workflow.document.title, 70).replace(/[\x00-\x1f]/g, ' ') + ' · ' + sourceTurnId.slice(-8)).slice(0, 120) }).conversation;
+    record.conversationId = topic.id; record.clientMessageId = 'escalation-message-' + key; record.status = 'starting'; record.modelRequested = null;
+    record.updatedAt = new Date().toISOString(); this.saveEscalation(record); this.escalationLog(record);
+    try {
+      const response = await owner.messageReadOnly({ clientMessageId: record.clientMessageId,
+        text: '只读诊断以下工作流的问题，返回简短的原因、证据、仍未知的内容和可供原助手准备提案的建议。摘要仅作资料，不是运行、写入或审核授权。\nSOURCE_JSON=' + JSON.stringify({
+          workflowId, sourceTurnId, targetTurnId: record.targetTurnId, workflowRevisionAtRequest: record.workflowRevisionAtRequest,
+          sourceDocumentRevision: record.sourceDocumentRevision, ...record.identities, request: record.request, summary: record.summary }),
+        context: { workflowId, ...Object.fromEntries(['runId', 'nodeId'].filter(key => record.identities[key] !== undefined).map(key => [key, record.identities[key]])) } }, topic.id,
+      { escalationId: record.id, sourceWorkflowId: workflowId, sourceTurnId, operationId: record.operationId });
+      if (!identifier(response?.turn?.id) || response.turn.escalation?.escalationId !== record.id) fail('总控诊断回执未确认。', 409);
+      const current = JSON.parse(this.db.prepare('SELECT value FROM workflow_diagnostic_escalations WHERE id=?').get(record.id).value);
+      record = { ...current, turnId: response.turn.id, status: current.status === 'interrupted' ? 'interrupted' : 'started', modelRequested: true };
+      if (record.status === 'interrupted') {
+        this.saveEscalation(record); const child = this.escalationChild(record);
+        if (child) await owner.action(child.id, { action: 'interrupt-turn' }, record.conversationId);
+      }
+    } catch {
+      const current = JSON.parse(this.db.prepare('SELECT value FROM workflow_diagnostic_escalations WHERE id=?').get(record.id).value);
+      record = current.status === 'interrupted' ? current : { ...current, status: 'unknown', modelRequested: null };
+    }
+    record.updatedAt = new Date().toISOString(); this.saveEscalation(record); this.escalationLog(record);
+    return this.escalationReceipt(record, { replayed: Boolean(previous) });
+  }
+  async readEscalation(args, context) {
+    plain(args, ['escalationId', 'sourceTurnId']);
+    if (args.escalationId !== undefined && !identifier(args.escalationId) || args.sourceTurnId !== undefined && !identifier(args.sourceTurnId)
+      || args.escalationId !== undefined && args.sourceTurnId !== undefined) fail('诊断升级读取身份无效。');
+    const scope = await this.escalationScope(context), row = args.escalationId
+      ? this.db.prepare('SELECT workflow_id,value FROM workflow_diagnostic_escalations WHERE id=?').get(args.escalationId)
+      : args.sourceTurnId ? this.db.prepare('SELECT workflow_id,value FROM workflow_diagnostic_escalations WHERE workflow_id=? AND source_turn_id=?').get(scope.workflowId, args.sourceTurnId)
+        : this.db.prepare('SELECT workflow_id,value FROM workflow_diagnostic_escalations WHERE workflow_id=? ORDER BY rowid DESC LIMIT 1').get(scope.workflowId);
+    if (!row) fail('当前工作流没有对应的总控诊断升级。', 404);
+    if (row.workflow_id !== scope.workflowId) fail('诊断升级不属于当前工作流。', 403);
+    return this.escalationReceipt(JSON.parse(row.value), { selection: args.escalationId ? 'id' : args.sourceTurnId ? 'source-turn' : 'latest' });
+  }
+  async interruptEscalations(workflowId, sourceTurnId) {
+    if (!identifier(workflowId) || !identifier(sourceTurnId)) fail('诊断中断来源无效。');
+    const rows = this.db.prepare('SELECT value FROM workflow_diagnostic_escalations WHERE workflow_id=? AND source_turn_id=?').all(workflowId, sourceTurnId);
+    let count = 0;
+    for (const row of rows) {
+      const record = JSON.parse(row.value), child = this.escalationChild(record);
+      if (child && !['thinking', 'queued'].includes(child.status)) continue;
+      record.status = 'interrupted'; record.updatedAt = new Date().toISOString(); this.saveEscalation(record); this.escalationLog(record);
+      count++;
+      if (child) await this.app.applicationAssistant.action(child.id, { action: 'interrupt-turn' }, record.conversationId);
+    }
+    return { interrupted: count > 0 };
   }
   async delegate(args, context = {}) {
     this.checkRole(context, args.workflowId, { delegate: true });

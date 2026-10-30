@@ -2,6 +2,8 @@ import { NODE_TYPES, CODE_LANGUAGES } from '../shared/workflow/workflow-model.mj
 import { workflowCapabilityManifest, workflowNodeContract } from '../shared/workflow/workflow-capability-contract.mjs';
 import { ApplicationAssistantSkills } from './application-assistant-skills.mjs';
 import { inspectCodeRuntime } from './application-runtime-inspector.mjs';
+import { inspectSoftware } from './application-software-inspector.mjs';
+import { inspectWorkflowCode } from './application-code-inspector.mjs';
 import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-hub.mjs';
@@ -27,6 +29,11 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     type: { type: 'string', enum: NODE_TYPES.map(row => row.type) }, schemaVersion: version }),
   definition('runtime.inspect', '只读检查实际代码节点解释器、版本及指定库的可发现性；不安装依赖，不执行用户代码。', {
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
+  definition('runtime.software.inspect', '定位Blender/FreeCADCmd/FFmpeg，区分受控路径发现、代码进程PATH及固定版本命令启动；可选verifyLaunch仅启动版本探测，不打开用户文件或运行业务。', {
+    software: { type: 'array', maxItems: 3, items: { enum: ['blender', 'freecad', 'ffmpeg'] } }, verifyLaunch: { type: 'boolean' } }),
+  definition('runtime.code.check', '对指定工作流Python节点或冻结运行代码按真实执行器包装静态检查；显式变量名可检查静态Python子脚本模板，不执行代码、不导入依赖、不证明业务成功。', {
+    workflowId: text, nodeId: text, runId: text,
+    pythonScriptVariables: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 80, pattern: '^(?!__)[A-Za-z_][A-Za-z0-9_]{0,79}$' } } }),
   definition('assistant.skills.list', '发现本应用内部操作 Skill 的用途与版本；无需用户选择，不是工作流业务 Skill。', {}),
   definition('assistant.skills.read', '按名称读取应用内置 Skill，了解诊断、编辑、业务代码及产物验收的具体方法。', { name: text }),
   definition('workbench.inspect', '只读检查工作台；可读取设置、模型、定时任务、节点派生目录、示例、统计、Skill来源元数据及图片/浏览器/桌面/MCP工具的真实就绪状态。独立助手限定当前工作流，不读取认证或修改连接。', {
@@ -48,9 +55,11 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     workflowId: text, request: { type: 'string', maxLength: 12000 } }, 'proposal'),
 ]);
 
-const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
+const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按实际代码进程PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；固定版本命令使用临时HOME，不加载素材。Python静态检查复用真实AST包装，仅检查明确指定的静态子脚本；不安装、不执行用户代码、不证明转换或渲染成功。' },
+  { id: 'workflow-diagnostic-escalation', status: 'available', roles: ['workflow'], tools: ['conversation.escalate', 'conversation.escalation'], note: '独立会话在用户本轮排错请求下按来源轮次升级为总控只读诊断，可在原聊天读取进度与结论。受总控人工读取权限约束；每来源至多启动一次，停止或重启不重放，不转移写权限，不自动修改或运行工作流。' },
   { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
   { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
   { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置，认证继续由Hermes管理。创建全局可执行资源保留人工入口，业务Skill和应用助手均无skill_manage或配置写工具。' },
@@ -63,8 +72,8 @@ const FEATURES = [
   { id: 'conversation-intent-routing', status: 'available', channel: 'conversation-request', tools: [], note: '自由消息先由AI轻量分类，再进入创建修改、诊断、咨询、反馈或长期改进处理；分类不授予操作权限。精确运行、审核及结束事项命令保留原校验。' },
   { id: 'conversation-management', status: 'available', roles: ['supervisor'], tools: ['conversations.list', 'conversation.inspect', 'conversation.delegate'],
     note: '对话管理仅展示正常工作流的独立会话，回收站会话保留且恢复后重现；总控按问题分主题，按需读取摘要或明确委派只读诊断，不自动运行、应用或合并历史。旧全局聊天及普通任务保留。' },
-  { id: 'supervisor-topics', status: 'ui-only', tools: [], note: '在对话管理页新建或切换总控主题；主题不共享聊天上下文，助手没有创建或合并主题的工具。' },
-  { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存；AI没有权限设置写工具。独立会话固定当前工作流与工作文件夹，双方均无源码或任意终端权限。' },
+  { id: 'supervisor-topics', status: 'ui-only', tools: [], note: '在对话管理页新建或切换总控主题；主题不共享聊天上下文。独立会话升级诊断仅创建受来源身份绑定的只读主题，不提供任意新建或合并历史工具。' },
+  { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存；AI没有权限设置写工具。独立会话固定当前工作流与工作文件夹；总控源码只读与实验修复分别受人工开关控制，升级子诊断始终来源绑定只读，均无任意终端权限。' },
   { id: 'supervisor-workflow-management', status: 'available', roles: ['supervisor'], tools: ['workflow.copy', 'workflow.create-test', 'workflow.delete'], note: '总控在人工授权范围内复制、新增测试草稿或移入回收站；不自动运行，无永久删除。' },
   { id: 'workflow-recycle-bin', status: 'ui-only', inspect: 'workflows.list', tools: [], requiresUserConfirmation: true,
     note: '工作流直接移入回收站并暂停定时任务，节点编辑器仅加载活动流程；当前流程移入回收站或删除后卸载至空态，保留本地草稿。恢复后需用户重新打开，定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
@@ -166,6 +175,8 @@ export class ApplicationCapabilities {
     if (name === 'assistant.skills.list') return { skills: await this.skills.list() };
     if (name === 'assistant.skills.read') return this.skills.read(args.name);
     if (name === 'runtime.inspect') return inspectCodeRuntime(this.app, args, { signal: context.signal });
+    if (name === 'runtime.software.inspect') return inspectSoftware(this.app, args, { signal: context.signal });
+    if (name === 'runtime.code.check') return inspectWorkflowCode(this.app, { ...args, workflowId: args.workflowId || context.workflowId || context.document?.id }, { signal: context.signal, document: context.document });
     if (name === 'workbench.inspect') return this.inspectWorkbench(args);
     if (name === 'workflow.conversation') {
       const workflowId = args.workflowId || context.workflowId || context.document?.id;

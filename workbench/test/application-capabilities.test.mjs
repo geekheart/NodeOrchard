@@ -34,6 +34,40 @@ test('validated diagnosis intent loads its Skill even when the user does not use
   assert(!result.loadedSkills.some(skill => skill.name === 'repair-application'));
 });
 
+test('real code diagnostics use the assistant dispatcher and keep independent workflow ownership', async t => {
+  const f = application(t), document = { id: 'workflow-a', mode: 'execute', nodes: [{ id: 'python-node', type: 'tool',
+    config: { executionMode: 'code', language: 'python', code: 'script = "import os\\n    print(1)"\nreturn input' } }] };
+  f.app.workflowLibrary = { assertAvailable: id => assert.equal(id, document.id), get: id => ({ id, revision: 2, document }) };
+  f.app.workflows = { get: id => ({ id, workflowId: id === 'run-a' ? document.id : 'workflow-b', document }) };
+  const scope = await f.assistant.permissions.bind({ role: 'workflow', workflowId: document.id });
+  const tools = f.assistant.tools(scope).map(tool => tool.name);
+  assert(tools.includes('runtime.software.inspect')); assert(tools.includes('runtime.code.check'));
+  const checked = await f.assistant.call('runtime.code.check', { nodeId: 'python-node', pythonScriptVariables: ['script'] }, { permissionScope: scope });
+  assert.equal(checked.workflowId, document.id); assert.equal(checked.status, 'invalid'); assert.equal(checked.executed, false);
+  await assert.rejects(f.assistant.call('runtime.code.check', { workflowId: 'workflow-b', nodeId: 'python-node' }, { permissionScope: scope }), /当前工作流/);
+  await assert.rejects(f.assistant.call('runtime.code.check', { runId: 'foreign-run', nodeId: 'python-node' }, { permissionScope: scope }), /当前工作流/);
+  const readonly = await f.assistant.permissions.bind({ role: 'workflow', workflowId: document.id, readOnly: true });
+  assert(f.assistant.tools(readonly).some(tool => tool.name === 'runtime.code.check'));
+  assert(!f.assistant.tools(readonly).some(tool => tool.name === 'conversation.escalate'));
+  assert(!f.assistant.tools(scope).some(tool => tool.name === 'app.source.patch'));
+});
+
+test('static findings remain successful tool evidence in the real diagnostic model loop', async t => {
+  const f = application(t), document = { id: 'workflow-a', mode: 'execute', nodes: [{ id: 'python-node', type: 'tool',
+    config: { executionMode: 'code', language: 'python', code: 'return (' } }] }, prompts = [];
+  f.app.workflowLibrary = { assertAvailable: id => assert.equal(id, document.id), get: id => ({ id, revision: 2, document }) };
+  const replies = [{ intent: 'diagnose' }, { tool: 'runtime.code.check', arguments: { nodeId: 'python-node' } }, { text: '已检查：函数体语法无效；未执行代码。' }];
+  f.app.assistantModel = { generate: async prompt => {
+    prompts.push(prompt);
+    return JSON.stringify(replies.shift());
+  } };
+  const decision = await f.assistant.classify({ role: 'workflow', text: '检查脚本语法', document });
+  const result = await f.assistant.plan({ role: 'workflow', text: '检查脚本语法', decision, document });
+  assert.equal(result.evidence.find(row => row.tool === 'runtime.code.check').status, 'complete');
+  const findings = JSON.parse(prompts[2].split('TOOL_RESULTS_JSON=')[1]);
+  assert.equal(findings.length, 1); assert.equal(findings[0].result.status, 'invalid'); assert.equal(findings[0].result.executed, false);
+});
+
 test('source inspection and model experiments are independently advertised without granting source mutation', async t => {
   const f = application(t), settings = { revision: 1, ...structuredClone(DEFAULT_ASSISTANT_PERMISSIONS) };
   settings.supervisor.sourceRead = true; settings.supervisor.modelExperiment = true;

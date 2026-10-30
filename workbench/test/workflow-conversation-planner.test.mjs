@@ -161,6 +161,22 @@ test('planner receives bounded diagnostic findings and reports its model and val
   assert.ok(phases.some(value => value.stage === 'validate-proposal'));
 });
 
+test('software paths, code identity and supervisor findings reach planning as bounded quoted evidence', async () => {
+  const { app, calls } = fixture({ text: '候选待审。', operations: [] });
+  await planWorkflowConversation(app, { text: '修复Blender调用', document: document(),
+    softwareEvidence: [{ id: 'blender', installed: true, executable: true, pathVisible: false,
+      selectedPath: '/Applications/Blender.app/Contents/MacOS/Blender', launch: { status: 'verified', version: '5.2.1', stderr: 'PRIVATE_RAW_STDERR' }, env: 'PRIVATE_ENV' }],
+    codeCheckEvidence: [{ nodeId: 'code-node', source: 'frozen-run', runId: 'run-old', codeSha256: 'a'.repeat(64), status: 'invalid', body: { valid: true },
+      wrapper: { stringConstantsPreserved: true }, nestedScripts: [{ variable: 'render_script', status: 'invalid', kind: 'literal-template', error: { message: 'unexpected indent', line: 2, column: 4, text: 'PRIVATE_CODE_LINE' } }], code: 'PRIVATE_CODE' }],
+    supervisorEvidence: [{ escalationId: 'escalation-a', status: 'complete', text: '已确认PATH缺口。' + 'x'.repeat(5000), actions: 'PRIVATE_ACTION' }],
+  });
+  const source = JSON.parse(calls[0].prompt.split('USER_SOURCE_JSON=')[1]);
+  assert.equal(source.softwareEvidence[0].pathVisible, false); assert.match(source.softwareEvidence[0].selectedPath, /Blender\.app/);
+  assert.equal(source.codeCheckEvidence[0].codeSha256, 'a'.repeat(64)); assert.equal(source.codeCheckEvidence[0].nestedScripts[0].substitutionsEvaluated, false);
+  assert.equal(source.supervisorEvidence[0].diagnosisOnly, true); assert(source.supervisorEvidence[0].text.length <= 2000);
+  assert(!calls[0].prompt.includes('PRIVATE_'));
+});
+
 test('only explicitly pinned Codex assistant candidates select medium while other routes and adapters inherit', async () => {
   for (const purpose of ['assistant', 'learning', undefined]) {
     for (const provider of ['openai-codex', 'fixture-provider', 'custom:fixture', undefined]) {

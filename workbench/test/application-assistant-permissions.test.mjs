@@ -59,6 +59,24 @@ test('workflow hard ceiling excludes global logs, cross-workflow management, sou
     .every(tool => tool.name !== 'app.logs'));
 });
 
+test('escalated supervisor reads global implementation evidence while business objects stay bound to the source workflow', async t => {
+  const f = await fixture(t);
+  f.settings.supervisor.sourceRead = true; f.settings.supervisor.sourceRepair = true;
+  f.app.preferences.defaultWorkspace = '.'; f.app.workflowFolders = { directory: () => f.folder };
+  const scope = await f.policy.bind({ role: 'supervisor', workflowId: 'workflow-a', readOnly: true, workflowBound: true });
+  assert.equal(scope.workflowBound, true); assert.equal(scope.workingFolder, f.folder);
+  for (const name of ['app.logs', 'app.source.read', 'runtime.code.check', 'workflow.inspect']) assert.equal(f.policy.allowed(name, scope), true, name);
+  for (const name of ['app.source.patch', 'app.source.test', 'workflow.propose', 'conversations.list', 'conversation.inspect', 'conversation.delegate', 'conversation.escalate']) assert.equal(f.policy.allowed(name, scope), false, name);
+  await f.policy.admit('workflow.run', { runId: 'run-a' }, scope);
+  await assert.rejects(f.policy.admit('workflow.run', { runId: 'run-b' }, scope), /当前工作流/);
+  await assert.rejects(f.policy.admit('workflow.inspect', { workflowId: 'workflow-b' }, scope), /当前工作流/);
+  await assert.rejects(f.policy.admit('session.history', { sessionId: 'session-b' }, scope), /当前工作流/);
+  await assert.rejects(f.policy.admit('assistant.diagnose', { conversationId: 'other-supervisor' }, scope), /不能读取总控/);
+  const projected = f.policy.project({ runs: f.runs, sessions: [{ id: 'session-a' }, { id: 'session-b' }] }, scope);
+  assert.deepEqual(projected.runs.map(run => run.id), ['run-a']); assert.deepEqual(projected.sessions.map(session => session.id), ['session-a']);
+  await assert.rejects(f.policy.bind({ role: 'supervisor', workflowId: 'workflow-a', workflowBound: true }), /来源绑定/);
+});
+
 test('all explicit workflow, run, session and artifact identities are admitted before reading', async t => {
   const f = await fixture(t);
   await assert.rejects(f.policy.admit('workflow.inspect', { workflowId: 'workflow-b' }, f.scope), /当前工作流/);

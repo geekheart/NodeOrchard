@@ -218,6 +218,17 @@ test('model experiment admission source remains readable but cannot be patched t
   assert.equal(record.status, 'error'); assert.equal(record.error.code, 'SOURCE_PATH_PROTECTED'); assert.deepEqual(record.files, []);
 });
 
+test('the diagnostic escalation scope bridge cannot be patched even when source repair is enabled', async t => {
+  const path = 'workbench/src/application-conversation-hub.mjs', content = 'export const workflowBound = true;\n';
+  const { root, service, context } = await fixture(t, { readGitState: async () => ({ tracked: [path], dirty: [] }) });
+  await writeFile(join(root, path), content);
+  const source = await service.read({ path }, context);
+  assert.equal(source.content, content);
+  await assert.rejects(service.patch({ operationId: 'alter-escalation-scope', summary: 'Fixture forbidden scope change',
+    changes: [{ path, expectedHash: source.hash, content: 'export const workflowBound = false;\n' }] }, context), { code: 'SOURCE_PATH_PROTECTED', httpStatus: 403 });
+  assert.equal(await readFile(join(root, path), 'utf8'), content);
+});
+
 test('rollback refuses later edits without changing the applied receipt, and human rollback works with AI permission off', async t => {
   const { root, service, context, setEnabled } = await fixture(t);
   const repair = await service.patch({ operationId: 'patch-rollback', summary: 'Fixture change', changes: [{ path: 'workbench/src/feature.mjs', expectedHash: hash('export const value = 1;\n'), content: 'export const value = 2;\n' }] }, context);
