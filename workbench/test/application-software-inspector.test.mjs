@@ -31,6 +31,27 @@ test('discovery reports PATH CLI independently of launch verification and never 
   assert.equal(entry.launch.status, 'not-requested'); assert.equal(entry.launch.version, null);
 });
 
+test('non-executable PATH matches cannot fill the bounded result and hide an executable application CLI', async t => {
+  const directory = await fixture(t), paths = [];
+  for (let index = 0; index < 9; index++) {
+    const bin = join(directory, 'bin-' + index); paths.push(bin); await mkdir(bin);
+    await writeFile(join(bin, 'freecadcmd'), 'not executable', { mode: 0o600 });
+  }
+  const applications = join(directory, 'Applications'), executable = await binary(join(applications, 'FreeCAD.app/Contents/Resources/bin/freecadcmd'));
+  const result = await inspectSoftware({}, { software: ['freecad'] }, { platform: 'darwin', path: paths.join(':'), applicationDirectories: [applications] });
+  assert.equal(result.software[0].selectedPath, executable); assert.equal(result.software[0].executable, true);
+  assert.equal(result.software[0].candidates.length, 8); assert.equal(result.software[0].pathVisible, false);
+  assert.equal(result.codeExecution.macosPrivateFallback, true);
+});
+
+test('fixed executable suffixes are discovered without double-appending exe on Windows', async t => {
+  const directory = await fixture(t), executable = await binary(join(directory, 'blender.exe'));
+  for (const platform of ['win32', 'darwin']) {
+    const result = await inspectSoftware({}, { software: ['blender'] }, { platform, path: directory, applicationDirectories: [] });
+    assert.equal(result.software[0].selectedPath, executable); assert.equal(result.software[0].pathVisible, true);
+  }
+});
+
 test('launch verification uses fixed headless arguments and a cleaned minimal environment with temporary HOME', async t => {
   const directory = await fixture(t);
   const executable = await binary(join(directory, 'blender'), '#!/bin/sh\n[ "$#" = 3 ] && [ "$1" = --background ] && [ "$2" = --factory-startup ] && [ "$3" = --version ] || exit 17\n[ "$HOME" -ef "$PWD" ] || exit 18\nprintf "Blender 5.2.1 LTS\\n"\n');

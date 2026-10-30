@@ -144,7 +144,7 @@ AI 方案的预应用与并发检查仍用完整 `documentFingerprint()`；仅�
 
 对话入口在服务端绑定独立工作流或总控身份，工具目录与 dispatcher 共用角色、对象归属及目录准入。独立会话固定工作流与工作文件夹，总控按人工配置开放跨工作流管理和软件日志；模型提供的 ID 不改变身份。“设置 → 助手权限”通过独立的版本化设置接口保存，助手工具和未来 MCP 均没有修改入口。权限变更逐次校验，旧检查点不提升权限；具体规则见 [会话权限与人工设置](application-assistant-capabilities.md#会话权限与人工设置)。
 
-`application-software-inspector.mjs`使用实际代码进程PATH与固定macOS应用路径发现建模／媒体CLI，可在临时HOME运行固定版本检查。`application-code-inspector.mjs`从获准节点或普通运行快照读取Python代码，固定子进程执行纯AST检查；真实worker与静态检查共用 `python/workflow_code_validation.py`，保持多行字符串。候选规划只接收有界软件、语法和诊断证据，依赖发现不改变AI意图或新增诊断模型往返。
+`application-software-inspector.mjs`使用基础PATH与固定macOS应用路径发现建模／媒体CLI，可在临时HOME运行固定版本检查。实际代码执行另由 `workflows/workflow-runtime-launchers.mjs`复用发现器，按次在原PATH末尾追加私有命令入口并exec真实CLI；完成或取消后清理。基础环境和控制身份校验位于叶子 `workflow-code-environment.mjs`，诊断器与执行器共用，避免依赖环。`application-code-inspector.mjs`固定子进程做纯AST检查，真实worker共用 `python/workflow_code_validation.py`，保持多行字符串；本地依赖准备不改变AI意图或新增模型往返。
 
 `application-conversation-hub.mjs`持久保存独立会话的总控升级身份；按来源轮次唯一、操作内容绑定和启动前占位保证不重复发送。总控子消息使用不可由普通HTTP输入伪造的只读入口，权限scope另加来源业务对象／文件夹限制，保留人工开放的全局软件日志与源码只读。原聊天可读取该子任务的阶段和短结论，不能取得其它业务会话、子工具原始结果或写权限；未知启动和重启不重发，见[软件与脚本诊断](application-diagnostics.md#软件与脚本诊断)。
 

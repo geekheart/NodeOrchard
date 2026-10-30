@@ -7,6 +7,10 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { validateWorkflowToolConfig } from '../../shared/workflow/workflow-tools.mjs';
+import { minimalEnvironment } from './workflow-code-environment.mjs';
+import { prepareRuntimeLaunchers } from './workflow-runtime-launchers.mjs';
+
+export { minimalEnvironment };
 
 export const OPERATION_LIMITS = Object.freeze({ jsonBytes: 64 * 1024, logBytesPerStream: 32 * 1024 });
 const JS_WORKER = fileURLToPath(new URL('./workflow-code-worker.mjs', import.meta.url));
@@ -66,40 +70,6 @@ function builtin(toolName, input) {
   }
 }
 
-export function minimalEnvironment(context) {
-  const env = {};
-  for (const key of ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR']) {
-    if (typeof process.env[key] === 'string') env[key] = process.env[key];
-  }
-  if (context !== undefined) {
-    if (!context || typeof context !== 'object' || Array.isArray(context)) throw errorFor('CONTEXT_INVALID', '代码节点运行上下文无效。');
-    for (const [key, variable] of Object.entries({ runId: 'WORKBENCH_RUN_ID', workflowId: 'WORKBENCH_WORKFLOW_ID', nodeId: 'WORKBENCH_NODE_ID', learningId: 'WORKBENCH_LEARNING_ID', attemptId: 'WORKBENCH_ATTEMPT_ID' })) {
-      if (context[key] === undefined) continue;
-      if (typeof context[key] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(context[key])) throw errorFor('CONTEXT_INVALID', '代码节点运行上下文标识无效。');
-      env[variable] = context[key];
-    }
-    if (context.outputDirectory !== undefined) {
-      if (typeof context.outputDirectory !== 'string' || !isAbsolute(context.outputDirectory)) throw errorFor('CONTEXT_INVALID', '产物目录必须是绝对路径。');
-      env.WORKBENCH_OUTPUT_DIRECTORY = context.outputDirectory;
-      env.WORKBENCH_NODE_DIRECTORY = context.outputDirectory;
-    }
-    if (context.runOutputDirectory !== undefined) {
-      if (typeof context.runOutputDirectory !== 'string' || !isAbsolute(context.runOutputDirectory)) throw errorFor('CONTEXT_INVALID', '运行产物目录必须是绝对路径。');
-      env.WORKBENCH_RUN_OUTPUT_DIRECTORY = context.runOutputDirectory;
-    }
-    if (context.databasePath !== undefined) {
-      if (typeof context.databasePath !== 'string' || !isAbsolute(context.databasePath)) throw errorFor('CONTEXT_INVALID', '运行数据库路径必须是绝对路径。');
-      env.WORKBENCH_DATABASE_PATH = context.databasePath;
-    }
-    if (context.attempt !== undefined) {
-      if (!Number.isInteger(context.attempt) || context.attempt < 1) throw errorFor('CONTEXT_INVALID', '节点尝试次数无效。');
-      env.WORKBENCH_ATTEMPT = String(context.attempt);
-    }
-    if (context.reviewFeedback) env.WORKBENCH_REVIEW_FEEDBACK = String(context.reviewFeedback).slice(0, 8000);
-  }
-  return { ...env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONUNBUFFERED: '1' };
-}
-
 function logCollector(stream, onLog) {
   const decoder = new StringDecoder('utf8');
   let bytes = 0;
@@ -120,13 +90,13 @@ function logCollector(stream, onLog) {
   return { write: chunk => emit(decoder.write(chunk)), end: () => emit(decoder.end()) };
 }
 
-function runCode({ config, input, cwd, signal, onLog, pythonPath, context }) {
+function runCodeProcess({ config, input, cwd, signal, onLog, pythonPath, context, env }) {
   if (signal?.aborted) return Promise.reject(errorFor('ABORTED', '执行已停止。'));
   return new Promise((resolve, reject) => {
     const language = config.language;
     const child = spawn(language === 'python' ? (pythonPath || 'python3') : process.execPath,
       language === 'python' ? ['-B', PY_WORKER] : [JS_WORKER], {
-        cwd, env: minimalEnvironment(context), stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+        cwd, env, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32', windowsHide: true,
       });
     const logs = { stdout: logCollector('stdout', onLog), stderr: logCollector('stderr', onLog) };
@@ -194,6 +164,14 @@ function runCode({ config, input, cwd, signal, onLog, pythonPath, context }) {
   });
 }
 
+async function runCode(options) {
+  const lease = await prepareRuntimeLaunchers(minimalEnvironment(options.context), { signal: options.signal });
+  try {
+    const output = await runCodeProcess({ ...options, env: lease.env });
+    return { output, softwareAliases: lease.aliases };
+  } finally { await lease.cleanup(); }
+}
+
 export async function executeOperation({ node, input, cwd, signal, onLog, pythonPath, context } = {}) {
   const selected = validateOperationNode(node);
   const config = { ...node.config };
@@ -211,8 +189,9 @@ export async function executeOperation({ node, input, cwd, signal, onLog, python
       throw errorFor('WORKSPACE_INVALID', '代码执行需要现有的工作区目录。');
     }
     if (signal?.aborted) throw errorFor('ABORTED', '执行已停止。');
-    output = await runCode({ config, input: preparedInput, cwd, signal, onLog, pythonPath, context });
-    runtime = { ...selected, revision: `sha256:${createHash('sha256').update(config.language + '\n' + config.code, 'utf8').digest('hex')}` };
+    const result = await runCode({ config, input: preparedInput, cwd, signal, onLog, pythonPath, context });
+    output = result.output;
+    runtime = { ...selected, softwareAliases: result.softwareAliases, revision: `sha256:${createHash('sha256').update(config.language + '\n' + config.code, 'utf8').digest('hex')}` };
   }
   const checked = checkedJson(output, '输出');
   return { output: checked.value, outputText: typeof checked.value === 'string' ? checked.value : checked.encoded, runtime };

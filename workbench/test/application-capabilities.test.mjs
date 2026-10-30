@@ -114,6 +114,8 @@ test('node capability discovery covers every real node and derives configuration
   assert.deepEqual(tool.enums.language, ['javascript', 'python']);
   assert.equal(codeRuntimeContract().output.maxBytes, OPERATION_LIMITS.jsonBytes);
   assert.equal(codeRuntimeContract().policy.subprocessIsOsSandbox, false);
+  assert.equal(codeRuntimeContract().dependencies.softwareInspectTool, 'runtime.software.inspect');
+  assert.equal(codeRuntimeContract().dependencies.macosCliFallback, 'private-worker-path');
   assert.equal(codeRuntimeContract(1).files.supported, false);
 });
 

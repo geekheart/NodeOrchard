@@ -4,17 +4,17 @@ import { access, stat, mkdtemp, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
-import { minimalEnvironment } from './workflows/workflow-operations.mjs';
+import { minimalEnvironment } from './workflows/workflow-code-environment.mjs';
 
 export const SOFTWARE_INSPECTION_LIMITS = Object.freeze({ software: 3, candidates: 8, pathEntries: 128,
   pathLength: 2048, timeoutMs: 4000, outputBytes: 16384 });
 const SOFTWARE = Object.freeze({
-  blender: { commands: ['blender', 'Blender'], bundle: 'Blender.app', cli: ['Contents/MacOS/Blender', 'Contents/MacOS/blender'],
+  blender: { commands: ['blender', 'Blender', 'blender.exe', 'Blender.exe'], bundle: 'Blender.app', cli: ['Contents/MacOS/Blender', 'Contents/MacOS/blender'],
     args: ['--background', '--factory-startup', '--version'], version: /^Blender[ \t]+(\d{1,4}\.\d{1,4}(?:\.\d{1,4})?)(?=[ \t\r\n(]|$)/m },
-  freecad: { commands: ['freecadcmd', 'FreeCADCmd'], bundle: 'FreeCAD.app',
+  freecad: { commands: ['freecadcmd', 'FreeCADCmd', 'freecadcmd.exe', 'FreeCADCmd.exe'], bundle: 'FreeCAD.app',
     cli: ['Contents/Resources/bin/freecadcmd', 'Contents/Resources/bin/FreeCADCmd', 'Contents/MacOS/FreeCADCmd', 'Contents/MacOS/freecadcmd'],
     args: ['--version'], version: /^FreeCAD[ \t]+(\d{1,4}\.\d{1,4}(?:\.\d{1,4})?)(?=[ \t\r\n(]|$)/m },
-  ffmpeg: { commands: ['ffmpeg'], cli: [], args: ['-version'],
+  ffmpeg: { commands: ['ffmpeg', 'ffmpeg.exe'], cli: [], args: ['-version'],
     version: /^ffmpeg version[ \t]+(\d{1,4}\.\d{1,4}(?:\.\d{1,4})?)(?=[ \t\r\n(]|$)/m },
 });
 const execute = promisify(execFile);
@@ -53,17 +53,19 @@ async function discover(id, { path, platform, applicationDirectories, signal }) 
   const definition = SOFTWARE[id], candidates = [], seen = new Set(), identities = new Set();
   const add = async (candidatePath, source) => {
     check(signal);
-    if (seen.has(candidatePath) || candidates.length >= SOFTWARE_INSPECTION_LIMITS.candidates) return;
+    if (seen.has(candidatePath) || candidates.length >= SOFTWARE_INSPECTION_LIMITS.candidates && candidates.some(candidate => candidate.executable)) return;
     seen.add(candidatePath);
     const candidate = await fileCandidate(candidatePath, source);
     if (candidate && !identities.has(candidate.identity)) {
       identities.add(candidate.identity);
-      candidates.push({ path: candidate.path, source: candidate.source, executable: candidate.executable });
+      const projected = { path: candidate.path, source: candidate.source, executable: candidate.executable };
+      if (candidates.length < SOFTWARE_INSPECTION_LIMITS.candidates) candidates.push(projected);
+      else if (candidate.executable) candidates[candidates.length - 1] = projected;
     }
   };
   const directories = [...new Set(path.split(platform === 'win32' ? ';' : ':', SOFTWARE_INSPECTION_LIMITS.pathEntries))].filter(safePath);
   for (const directory of directories) for (const command of definition.commands) {
-    await add(join(directory, platform === 'win32' ? command + '.exe' : command), 'path');
+    await add(join(directory, platform === 'win32' && !command.endsWith('.exe') ? command + '.exe' : command), 'path');
   }
   let bundleFound = false;
   if (platform === 'darwin' && definition.bundle) for (const directory of applicationDirectories.slice(0, 2).filter(safePath)) {
@@ -148,9 +150,11 @@ export async function inspectSoftware(_app, input = {}, { signal, platform = pro
     software.push(entry);
   }
   check(signal);
-  return { software, policy: { readOnly: true, fixedArguments: true, temporaryHome: true, changesPath: false,
+  return { software, codeExecution: { macosPrivateFallback: platform === 'darwin', originalPathWins: true, changesSystemPath: false },
+    policy: { readOnly: true, fixedArguments: true, temporaryHome: true, changesPath: false,
     installsSoftware: false, opensUserFiles: false, startsGui: false },
   limitations: ['仅搜索有界的绝对 PATH 目录及 macOS 已知应用 CLI；未发现不等于未安装。',
+    'pathVisible表示基础PATH；macOS代码worker会另按已发现的CLI准备本次私有命令入口，不修改系统PATH。',
     '启动验证只检查固定版本命令，不验证导入、建模、渲染、文件交付或 MCP 连接。',
     '仅验证优先选中的 CLI；其它候选的可执行标记不代表已经启动成功。',
     'PATH 中同名程序属于本机受信环境；检查不会提供操作系统沙箱或提升权限。'] };

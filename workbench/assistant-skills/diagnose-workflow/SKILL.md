@@ -32,7 +32,7 @@ Hermes重试：目录声明 `component` 时，用 `codex-stream` 搜索 `max_str
 
 完成标准：结论对应具体运行、节点、版本和证据，区分事实与推测，并说明下一步可以验证什么。读取失败应报告工具给出的原因；不让用户补贴仍可通过现有工具读取的日志。提出方案不代表已经修复或重跑。
 
-软件故障用 `runtime.software.inspect`分别核对发现、可执行、PATH与版本启动；`verifyLaunch:true`只在临时HOME跑固定版本命令。macOS已发现但PATH不可见时，用返回的可执行路径准备候选。失败分类不证明责任方，探测环境与业务兼容分别说明。
+软件故障用 `runtime.software.inspect`核对发现、基础PATH与版本启动。macOS代码worker按次补私有命令，原PATH优先；`pathVisible:false`不代表节点不可调用。`verifyLaunch:true`只跑临时HOME版本命令；按失败轮runtime及本轮检查区分补全前后，启动成功不证明业务兼容。
 
 Python用 `runtime.code.check`绑定节点，旧运行另带 `runId`；按SHA与来源区分冻结代码和当前草稿。真实AST包装保持字符串，`pythonScriptVariables`只填明确的Python子脚本变量；文本不作脚本，模板检查不执行replace，动态内容保持未知。语法通过不证明依赖、启动或产物正确。实现入口为 `python/workflow_code_validation.py`、`python/workflow_code_worker.py`，读取沿用本轮权限。
 

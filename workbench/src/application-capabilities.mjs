@@ -29,7 +29,7 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
     type: { type: 'string', enum: NODE_TYPES.map(row => row.type) }, schemaVersion: version }),
   definition('runtime.inspect', '只读检查实际代码节点解释器、版本及指定库的可发现性；不安装依赖，不执行用户代码。', {
     language: { enum: [...CODE_LANGUAGES] }, modules: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' } } }),
-  definition('runtime.software.inspect', '定位Blender/FreeCADCmd/FFmpeg，区分受控路径发现、代码进程PATH及固定版本命令启动；可选verifyLaunch仅启动版本探测，不打开用户文件或运行业务。', {
+  definition('runtime.software.inspect', '定位Blender/FreeCADCmd/FFmpeg，区分安装发现、基础PATH与版本启动；macOS代码worker另有私有命令补全。verifyLaunch只跑固定版本命令，不打开用户文件或运行业务。', {
     software: { type: 'array', maxItems: 3, items: { enum: ['blender', 'freecad', 'ffmpeg'] } }, verifyLaunch: { type: 'boolean' } }),
   definition('runtime.code.check', '对指定工作流Python节点或冻结运行代码按真实执行器包装静态检查；显式变量名可检查静态Python子脚本模板，不执行代码、不导入依赖、不证明业务成功。', {
     workflowId: text, nodeId: text, runId: text,
@@ -58,7 +58,7 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
-  { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按实际代码进程PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；固定版本命令使用临时HOME，不加载素材。Python静态检查复用真实AST包装，仅检查明确指定的静态子脚本；不安装、不执行用户代码、不证明转换或渲染成功。' },
+  { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按基础PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；代码worker按次补私有命令入口，现有PATH优先，不改系统环境或节点代码。版本探测与静态检查不运行业务，不证明转换或渲染成功。' },
   { id: 'workflow-diagnostic-escalation', status: 'available', roles: ['workflow'], tools: ['conversation.escalate', 'conversation.escalation'], note: '独立会话在用户本轮排错请求下按来源轮次升级为总控只读诊断，可在原聊天读取进度与结论。受总控人工读取权限约束；每来源至多启动一次，停止或重启不重放，不转移写权限，不自动修改或运行工作流。' },
   { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
   { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },

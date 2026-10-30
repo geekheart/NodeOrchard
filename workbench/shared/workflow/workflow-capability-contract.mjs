@@ -22,7 +22,8 @@ export function codeRuntimeContract(schemaVersion = 2) {
       fileName: 'output.config.fileName 不能将 JSON 转成真正的 XLSX；必须先实际生成工作簿。' } : { supported: false, reason: 'schema1 仅提供 JSON 返回契约；生成文件请使用 schema2。' },
     failures: { python: 'raise ValueError(message)', javascript: 'throw new Error(message)',
       returnedErrorObject: '仅 return {error:...} 仍是正常 JSON 输出；需要异常或明确业务校验阻止下游。' },
-    dependencies: { inspectTool: 'runtime.inspect', rule: '按真实代码解释器检查模块；Hermes 的可用工具或另一Python环境不证明代码节点能导入库。' },
+    dependencies: { inspectTool: 'runtime.inspect', softwareInspectTool: 'runtime.software.inspect', macosCliFallback: 'private-worker-path',
+      rule: '按真实代码解释器检查模块；Hermes 的可用工具或另一Python环境不证明代码节点能导入库。' },
     policy: { subprocessIsOsSandbox: false, mayGenerateBusinessCodeCandidate: true, mayModifyApplicationSource: false,
       automaticExecutionAvailable: false, candidateRequiresExplicitApply: true } };
 }

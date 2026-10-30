@@ -47,7 +47,9 @@
 
 ## 软件与脚本诊断
 
-软件定位由 `src/application-software-inspector.mjs` 处理，只接受Blender、FreeCADCmd、FFmpeg三个标识。使用代码执行器的实际PATH，在macOS另查受控的系统／用户Applications路径；返回安装发现、可执行、PATH可见和选中CLI路径。未发现只表示本次受控搜索没有命中，不代表全盘未安装。FreeCAD只找命令行程序，不用GUI启动器代替。
+软件定位由 `src/application-software-inspector.mjs` 处理，只接受Blender、FreeCADCmd、FFmpeg三个标识。使用服务基础PATH，在macOS另查受控的系统／用户Applications路径；返回安装发现、可执行、基础PATH可见和选中CLI路径。未发现只表示本次受控搜索没有命中，不代表全盘未安装。FreeCAD只找命令行程序，不用GUI启动器代替。
+
+代码执行器通过 `workflows/workflow-runtime-launchers.mjs`复用同一发现器，在每次macOS代码worker的私有临时目录补固定命令别名，追加在原PATH末尾。现有同名命令优先，Python的shutil.which与JavaScript子进程均可找到应用目录中的CLI；不用修改节点代码、系统PATH或安装软件。别名以exec启动真实可执行路径，保留参数与进程组；使用临时HOME／XDG，FreeCADCmd另设offscreen。完成、失败或取消后清理本次入口，执行超时及进程组停止保持。`pathVisible`只表示基础PATH，本次准备的别名记录在节点runtime.softwareAliases，不含本机路径；准备不证明程序已启动。其它平台保持原PATH。此能力与只读版本探测分开，不自动重跑旧运行。
 
 `verifyLaunch:true`仅以固定参数启动版本命令，使用临时HOME、最小环境、时间和输出限制，不打开用户文件、改PATH、安装依赖或执行用户脚本。启动失败返回白名单错误类别，不透传原始stderr、环境或凭据。版本可启动与实际导入、STEP转换、渲染分别验收；受限测试环境的Qt／CPU报错不能自动归因为软件安装损坏。代码执行进程及版本探测均不是OS沙箱。
 
