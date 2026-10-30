@@ -80,6 +80,38 @@ test('Python executes a real main function body and preserves JSON null/false/ze
   assert.ok(logs.some(log => log.stream === 'stderr' && log.text.includes('python stderr')));
 });
 
+test('Python preserves multiline script literals when executing a function body', async t => {
+  const cwd = await workspace(t);
+  const code = [
+    "script = '''import json",
+    "value = {'ready': True}",
+    "'''",
+    "compile(script, '<generated-fixture>', 'exec')",
+    "return {'script': script, 'input': input}",
+  ].join('\n');
+  const result = await executeOperation({ node: operation({ language: 'python', code }), input: false, cwd });
+  assert.deepEqual(result.output, { script: "import json\nvalue = {'ready': True}\n", input: false });
+});
+
+test('Python keeps raw, formatted and bytes literal whitespace and accepts an already indented body', async t => {
+  const cwd = await workspace(t);
+  const code = [
+    "raw = r'''first\\n",
+    '    keep these spaces',
+    "last'''",
+    "formatted = f'''hello {input}",
+    "world'''",
+    "data = b'''alpha",
+    "beta'''",
+    "return {'raw': raw, 'formatted': formatted, 'bytes': data.decode('ascii')}",
+  ].join('\n');
+  assert.deepEqual((await executeOperation({ node: operation({ language: 'python', code }), input: 'Ada', cwd })).output,
+    { raw: 'first\\n\n    keep these spaces\nlast', formatted: 'hello Ada\nworld', bytes: 'alpha\nbeta' });
+  const indented = "  script = '''first\nnot indented\nlast'''\n  return script";
+  assert.equal((await executeOperation({ node: operation({ language: 'python', code: indented }), input: null, cwd })).output,
+    'first\nnot indented\nlast');
+});
+
 test('raw null, false and zero code results are not treated as missing or converted to strings', async t => {
   const cwd = await workspace(t);
   for (const input of [null, false, 0]) {

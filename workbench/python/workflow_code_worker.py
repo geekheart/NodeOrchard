@@ -4,7 +4,7 @@ import json
 import math
 import os
 import sys
-import textwrap
+from workflow_code_validation import compile_workflow_body
 
 MAX_JSON_BYTES = 64 * 1024
 MAX_REQUEST_BYTES = 600000
@@ -68,7 +68,7 @@ try:
     if not isinstance(code, str) or not code.strip() or len(code) > 100000:
         raise ValueError("代码函数体无效。")
     namespace = {"__name__": "__workflow__"}
-    exec(compile("def main(input, context=None):\n" + textwrap.indent(code, "    ") + "\n", "<workflow-code>", "exec"), namespace)
+    exec(compile_workflow_body(code), namespace)
     output = namespace["main"](request.get("input"), request.get("context", {}))
     json_value(output)
     encoded = json.dumps(output, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
