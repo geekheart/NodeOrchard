@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { setImmediate as immediate } from 'node:timers/promises';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkflowLearning } from '../src/workflows/workflow-learning.mjs';
@@ -118,14 +118,14 @@ function setupDAG(t) {
     externalMemoryAllowed: false, snapshot: { version: 1, scopeId: options.id, digest: hash('fixture readonly snapshot') } });
   let document = createDocument({ schemaVersion: 2, title: f.document.title });
   document.id = f.document.id;
-  const tool = id => createNode('tool', {}, { id, config: { executionMode: 'tool', toolName: 'hdk.full.prepare', inputType: 'object', outputType: 'object' } });
+  const tool = id => createNode('tool', {}, { id, config: { executionMode: 'code', language: 'javascript', code: 'return input;', inputType: 'object', outputType: 'object' } });
   document.nodes = [createNode('input', {}, { id: 'input', config: { outputType: 'object' } }),
     createNode('skill', {}, { id: 'skill-0', title: 'Capability 0', config: { skillRef: 'fixture-0', version: hash(instructions(0)), inputType: 'object', outputType: 'object' } }),
     tool('produce-0'), tool('produce-back'), createNode('merge', {}, { id: 'merge', ports: {
       inputs: [{ id: 'front', label: 'front', type: 'object' }, { id: 'back', label: 'back', type: 'object' }],
       outputs: [{ id: 'out', label: 'out', type: 'object' }],
     } }), createNode('human', {}, { id: 'human' }),
-    createNode('tool', {}, { id: 'verify', config: { executionMode: 'tool', toolName: 'hdk.full.verify', inputType: 'object', outputType: 'object' }, ports: {
+    createNode('tool', {}, { id: 'verify', config: { executionMode: 'code', language: 'javascript', code: 'return input;', inputType: 'object', outputType: 'object' }, ports: {
       inputs: [{ id: 'in', label: 'in', type: 'object' }], outputs: [{ id: 'out', label: 'selected bundle', type: 'object', valuePath: 'bundle' }],
     } }), createNode('output', {}, { id: 'output' }),
     createNode('tool', {}, { id: 'independent', config: { executionMode: 'code', language: 'javascript', code: 'return input;', inputType: 'object', outputType: 'object' } }),
@@ -141,23 +141,18 @@ function setupDAG(t) {
   const run = copy(f.run); run.schemaVersion = 2; run.document = document;
   run.nodes = Object.fromEntries(document.nodes.map(node => [node.id, { status: ['evaluation', 'improvement'].includes(node.type) ? 'skipped' : 'complete',
     attempt: 1, attemptId: randomUUID(), input: null, output: null }]));
-  const comparison = { qualitySummary: { checks: { currentSource: true, actualImage: true }, physicalTestStatus: 'not-run' },
-    labelInventory: Array.from({ length: 54 }, (_, index) => ({ connector: 'J4', pad: String(index + 1), net: 'IO' + index, label: 'IO' + index,
+  const comparison = { qualitySummary: { checks: { currentSource: true, actualImage: true }, userReviewStatus: 'pending' },
+    labelInventory: Array.from({ length: 54 }, (_, index) => ({ category: 'chapter', item: String(index + 1), label: 'Section ' + index,
       sourceTrace: 'ACTUAL_COMPARISON_DETAIL_' + index + '_'.repeat(180) })) };
-  const artifacts = Array.from({ length: 60 }, (_, index) => ({ artifactId: randomUUID(), path: join(directory, 'artifact-' + index + '-'.repeat(220)), sha256: 'a'.repeat(64), bytes: 100 }));
-  const receipt = (id, extra = {}) => {
-    const outputDirectory = join(directory, id); mkdirSync(outputDirectory);
-    const receiptPath = join(outputDirectory, 'receipt.json');
-    writeFileSync(receiptPath, JSON.stringify({ operation: document.nodes.find(node => node.id === id).config.toolName,
-      runId: run.id, artifactInventory: artifacts, proof: 'DISK_PROOF_NOT_REPEATED_IN_PROMPT' }));
-    const result = { kind: 'hdk-node-receipt', runId: run.id, nodeId: id, operation: document.nodes.find(node => node.id === id).config.toolName,
-      receiptPath, receiptSha256: createHash('sha256').update(readFileSync(receiptPath)).digest('hex'), artifacts: copy(artifacts), ...extra };
-    Object.assign(run.nodes[id], { outputDirectory, output: result }); return result;
+  const artifacts = Array.from({ length: 6 }, (_, index) => ({ artifactId: randomUUID(), path: join(directory, 'artifact-' + index + '-'.repeat(220)), sha256: 'a'.repeat(64), bytes: 100 }));
+  const produced = (id, extra = {}) => {
+    const result = { kind: 'business-output', sourceId: id, artifacts: copy(artifacts), ...extra };
+    Object.assign(run.nodes[id], { outputDirectory: join(directory, id), output: result }); return result;
   };
-  const front = receipt('produce-0'), back = receipt('produce-back');
-  const verified = receipt('verify', { bundle: { learningComparison: copy(comparison) } });
+  const front = produced('produce-0'), back = produced('produce-back');
+  const verified = produced('verify', { bundle: { learningComparison: copy(comparison) } });
   run.nodes['skill-0'].input = { displayOptions: { actual: true }, userInput: 'ACTUAL_BUSINESS_INPUT' };
-  run.nodes['skill-0'].output = { displayAliases: [{ net: 'LDO_VO4', label: 'VO4' }] };
+  run.nodes['skill-0'].output = { headings: [{ id: 'chapter-4', label: 'Chapter 4' }] };
   run.nodes['skill-0'].reviewFeedback = 'EXECUTION_ONLY_REVIEW: the actual output also used temporary review instructions.';
   run.nodes.merge.output = { front: copy(front), back: copy(back) };
   run.nodes.human.output = copy(run.nodes.merge.output);
@@ -475,7 +470,7 @@ test('historical item feedback stays readable and its original selected scope re
   assert.deepEqual(f.app.runStarts, []);
 });
 
-test('v2 feedback keeps full Skill I/O and the explicit projected comparison while deduplicating real DAG receipts', async t => {
+test('v2 feedback keeps full Skill I/O and the explicit projected comparison while deduplicating equal generic DAG values', async t => {
   const f = setupDAG(t), original = f.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(f.runId).value;
   assert(Buffer.byteLength(JSON.stringify(f.run.nodes)) > 96 * 1024, 'The unprojected real-shape DAG exceeds the evidence limit.');
   const result = await settled(f);
@@ -488,15 +483,10 @@ test('v2 feedback keeps full Skill I/O and the explicit projected comparison whi
   assert.equal(evidence.comparison.portValuePath, 'bundle');
   assert.equal(evidence.comparison.valuePath, 'learningComparison');
   assert.equal(evidence.comparison.available, true);
-  assert.equal(evidence.receipts.length, 3);
-  for (const receipt of evidence.receipts) {
-    const original = f.run.nodes[receipt.nodeId].output;
-    assert.equal(receipt.receiptPath, original.receiptPath);
-    assert.equal(receipt.receiptSha256, original.receiptSha256);
-    assert.equal(receipt.operation, original.operation);
-    assert.equal(receipt.runId, f.runId);
-    assert(!Object.hasOwn(receipt, 'artifacts'), 'The immutable receipt is referenced, not its repeated inventory.');
-    assert.match(receipt.outputFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(evidence, 'receipts'), false);
+  for (const id of ['produce-0', 'produce-back']) {
+    const selected = evidence.subsequent.find(node => node.nodeId === id);
+    assert.deepEqual(evidence.values.find(value => value.id === selected.output.id).value, f.run.nodes[id].output);
   }
   const merge = evidence.subsequent.find(node => node.nodeId === 'merge');
   assert.deepEqual(merge.output, evidence.subsequent.find(node => node.nodeId === 'human').output);
@@ -505,15 +495,15 @@ test('v2 feedback keeps full Skill I/O and the explicit projected comparison whi
   assert(!prompt.includes('UNRELATED_PARALLEL_BRANCH_'));
   assert(!evidence.subsequent.some(node => node.nodeId.startsWith('independent')));
   assert.equal(prompt.split('ACTUAL_COMPARISON_DETAIL_53').length - 1, 1, 'The selected comparison is preserved exactly once.');
-  assert(!prompt.includes(f.artifacts[0].artifactId));
+  assert(prompt.includes(f.artifacts[0].artifactId), 'Generic business inventories remain complete JSON data.');
   assert(Buffer.byteLength(JSON.stringify(evidence)) < 96 * 1024);
   assert.deepEqual(f.app.runStarts, []);
   assert.equal(f.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(f.runId).value, original);
 });
 
-test('v2 feedback does not trust a forged receipt kind or discard its unrecognized fields', async t => {
-  const f = setupDAG(t), unknown = { kind: 'hdk-node-receipt', nodeId: 'not-a-producer', runId: f.runId,
-    operation: 'hdk.full.prepare', receiptPath: '/untrusted/path/must-not-be-read', receiptSha256: 'a'.repeat(64),
+test('v2 feedback treats business receipt-shaped values as ordinary data without discarding fields', async t => {
+  const f = setupDAG(t), unknown = { kind: 'custom-business-receipt', nodeId: 'not-a-producer', runId: f.runId,
+    operation: 'external.prepare', receiptPath: '/untrusted/path/must-not-be-read', receiptSha256: 'a'.repeat(64),
     unknownInventory: [{ exactUserData: 'MUST_KEEP_UNKNOWN_RECEIPT_FIELD' }] };
   f.run.nodes['produce-0'].output = copy(unknown);
   f.run.nodes.merge.output.front = copy(unknown); f.run.nodes.human.output.front = copy(unknown);
@@ -523,21 +513,22 @@ test('v2 feedback does not trust a forged receipt kind or discard its unrecogniz
   f.run.nodes.human.output.back = copy(f.run.nodes['produce-back'].output); f.writeRun(f.run);
   const result = await settled(f); assert.equal(result.status, 'complete', result.error);
   const prompt = f.app.prompts[0], evidence = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1)).evidence;
-  assert.equal(evidence.receipts.length, 2);
-  assert.deepEqual(evidence.receipts.find(receipt => receipt.nodeId === 'produce-back').extra.unrecognized, extra);
+  assert.equal(Object.hasOwn(evidence, 'receipts'), false);
+  const back = evidence.subsequent.find(node => node.nodeId === 'produce-back');
+  assert.deepEqual(evidence.values.find(value => value.id === back.output.id).value.unrecognized, extra);
   const selected = evidence.subsequent.find(node => node.nodeId === 'produce-0');
   assert.deepEqual(evidence.values.find(value => value.id === selected.output.id).value, unknown);
 });
 
 test('v2 feedback keeps oversized unknown payloads and selected comparisons subject to the same 96KiB hard limit', async t => {
-  for (const kind of ['unknown-receipt', 'registered-receipt-extra', 'comparison', 'skill-input', 'skill-output']) {
+  for (const kind of ['unknown-receipt', 'business-value-extra', 'comparison', 'skill-input', 'skill-output']) {
     await t.test(kind, async t => {
       const f = setupDAG(t), large = 'EVIDENCE_MUST_NOT_BE_TRUNCATED_'.repeat(8000);
       if (kind === 'unknown-receipt') {
-        const unknown = { kind: 'hdk-node-receipt', nodeId: 'not-a-producer', runId: f.runId,
+        const unknown = { kind: 'custom-business-receipt', nodeId: 'not-a-producer', runId: f.runId,
           receiptSha256: 'a'.repeat(64), receiptPath: '/untrusted/path', inventory: large };
         f.run.nodes['produce-0'].output = unknown; f.run.nodes.merge.output.front = copy(unknown); f.run.nodes.human.output.front = copy(unknown);
-      } else if (kind === 'registered-receipt-extra') {
+      } else if (kind === 'business-value-extra') {
         f.run.nodes['produce-0'].output.unrecognized = large;
         f.run.nodes.merge.output.front = copy(f.run.nodes['produce-0'].output);
         f.run.nodes.human.output.front = copy(f.run.nodes['produce-0'].output);
@@ -551,18 +542,12 @@ test('v2 feedback keeps oversized unknown payloads and selected comparisons subj
   }
 });
 
-test('v2 feedback rejects receipt tampering and a missing explicit comparison before memory or model calls', async t => {
-  for (const kind of ['receipt-file', 'receipt-snapshot', 'comparison-path']) {
-    await t.test(kind, async t => {
-      const f = setupDAG(t);
-      if (kind === 'receipt-file') writeFileSync(f.run.nodes['produce-0'].output.receiptPath, 'TAMPERED_DISK_RECEIPT');
-      else if (kind === 'receipt-snapshot') f.run.nodes.merge.output.front.artifacts[0].bytes++;
-      else f.run.document.nodes.find(node => node.id === 'compare').config.valuePath = 'missingComparison';
-      f.writeRun(f.run);
-      await assert.rejects(f.start(), error => error.httpStatus === 409 && /回执|对比字段/.test(error.message));
-      assert.equal(f.app.prompts.length, 0); assert.equal(f.app.memoryRequests.length, 0);
-    });
-  }
+test('v2 feedback rejects a missing explicit comparison before memory or model calls', async t => {
+  const f = setupDAG(t);
+  f.run.document.nodes.find(node => node.id === 'compare').config.valuePath = 'missingComparison';
+  f.writeRun(f.run);
+  await assert.rejects(f.start(), error => error.httpStatus === 409 && /对比字段/.test(error.message));
+  assert.equal(f.app.prompts.length, 0); assert.equal(f.app.memoryRequests.length, 0);
 });
 
 test('v2 compact evidence does not weaken the complete source snapshot fingerprint at candidate application', async t => {

@@ -251,7 +251,7 @@ export class Application extends EventEmitter {
     try {
       const [catalog, labels] = await Promise.all([connected ? readSkillCatalog(this.adapter) : [], readSkillLabels(this.config.appRoot)]);
       const skills = [...catalog, ...this.learnedSkills.list()].map(skill => applySkillLabel(this.skillIntegrations?.project(skill) || skill, labels));
-      return { connected, skills: management ? [...skills, ...await listManagedBuiltins(this.config.appRoot, skills)] : skills.filter(skill => skill.enabled !== false) };
+      return { connected, skills: management ? [...skills, ...await listManagedBuiltins(this.config.appRoot)] : skills.filter(skill => skill.enabled !== false) };
     }
     catch (error) { return { connected, skills: management ? await listManagedBuiltins(this.config.appRoot) : [], error: redact(error.message) }; }
   }

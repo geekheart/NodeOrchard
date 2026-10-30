@@ -2,14 +2,12 @@
 // typed ports use the same dataflow protocol as manually authored subflows.
 import { createDocument, createNode, validateDocument, getPorts } from './workflow-model.mjs';
 import { assertImageReviewPaths, requiresImageReview } from './workflow-plan.mjs';
-import { WORKFLOW_TOOLS } from './workflow-tools.mjs';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const uid = prefix => prefix + '-' + globalThis.crypto.randomUUID();
 const fail = message => { throw new Error(message); };
 const signature = (node, port) => node + '\0' + port;
 const business = edge => edge.sourcePort !== 'learning';
-const runBound = node => node?.type === 'tool' && WORKFLOW_TOOLS.find(tool => tool.id === node.config.toolName)?.runBoundInputs === true;
 const getNode = (doc, id) => doc.nodes.find(node => node.id === id);
 const inputSignature = node => JSON.stringify({ id: node.id, type: node.type, fieldName: node.config.fieldName, required: node.config.required, ports: getPorts(node) });
 const outputSignature = node => JSON.stringify({ id: node.id, type: node.type, stage: node.config.stage, ports: getPorts(node) });
@@ -26,10 +24,6 @@ export function analyzeSelection(document, ids) {
     if (selected.has(node.id) && node.type === 'human' && node.config.reviewTargetNodeId && !selected.has(node.config.reviewTargetNodeId)) fail('请将人工审核指定的上游修改目标一并选中。');
   }
   if (doc.edges.some(edge => selected.has(edge.sourceNode) && !selected.has(edge.targetNode) && getNode(doc, edge.targetNode)?.type === 'evaluation')) fail('此能力连接了学习对比支线，请保留在外层，避免改变学习观察目标。');
-  for (const edge of doc.edges.filter(edge => selected.has(edge.sourceNode) !== selected.has(edge.targetNode))) {
-    const source = getNode(doc, edge.sourceNode), target = getNode(doc, edge.targetNode);
-    if (source.type !== 'input' && target.type !== 'output' && (runBound(source) || runBound(target))) fail('此工具要求同次运行的来源回执，请将相关生产、消费和审核节点一并封装，或保持原有连线。');
-  }
   // A non-contiguous selection can create parent-level cycles after folding.
   for (const edge of doc.edges.filter(edge => selected.has(edge.sourceNode) && !selected.has(edge.targetNode))) {
     const pending = [edge.targetNode], seen = new Set();

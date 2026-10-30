@@ -180,9 +180,7 @@ export async function executeOperation({ node, input, cwd, signal, onLog, python
   let output;
   let runtime;
   if (selected.kind === 'tool') {
-    output = selected.toolName.startsWith('hdk.')
-      ? await (await import('./workflow-capabilities.mjs')).executeCapability({ toolName: selected.toolName, input: preparedInput, cwd, signal, onLog, context, pythonPath })
-      : builtin(selected.toolName, preparedInput);
+    output = builtin(selected.toolName, preparedInput);
     runtime = { ...selected, revision: `builtin:${selected.toolName}@1` };
   } else {
     if (typeof cwd !== 'string' || !isAbsolute(cwd) || !(await stat(cwd).catch(() => null))?.isDirectory()) {

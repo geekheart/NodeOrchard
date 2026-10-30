@@ -2,17 +2,6 @@ import { workflowInputFields, workflowInputValue } from './workflow-inputs.mjs';
 // Pure presentation helpers. A diagram's position never determines execution.
 export const STUDIO_STATUS = Object.freeze({ queued: '排队中', preparing: '准备中', pending: '待依赖', ready: '就绪', running: '运行中', waiting_resource: '等待资源', waiting: '待处理', waiting_review: '待审核', complete: '已完成', error: '失败', blocked: '被阻断', skipped: '已跳过', cancelled: '已取消', interrupted: '已停止', unknown: '待确认' });
 export const FIELD_KINDS = Object.freeze([['file', '文件'], ['folder', '文件夹'], ['image', '图片'], ['text', '文本'], ['number', '数字']]);
-const BOARD_SOURCE_FIELD = { key: 'sourcePath', label: '原始 EPRO2 工程', kind: 'file', required: true, extensions: ['.epro2'], role: 'source' };
-const RELEASE_FIELDS = [{ key: 'productCode', label: '产品型号', kind: 'text', required: true }, { key: 'hardwareVersion', label: '硬件版本', kind: 'text', required: true }, { key: 'releaseDate', label: '发布日期 YYYY-MM-DD', kind: 'text', required: true }];
-export const INPUT_FIELD_PRESETS = Object.freeze([
-  { label: '板卡资料字段', fields: [BOARD_SOURCE_FIELD, { key: 'frontImage', label: '正面实拍图', kind: 'image', required: true, extensions: ['.png', '.jpg', '.jpeg'], role: 'front' }, { key: 'backImage', label: '背面实拍图', kind: 'image', required: true, extensions: ['.png', '.jpg', '.jpeg'], role: 'back' }, { key: 'pinoutPhotoProfilePath', label: '已审核照片校准', kind: 'file', required: true, extensions: ['.json'], role: 'calibration' }, ...RELEASE_FIELDS] },
-  { label: '使用指南资料字段', fields: [BOARD_SOURCE_FIELD, { key: 'frontImage', label: '正面实拍图', kind: 'image', required: true, extensions: ['.png'], role: 'front' }, { key: 'backImage', label: '背面实拍图', kind: 'image', required: true, extensions: ['.png'], role: 'back' }, { key: 'guideProfilePath', label: '已核验指南标注配置', kind: 'file', required: true, extensions: ['.json'], role: 'guideProfile' }, { key: 'fourFilesDirectory', label: '已审核四文件资料目录', kind: 'folder', required: true, role: 'fourFiles' }, ...RELEASE_FIELDS] },
-  { label: '完整HDK资料字段', fields: [BOARD_SOURCE_FIELD, { key: 'profilePath', label: '已核验 HDK 发布与测试配置', kind: 'file', required: true, extensions: ['.json'], role: 'hdkProfile' }, ...RELEASE_FIELDS] },
-]);
-export function mergeInputFields(existing = [], preset = []) {
-  const keys = new Set(existing.map(field => field.key));
-  return structuredClone([...existing, ...preset.filter(field => !keys.has(field.key))]);
-}
 export const isV2 = document => document?.schemaVersion === 2;
 export function inputEntries(document) { return (document?.nodes || []).filter(node => node.type === 'input').flatMap(node => workflowInputFields(node).map(field => ({ node, field }))); }
 export function structuredInput(document, values) {

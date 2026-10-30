@@ -562,23 +562,6 @@ export class WorkflowLearning {
     if (run.status !== 'complete') {
       const failedIds = [...new Set([...(run.failedNodeIds || []), ...Object.entries(run.nodes || {})
         .filter(([, node]) => ['error', 'unknown', 'cancelled', 'interrupted'].includes(node.status)).map(([id]) => id)])];
-      const controlledPlanFailure = run.document?.schemaVersion === 2 && run.status === 'error' && failedIds.length > 0 && failedIds.every(id => {
-        const definition = round.document.nodes.find(node => node.id === id), record = run.nodes?.[id];
-        return definition?.type === 'tool' && definition.config.executionMode === 'tool' && definition.config.toolName?.startsWith('hdk.')
-          && record?.status === 'error' && record.errorCode === 'LEARNING_INVALID_PLAN' && record.learningRecoverable === true;
-      });
-      if (controlledPlanFailure) {
-        const diagnostics = failedIds.map(id => ({ nodeId: id, error: message(run.nodes[id].error) }));
-        const skillInputs = {}, skillOutputs = {};
-        for (const id of state.job.config.trainableNodeIds) if (run.nodes?.[id]?.status === 'complete') {
-          if (Object.hasOwn(run.nodes[id], 'input')) skillInputs[id] = bounded(run.nodes[id].input, 'Skill 实际输入');
-          if (Object.hasOwn(run.nodes[id], 'output')) skillOutputs[id] = bounded(run.nodes[id].output, 'Skill 实际输出');
-        }
-        Object.assign(entry, { recoverable: true, score: 0, error: diagnostics.map(item => item.error).join('\n'),
-          feedback: '已登记能力拒绝了当前 Skill 计划，未生成可审核图片：' + diagnostics.map(item => item.error).join('\n'), skillInputs,
-          output: bounded({ kind: 'controlled-skill-plan-rejection', diagnostics, skillOutputs }, '真实排版拒绝诊断') });
-        this.save(state.job); return entry;
-      }
       const node = round.document.nodes.find(node => node.id === run.currentNodeId);
       const error = message(run.error || run.nodes?.[run.currentNodeId]?.error || '');
       const scope = state.job.config.scope || 'skills';

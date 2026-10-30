@@ -10,10 +10,10 @@ import { createDocument, createNode, connectNodes } from '../shared/workflow/wor
 const hash = index => `sha256:${String(index).repeat(64)}`;
 const copy = value => JSON.parse(JSON.stringify(value));
 
-function execution({ hdk = false, id = 'run-one', status = 'complete' } = {}) {
+function execution({ count = 2, id = 'run-one', status = 'complete' } = {}) {
   let document = createDocument({ title: '个人资料流程' });
-  document.id = hdk ? 'workflow-hdk-engineering-delivery' : 'personal-flow';
-  const ids = hdk ? ['hdk-plan-skill', 'hdk-process-skill', 'hdk-firmware-skill', 'hdk-sop-skill'] : ['extract', 'write'];
+  document.id = 'personal-flow';
+  const ids = count === 2 ? ['extract', 'write'] : Array.from({ length: count }, (_, index) => 'capability-' + index);
   document.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'input', config: { outputType: 'text' } }),
     ...ids.map((id, index) => createNode('skill', { x: 300 * (index + 1), y: 0 }, { id, title: `实际主链 ${index + 1}`, config: {
       skillRef: `skill-${index + 1}`, version: hash(index + 1), inputType: 'text', outputType: 'text',
@@ -47,17 +47,17 @@ async function fixture(t, run = execution()) {
   return { db, path, app, manager, events, run, put };
 }
 
-const comment = '命名中保留硬件版本，并校验生成文件内容；测试说明应明确接线要求。';
+const comment = '命名中保留资料版本，并校验生成文件内容；操作说明应明确步骤。';
 const submit = (text = comment, expectedRevision = 0) => ({ expectedRevision, comment: text });
 const throws = (fn, code, match) => assert.throws(fn, error => error.httpStatus === code && (!match || match.test(error.message)));
 
-test('one comprehensive review binds the four immutable HDK Skill versions without Hermes', async t => {
-  const f = await fixture(t, execution({ hdk: true }));
+test('one comprehensive review binds four immutable Skill versions and their actual titles without Hermes', async t => {
+  const f = await fixture(t, execution({ count: 4 }));
   const before = f.db.prepare('SELECT value FROM workflow_runs WHERE id=?').get(f.run.id).value;
   const view = f.manager.get(f.run.id);
   assert.equal(view.feedback, null);
   assert.equal(view.canReview, true);
-  assert.deepEqual(view.targets.map(target => target.title), ['导出与命名', '工艺要求', '测试固件', '测试说明']);
+  assert.deepEqual(view.targets.map(target => target.title), ['实际主链 1', '实际主链 2', '实际主链 3', '实际主链 4']);
   const saved = f.manager.save(f.run.id, submit());
   assert.equal(saved.schemaVersion, 2);
   assert.equal(saved.runId, f.run.id);

@@ -99,7 +99,7 @@ test('trash, restore and purge preserve real output and all history, while sched
   const run = (await until(() => f.api(`/api/workflow-runs/${started.body.id}`), result => result.body.status === 'complete')).body;
   assert.equal(run.output, 'preserved output');
   const file = run.nodes.exit.savedPath, fileHash = hash(await readFile(file));
-  const originalSource = join(f.directory, 'user-owned-input.epro2'); await writeFile(originalSource, 'source must remain intact');
+  const originalSource = join(f.directory, 'user-owned-input.json'); await writeFile(originalSource, 'source must remain intact');
   const scheduleResponse = await f.api('/api/workflow-schedules', scheduleBody(value));
   assert.equal(scheduleResponse.status, 201, JSON.stringify(scheduleResponse.body)); const schedule = scheduleResponse.body.schedule;
   assert.equal(schedule.enabled, true);
@@ -381,7 +381,7 @@ test('inactive workflows cannot begin sample learning, feedback learning or cand
   assert.equal(savedFeedback.status, 200, JSON.stringify(savedFeedback.body));
   const learningId = randomUUID(), feedbackJobId = randomUUID();
   const learning = { id: learningId, workflowId: linked.id, status: 'complete', phase: 'finished', document: { ...linked, mode: 'learn' },
-    rounds: [{ index: 0, status: 'complete', cases: [], changes: [] }], bestDocument: linked, bestRound: 0, bestScore: 100,
+    rounds: [{ index: 0, status: 'complete', document: linked, cases: [], changes: [] }], bestDocument: linked, bestRound: 0, bestScore: 100,
     config: { trainingCases: [], validationCases: [] }, startedAt: now, completedAt: now };
   const feedbackJob = { ...learning, id: feedbackJobId, kind: 'feedback', reason: 'feedback-candidate-ready', validationStatus: 'not-run',
     sourceRunId: id, candidateDocument: linked, feedbackRevision: 1, feedbackSnapshot: savedFeedback.body.feedback };

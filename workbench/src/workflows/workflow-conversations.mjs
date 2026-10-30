@@ -71,7 +71,7 @@ function safeDocument(input, workflowId) {
 }
 function directIntent(value) {
   const input = value.trim().replace(/[。！!]+$/, '');
-  if (/^(?:(?:通过|审核通过|批准|同意通过)(?:[，,]?\s*继续(?:执行|汇总(?:验收)?|验收))?|通过[，,]\s*纳入\s*HDK)$/i.test(input)) return { action: 'review-approve' };
+  if (/^(?:通过|审核通过|批准|同意通过)(?:[，,]?\s*继续(?:执行|汇总(?:验收)?|验收))?$/i.test(input)) return { action: 'review-approve' };
   if (/^(?:停止审核|停止本次运行|停止此分支|拒绝并停止|审核不通过并停止)$/.test(input)) return { action: 'review-stop' };
   if (/^(?:重做|重跑|重新运行)(?:此节点|这个节点|当前节点|该节点)?$/.test(input)) return { action: 'rerun' };
   return null;

@@ -192,13 +192,13 @@ test('library presents all fourteen foundation behaviors separately from built-i
 });
 
 test('unified candidates search base types, configured descriptions and exact registered tool names without domain menus', () => {
-  const ui = library(); const entries = ui.entries({ all: true, query: 'OpenInterfaceMark' }); assert.equal(entries.length, 4); assert.ok(entries.every(item => item.record.definition.node.config.toolName.startsWith('hdk.guide.annotate-')));
-  assert.equal(ui.entries({ all: true, query: 'validation' })[0].type, 'validation'); ui.tab = 'foundation'; assert.deepEqual(ui.entries({ query: 'OpenInterfaceMark' }), []); assert.equal(ui.entries({ all: true }).length, NODE_TYPES.length + WORKFLOW_TOOLS.length);
+  const ui = library(); const entries = ui.entries({ all: true, query: 'text.uppercase' }); assert.equal(entries.length, 1); assert.equal(entries[0].record.definition.node.config.toolName, 'text.uppercase');
+  assert.equal(ui.entries({ all: true, query: 'validation' })[0].type, 'validation'); ui.tab = 'foundation'; assert.deepEqual(ui.entries({ query: 'text.uppercase' }), []); assert.equal(ui.entries({ all: true }).length, NODE_TYPES.length + WORKFLOW_TOOLS.length);
 });
 
 test('creating preset candidates makes fresh pinned instances and never mutates their shared definitions', () => {
-  const ui = library(), entry = ui.entries({ all: true }).find(item => item.record?.toolName === 'hdk.full.sop'), before = structuredClone(entry.record);
-  const first = ui.createEntry(entry, { x: 1, y: 2 }), second = ui.createEntry(entry, { x: 3, y: 4 }); assert.notEqual(first.id, second.id); assert.equal(first.origin.id, entry.key); assert.equal(first.origin.version, 1); assert.deepEqual(first.ports, entry.record.definition.node.ports); assert.equal(first.config.reviewImages, true); assert.deepEqual(entry.record, before);
+  const ui = library(), entry = ui.entries({ all: true }).find(item => item.record?.toolName === 'text.trim'), before = structuredClone(entry.record);
+  const first = ui.createEntry(entry, { x: 1, y: 2 }), second = ui.createEntry(entry, { x: 3, y: 4 }); assert.notEqual(first.id, second.id); assert.equal(first.origin.id, entry.key); assert.equal(first.origin.version, 1); assert.deepEqual(first.ports, entry.record.definition.node.ports); assert.equal(first.config.reviewImages, false); assert.deepEqual(entry.record, before);
 });
 
 test('foundation output is explicitly final while validation has executable passthrough rules', () => {

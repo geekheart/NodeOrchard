@@ -76,21 +76,13 @@ test('every training case supplies its own latest confirmed error and legacy Ski
   assert(!JSON.stringify(source).includes('PRIVATE_VALIDATION'));
 });
 
-test('optimizer contracts omit unrelated specialist catalogs and repeated runtimes while retaining real used or named tools', async()=>{
-  const sources=[];
-  const capture=async request=>optimizeWorkflowCandidate({...request,generate:async prompt=>{sources.push(JSON.parse(prompt.split('OPTIMIZER_SOURCE_JSON=')[1]));return {operations:[],summary:'检查相关契约，无修改'};}});
-  await capture(options());
-  const plain=sources[0];assert.deepEqual(plain.tools.map(tool=>tool.id),['text.trim','text.uppercase','json.parse','json.stringify','json.keys']);
-  assert(plain.catalogSelection.tools.omitted>0);assert(plain.nodes.every(node=>!Object.hasOwn(node,'runtime')));assert.equal(plain.runtime.javascript.sourceFormat,'async-function-body');
-  assert(!JSON.stringify(plain).includes('hdk.guide.'));assert(!JSON.stringify(plain).includes('hdk.full.'));
-  const specialist=graph();specialist.nodes=specialist.nodes.map(node=>node.id==='input'?createNode('input',{}, {id:'input',config:{outputType:'object',defaultValue:{}}})
-    :node.id==='worker'?createNode('tool',{}, {id:'worker',config:{executionMode:'tool',toolName:'hdk.four.prepare',inputType:'object',outputType:'object'}}):node);
-  await capture(options(specialist));
-  const used=sources[1].tools.find(tool=>tool.id==='hdk.four.prepare');assert(used);assert.equal(used.reviewRequired,false);assert.deepEqual(used.ports.inputs,[{id:'in',label:'板卡资料',type:'object',required:true}]);
-  assert.equal(sources[1].tools.filter(tool=>tool.id.startsWith('hdk.')).length,1);
-  await capture({...options(),rubric:'请使用 hdk.four.pinout-front 的真实接口要求，不改变审核规则。'});
-  const named=sources[2].tools.find(tool=>tool.id==='hdk.four.pinout-front');assert(named);assert.equal(named.reviewRequired,true);assert.deepEqual(named.ports.inputs.map(port=>port.id),['facts','plan']);
-  assert.equal(sources[2].tools.filter(tool=>tool.id.startsWith('hdk.')).length,1);
+test('optimizer contracts expose real generic tools without repeating node runtimes', async()=>{
+  let source;
+  await optimizeWorkflowCandidate({...options(),generate:async prompt=>{source=JSON.parse(prompt.split('OPTIMIZER_SOURCE_JSON=')[1]);return {operations:[],summary:'检查通用契约，无修改'};}});
+  assert.deepEqual(source.tools.map(tool=>tool.id),['text.trim','text.uppercase','json.parse','json.stringify','json.keys']);
+  assert.equal(source.catalogSelection.tools.omitted,0);assert(source.nodes.every(node=>!Object.hasOwn(node,'runtime')));
+  assert.equal(source.runtime.javascript.sourceFormat,'async-function-body');
+  assert(source.tools.every(tool=>tool.reviewRequired===false));
 });
 
 test('oversized training context is diagnosed without truncating samples or leaking validation evidence', async()=>{

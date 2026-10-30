@@ -2,12 +2,6 @@ import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
 
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const REVISION = /^sha256:[a-f0-9]{64}$/;
-const HDK_TITLES = Object.freeze({
-  'hdk-plan-skill': '导出与命名',
-  'hdk-process-skill': '工艺要求',
-  'hdk-firmware-skill': '测试固件',
-  'hdk-sop-skill': '测试说明',
-});
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -57,7 +51,7 @@ export class WorkflowFeedback {
       if (!REVISION.test(actual.revision || '') || actual.revision !== node.config.version
         || actual.name !== node.config.skillRef) return [];
       return [{ nodeId: node.id,
-        title: (run.workflowId === 'workflow-hdk-engineering-delivery' && HDK_TITLES[node.id]) || node.title,
+        title: node.title,
         skillRef: actual.name, version: actual.revision, status: run.nodes?.[node.id]?.status || 'pending' }];
     });
   }

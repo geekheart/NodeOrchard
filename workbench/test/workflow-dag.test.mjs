@@ -45,8 +45,6 @@ test('image review requirements reject a direct or merge-based bypass before any
   assert.doesNotThrow(() => planWorkflow(safe));
   const bypass = graph([...safe.nodes, code('bypass')], [['input', 'image'], ['image', 'review'], ['review', 'output'], ['image', 'bypass']]);
   assert.throws(() => planWorkflow(bypass), /人工审核/);
-  const registered = code('image', { executionMode: 'tool', toolName: 'hdk.four.pinout-front', reviewImages: false });
-  assert.throws(() => planWorkflow(graph([node('input', 'input'), registered, node('output', 'output')], [['input', 'image'], ['image', 'output']])), /人工审核/);
 });
 
 test('a Skill requiring native image generation needs human review before any model submission', () => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocument, createNode, connectNodes } from '../shared/workflow/workflow-model.mjs';
-import { structuredInput, valuesFromInput, layoutPositions, needsAutoLayout, runArtifacts, portCompatible, shortVersion, inputEntries, vacantNodePosition, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, nodeThumbnailArtifact, canRerunNode, nodeInspectionVersions, reviewTargetNodes, INPUT_FIELD_PRESETS, mergeInputFields } from '../shared/workflow/workflow-studio-utils.mjs';
+import { structuredInput, valuesFromInput, layoutPositions, needsAutoLayout, runArtifacts, portCompatible, shortVersion, inputEntries, vacantNodePosition, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, nodeThumbnailArtifact, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WorkflowStudioUI, inlineInputFields, nodePreviewArtifacts, nodeShowsCanvasPreview } from '../public/workflow-studio-ui.js';
 import { WorkflowRuntimeUI, workflowSnapshotChanged, mergeSkillSelectionDraft } from '../public/workflow-runtime-ui.js';
 import { WorkflowEditor } from '../public/workflow-editor.js';
@@ -9,31 +9,40 @@ import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { learningSnapshotChanged } from '../public/workflow-learning-ui.js';
 import { planWorkflow } from '../shared/workflow/workflow-plan.mjs';
 
+// User-authored schemas live in workflow fixtures, never in the product catalog.
+function inputFields(kind = 'detail') {
+  return [
+    { key: 'sourcePath', label: '原始文件', kind: 'file', required: true, extensions: ['.csv'] },
+    { key: 'frontImage', label: '第一张图片', kind: 'image', required: true, extensions: ['.png'] },
+    { key: 'backImage', label: '第二张图片', kind: 'image', required: true, extensions: ['.png'] },
+    { key: 'configPath', label: '配置文件', kind: 'file', required: true, extensions: ['.json'] },
+    ...(kind === 'detail' ? [{ key: 'referenceDirectory', label: '参考目录', kind: 'folder', required: true }] : []),
+    { key: 'name', label: '名称', kind: 'text', required: true },
+    { key: 'version', label: '版本', kind: 'text', required: true },
+    { key: 'releaseDate', label: '日期', kind: 'text', required: true },
+  ];
+}
+
 function documentWithInputs(count = 1) { const doc = createDocument({ schemaVersion: 2 }); doc.nodes = Array.from({ length: count }, (_, index) => createNode('input', { x: 0, y: 0 }, { id: `input-${index}`, config: { outputType: 'object', fieldName: `source${index}`, fields: [{ key: 'path', label: '工程', kind: 'file', required: true }, { key: 'count', label: '数量', kind: 'number', required: true }] } })); return doc; }
 
 test('structured input preserves separate sources and falsey numeric values without path inference', () => {
-  const doc = documentWithInputs(2), values = { 'input-0': { path: '/a.epro2', count: 0 }, 'input-1': { path: '/b.epro2', count: 2 } };
+  const doc = documentWithInputs(2), values = { 'input-0': { path: '/a.csv', count: 0 }, 'input-1': { path: '/b.csv', count: 2 } };
   const value = structuredInput(doc, values); assert.deepEqual(value, { source0: values['input-0'], source1: values['input-1'] }); assert.deepEqual(valuesFromInput(doc, value), values); assert.equal(inputEntries(doc).length, 4);
 });
 
 test('single input restores both direct and server-normalized wrapped values', () => {
-  const doc = documentWithInputs(), source = { path: '/input.epro2', count: 0 };
+  const doc = documentWithInputs(), source = { path: '/input.csv', count: 0 };
   assert.deepEqual(structuredInput(doc, { 'input-0': source }), source);
   assert.deepEqual(valuesFromInput(doc, source), { 'input-0': source });
   assert.deepEqual(valuesFromInput(doc, { source0: source }), { 'input-0': source });
 });
 
-test('guide and full-HDK field presets define the exact preparation contracts and preserve matching custom definitions', () => {
-  const guide = INPUT_FIELD_PRESETS.find(preset => preset.label === '使用指南资料字段'), hdk = INPUT_FIELD_PRESETS.find(preset => preset.label === '完整HDK资料字段');
-  assert.deepEqual(guide.fields.map(field => [field.key, field.kind]), [['sourcePath', 'file'], ['frontImage', 'image'], ['backImage', 'image'], ['guideProfilePath', 'file'], ['fourFilesDirectory', 'folder'], ['productCode', 'text'], ['hardwareVersion', 'text'], ['releaseDate', 'text']]); assert.deepEqual(guide.fields.find(field => field.key === 'frontImage').extensions, ['.png']); assert.deepEqual(hdk.fields.map(field => field.key), ['sourcePath', 'profilePath', 'productCode', 'hardwareVersion', 'releaseDate']);
-  const existing = [{ key: 'sourcePath', label: '我的工程路径', kind: 'file', required: false, extensions: ['.custom'], role: 'custom' }, { key: 'notes', label: '个人备注', kind: 'text', required: false }], before = structuredClone(existing), presetsBefore = structuredClone(INPUT_FIELD_PRESETS), merged = mergeInputFields(existing, guide.fields);
-  assert.deepEqual(merged.slice(0, 2), existing); assert.deepEqual(mergeInputFields(merged, guide.fields), merged, 'reapplying a preset never duplicates or changes fields'); merged[0].extensions.push('.another'); assert.deepEqual(existing, before); assert.deepEqual(INPUT_FIELD_PRESETS, presetsBefore);
-});
+
 
 test('prepared input drafts survive reload without claiming that the files have passed admission', t => {
   const previous = globalThis.localStorage, saved = new Map(); globalThis.localStorage = { getItem: key => saved.get(key) || null, setItem: (key, value) => saved.set(key, value) }; t.after(() => { if (previous) globalThis.localStorage = previous; else delete globalThis.localStorage; });
-  const document = documentWithInputs(), original = Object.create(WorkflowStudioUI.prototype); original.editor = { doc: document }; original.runtime = { input: {} }; original.values = { 'input-0': { path: '/workspace/project.epro2', count: 0 } }; original.syncRawInput();
-  const reloaded = Object.create(WorkflowStudioUI.prototype); Object.assign(reloaded, { editor: { doc: document, root: { dataset: {} }, renderLibrary() {} }, upgrade: {}, check: {}, renderInputs() {}, renderGraph() {}, setTab() {}, setView() {} }); reloaded.syncDocument(); assert.deepEqual(reloaded.values, original.values); assert.equal(reloaded.preflightResult, null); assert.deepEqual(JSON.parse(original.runtime.input.value), { path: '/workspace/project.epro2', count: 0 });
+  const document = documentWithInputs(), original = Object.create(WorkflowStudioUI.prototype); original.editor = { doc: document }; original.runtime = { input: {} }; original.values = { 'input-0': { path: '/workspace/project.csv', count: 0 } }; original.syncRawInput();
+  const reloaded = Object.create(WorkflowStudioUI.prototype); Object.assign(reloaded, { editor: { doc: document, root: { dataset: {} }, renderLibrary() {} }, upgrade: {}, check: {}, renderInputs() {}, renderGraph() {}, setTab() {}, setView() {} }); reloaded.syncDocument(); assert.deepEqual(reloaded.values, original.values); assert.equal(reloaded.preflightResult, null); assert.deepEqual(JSON.parse(original.runtime.input.value), { path: '/workspace/project.csv', count: 0 });
 });
 
 test('saving a new workflow version copies prepared input values under remapped IDs without copying preflight evidence', t => {
@@ -41,7 +50,7 @@ test('saving a new workflow version copies prepared input values under remapped 
   t.after(() => { if (previous) globalThis.localStorage = previous; else delete globalThis.localStorage; });
   const source = documentWithInputs(), target = documentWithInputs(); target.nodes[0].id = 'new-input';
   const studio = Object.create(WorkflowStudioUI.prototype); studio.editor = { doc: source };
-  studio.values = { 'input-0': { path: '/project.epro2', count: 0, enabled: false } }; studio.preflightResult = { ok: true, manifest: { privateRun: 'original' } };
+  studio.values = { 'input-0': { path: '/project.csv', count: 0, enabled: false } }; studio.preflightResult = { ok: true, manifest: { privateRun: 'original' } };
   assert.deepEqual(studio.copyInputDrafts(target, { 'input-0': 'new-input' }), { copiedInputs: 1 });
   assert.deepEqual(JSON.parse(saved.get('workbench.workflow-inputs.v2:' + target.id)), { 'new-input': studio.values['input-0'] });
   assert.equal(saved.size, 1); assert.ok(![...saved.values()].some(value => value.includes('privateRun')));
@@ -139,8 +148,8 @@ test('run-state labels follow the persisted dependency order rather than inserti
 });
 
 test('source-file counts read manifest entries and count folder files separately from parameter fields', () => {
-  assert.equal(manifestSourceCount({ entries: [{ kind: 'file', path: '/source.epro2' }, { kind: 'image', path: '/front.png' }, { kind: 'image', path: '/back.png' }, { kind: 'file', path: '/profile.json' }, { kind: 'text', value: 'P4C61-TINY' }, { kind: 'text', value: '1.0' }, { kind: 'text', value: '2026-10-25' }] }), 4);
-  assert.equal(manifestSourceCount({ entries: [{ kind: 'folder', path: '/资料', files: [{ path: '/资料/a' }, { path: '/资料/b' }, { path: '/资料/c' }] }, { kind: 'file', path: '/source.epro2' }, { kind: 'number', value: 3 }, { kind: 'text', path: '/a-text-is-not-a-file', value: 'parameter' }] }), 4); assert.equal(manifestSourceCount(undefined), 0);
+  assert.equal(manifestSourceCount({ entries: [{ kind: 'file', path: '/source.csv' }, { kind: 'image', path: '/front.png' }, { kind: 'image', path: '/back.png' }, { kind: 'file', path: '/profile.json' }, { kind: 'text', value: 'P4C61-TINY' }, { kind: 'text', value: '1.0' }, { kind: 'text', value: '2026-10-25' }] }), 4);
+  assert.equal(manifestSourceCount({ entries: [{ kind: 'folder', path: '/资料', files: [{ path: '/资料/a' }, { path: '/资料/b' }, { path: '/资料/c' }] }, { kind: 'file', path: '/source.csv' }, { kind: 'number', value: 3 }, { kind: 'text', path: '/a-text-is-not-a-file', value: 'parameter' }] }), 4); assert.equal(manifestSourceCount(undefined), 0);
 });
 
 test('node-version options list the current attempt and newest history first without changing their values', () => {
@@ -159,15 +168,15 @@ test('v2 manual execution never submits a run if actual file preflight fails', a
   let document = documentWithInputs(); document.nodes.push(createNode('tool', { x: 300, y: 0 }, { id: 'code', config: { code: 'return input' } }), createNode('output', { x: 600, y: 0 }, { id: 'output' }));
   document = connectNodes(document, { sourceNode: 'input-0', sourcePort: 'out', targetNode: 'code', targetPort: 'in' }); document = connectNodes(document, { sourceNode: 'code', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
   let submitted = 0, checks = 0; const runtime = Object.create(WorkflowRuntimeUI.prototype);
-  Object.assign(runtime, { editor: { doc: document, prepareRun: () => document, studio: { syncRawInput() {}, preflight: async () => { checks++; return { ok: false, errors: [{ code: 'missing', message: '工程未准备好' }] }; } } }, input: { value: JSON.stringify({ path: '/missing.epro2', count: 0 }) }, skillPending: new Set(), setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, activeRun: () => null, showNotice(message) { this.noticeText = message; }, getBackend: () => ({ state: 'offline' }), api: async () => { submitted++; } });
+  Object.assign(runtime, { editor: { doc: document, prepareRun: () => document, studio: { syncRawInput() {}, preflight: async () => { checks++; return { ok: false, errors: [{ code: 'missing', message: '工程未准备好' }] }; } } }, input: { value: JSON.stringify({ path: '/missing.csv', count: 0 }) }, skillPending: new Set(), setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, activeRun: () => null, showNotice(message) { this.noticeText = message; }, getBackend: () => ({ state: 'offline' }), api: async () => { submitted++; } });
   await runtime.start(); assert.equal(checks, 1); assert.equal(submitted, 0); assert.match(runtime.noticeText, /工程未准备好/); assert.equal(runtime.starting, false);
 });
 
 test('v2 manual execution posts the preflight-normalized input exactly once', async () => {
   let document = documentWithInputs(); document.nodes.push(createNode('tool', { x: 300, y: 0 }, { id: 'code', config: { code: 'return input' } }), createNode('output', { x: 600, y: 0 }, { id: 'output' }));
   document = connectNodes(document, { sourceNode: 'input-0', sourcePort: 'out', targetNode: 'code', targetPort: 'in' }); document = connectNodes(document, { sourceNode: 'code', sourcePort: 'out', targetNode: 'output', targetPort: 'in' });
-  const normalized = { source0: { path: '/valid.epro2', count: 0 } }; let submitted;
-  const runtime = Object.create(WorkflowRuntimeUI.prototype); Object.assign(runtime, { editor: { doc: document, prepareRun: () => document, studio: { syncRawInput() {}, preflight: async () => ({ ok: true, input: normalized }), setView() {} } }, input: { value: JSON.stringify({ path: '/valid.epro2', count: 0 }) }, skillPending: new Set(), revisions: new Map(), revision: 0, setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, activeRun: () => null, showNotice() {}, getBackend: () => ({ state: 'offline' }), api: async (url, options) => { submitted = options.body; return { run: { id: 'real-run', workflowId: document.id, status: 'queued', document } }; }, storeRun() {}, render() {} });
+  const normalized = { source0: { path: '/valid.csv', count: 0 } }; let submitted;
+  const runtime = Object.create(WorkflowRuntimeUI.prototype); Object.assign(runtime, { editor: { doc: document, prepareRun: () => document, studio: { syncRawInput() {}, preflight: async () => ({ ok: true, input: normalized }), setView() {} } }, input: { value: JSON.stringify({ path: '/valid.csv', count: 0 }) }, skillPending: new Set(), revisions: new Map(), revision: 0, setExpanded() {}, syncWorkflow() {}, updateRunButton() {}, activeRun: () => null, showNotice() {}, getBackend: () => ({ state: 'offline' }), api: async (url, options) => { submitted = options.body; return { run: { id: 'real-run', workflowId: document.id, status: 'queued', document } }; }, storeRun() {}, render() {} });
   await runtime.start(); assert.deepEqual(submitted.input, normalized); assert.equal(runtime.currentRunId, 'real-run');
 });
 
@@ -224,7 +233,7 @@ test('inline input preparation keeps every file, folder and image visible even a
   const node = createNode('input', {}, { config: { outputType: 'object', fields } }), before = structuredClone(node);
   assert.deepEqual(inlineInputFields(node).visible.map(field => field.key), ['source', 'front', 'back', 'profile', 'directory']);
   assert.equal(inlineInputFields(node).remaining, 3); assert.deepEqual(node, before);
-  const legacyPath = createNode('input', {}, { title: '原始工程', config: { sourceKind: 'file', extensions: ['.epro2'] } });
+  const legacyPath = createNode('input', {}, { title: '原始工程', config: { sourceKind: 'file', extensions: ['.csv'] } });
   assert.deepEqual(inlineInputFields(legacyPath).visible.map(field => [field.key, field.kind]), [['path', 'file']]);
 });
 
@@ -244,18 +253,18 @@ function nodeGraphFixture(t, nodes, selectedRun = null) {
 }
 
 test('input cards display readable filenames, preserve full editable paths, and use the real path picker', t => {
-  const node = createNode('input', {}, { id: 'source', title: '工程资料', config: { outputType: 'object', fields: structuredClone(INPUT_FIELD_PRESETS[1].fields) } });
+  const node = createNode('input', {}, { id: 'source', title: '输入资料', config: { outputType: 'object', fields: structuredClone(inputFields('detail')) } });
   const { studio, cards, descendants } = nodeGraphFixture(t, [node]);
-  studio.values.source = { sourcePath: '/fixtures/example/很长的工作目录/原始工程.epro2', guideProfilePath: '/fixtures/example/指南配置.json', fourFilesDirectory: '/fixtures/example/四文件目录' };
-  studio.pickPath = (field, previous, done) => { assert.equal(field.key, 'sourcePath'); assert.equal(previous, studio.values.source.sourcePath); done('/fixtures/example/新工程.epro2'); };
+  studio.values.source = { sourcePath: '/fixtures/example/很长的工作目录/原始工程.csv', configPath: '/fixtures/example/指南配置.json', referenceDirectory: '/fixtures/example/四文件目录' };
+  studio.pickPath = (field, previous, done) => { assert.equal(field.key, 'sourcePath'); assert.equal(previous, studio.values.source.sourcePath); done('/fixtures/example/新工程.csv'); };
   studio.renderGraph();
-  const elements = descendants(cards.get(node.id)), control = elements.find(item => item.attributes['aria-label'] === '工程资料 · 原始 EPRO2 工程');
+  const elements = descendants(cards.get(node.id)), control = elements.find(item => item.attributes['aria-label'] === '输入资料 · 原始文件');
   assert.equal(elements.filter(item => item.tag === 'input').length, 5, 'all five path fields remain directly editable');
-  assert.ok(elements.some(item => item.textContent === '原始工程.epro2' && item.title === control.value));
+  assert.ok(elements.some(item => item.textContent === '原始工程.csv' && item.title === control.value));
   assert.equal(control.title, control.value); assert.equal(control.value, studio.values.source.sourcePath);
-  elements.find(item => item.attributes['aria-label'] === '工程资料 · 选择原始 EPRO2 工程').listeners.click();
-  assert.equal(studio.values.source.sourcePath, '/fixtures/example/新工程.epro2'); assert.equal(control.title, studio.values.source.sourcePath);
-  assert.ok(elements.some(item => item.textContent === '新工程.epro2')); assert.equal(studio.invalidated, true);
+  elements.find(item => item.attributes['aria-label'] === '输入资料 · 选择原始文件').listeners.click();
+  assert.equal(studio.values.source.sourcePath, '/fixtures/example/新工程.csv'); assert.equal(control.title, studio.values.source.sourcePath);
+  assert.ok(elements.some(item => item.textContent === '新工程.csv')); assert.equal(studio.invalidated, true);
   assert.ok(elements.some(item => /准备全部 8 项资料/.test(item.textContent))); assert.ok(studio.editor.geometryRequests >= 2);
 });
 
@@ -281,12 +290,7 @@ function previewRunFixture() {
 }
 
 test('canvas previews focus on image-producing capabilities, review gates and final delivery', () => {
-  for (const toolName of ['hdk.four.pinout-front', 'hdk.four.pinout-back', 'hdk.guide.drawio', 'hdk.guide.annotate-back-en', 'hdk.full.native', 'hdk.full.process', 'hdk.full.sop']) {
-    assert.equal(nodeShowsCanvasPreview({ type: 'tool', config: { executionMode: 'tool', toolName } }), true, toolName);
-  }
-  for (const toolName of ['hdk.four.native', 'hdk.four.verify', 'hdk.pinout.verify', 'hdk.guide.import-four', 'hdk.guide.assemble', 'hdk.full.verify-delivery']) {
-    assert.equal(nodeShowsCanvasPreview({ type: 'tool', config: { executionMode: 'tool', toolName } }), false, toolName);
-  }
+  for (const tool of WORKFLOW_TOOLS) assert.equal(nodeShowsCanvasPreview({ type: 'tool', config: { executionMode: 'tool', toolName: tool.id } }), false, tool.id);
   assert.equal(nodeShowsCanvasPreview({ type: 'human' }), true);
   assert.equal(nodeShowsCanvasPreview({ type: 'output' }), true, 'legacy final outputs keep their delivery overview');
   assert.equal(nodeShowsCanvasPreview({ type: 'output', config: { stage: 'intermediate' } }), false);
@@ -297,7 +301,7 @@ test('canvas previews focus on image-producing capabilities, review gates and fi
 test('inherited and copied images do not create canvas previews on transit nodes or stage manifests', t => {
   const run = previewRunFixture();
   const nodes = [createNode('merge', {}, { id: 'merged', title: '汇总图片' }),
-    createNode('tool', {}, { id: 'checked', title: '验收图片', config: { executionMode: 'tool', toolName: 'hdk.pinout.verify' } }),
+    createNode('tool', {}, { id: 'checked', title: '验收图片', config: { executionMode: 'code', language: 'javascript', code: 'return input;' } }),
     createNode('output', {}, { id: 'stage', title: '审核成果清单', config: { stage: 'intermediate' } })];
   for (const node of nodes) {
     run.document.nodes.push(node);
@@ -332,10 +336,10 @@ test('output cards show multiple registered images with original-size links and 
   images[0].listeners.load(); assert.equal(studio.editor.geometryRequests, 2);
 });
 
-function preflightFixture(t, preset = '使用指南资料字段') {
+function preflightFixture(t, preset = 'detail') {
   const previous = globalThis.document, make = tag => { const item = new FakeElement(tag); item.dataset = {}; item.classes = new Set(); item.classList = { toggle(name, yes) { if (yes) item.classes.add(name); else item.classes.delete(name); } }; item.remove = () => { item.removed = true; }; return item; };
   globalThis.document = { createElement: make }; t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
-  const create = label => { const doc = createDocument({ schemaVersion: 2 }); doc.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'shared-input-id', config: { outputType: 'object', fields: structuredClone(INPUT_FIELD_PRESETS.find(item => item.label === label).fields) } })]; return doc; };
+  const create = label => { const doc = createDocument({ schemaVersion: 2 }); doc.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'shared-input-id', config: { outputType: 'object', fields: structuredClone(inputFields(label)) } })]; return doc; };
   const studio = Object.create(WorkflowStudioUI.prototype), descendants = item => [item, ...(item.children || []).flatMap(descendants)];
   Object.assign(studio, { values: {}, check: make('button'), upgrade: {}, inputs: make('div'), inputNotice: make('p'), runtime: { input: make('textarea') }, renderGraph() {}, setTab(tab) { this.tab = tab; }, setView() {} });
   studio.inputs.querySelectorAll = selector => selector === '.wf-studio-input-error' ? descendants(studio.inputs).filter(item => item.className === selector.slice(1) && !item.removed) : [];
@@ -350,7 +354,7 @@ test('cross-workflow preparation never reuses the previous green notice, counts 
   studio.api = async () => result(21); await studio.preflight({ quiet: true, input: {} });
   assert.match(studio.inputNotice.textContent, /8 项输入.*21 项来源文件/);
   const oldError = make('p'); oldError.className = 'wf-studio-input-error'; studio.inputs.append(oldError);
-  studio.editor.doc = create('板卡资料字段'); studio.syncDocument();
+  studio.editor.doc = create('basic'); studio.syncDocument();
   assert.equal(studio.preflightResult, null); assert.equal(studio.inputNotice.textContent, ''); assert.equal(studio.inputNotice.hidden, true); assert.equal(studio.inputNotice.classes.has('error'), false); assert.equal(oldError.removed, true);
   studio.api = async () => result(); await studio.preflight({ quiet: true, input: {} }); assert.match(studio.inputNotice.textContent, /7 项输入.*4 项来源文件/);
 });
@@ -358,20 +362,20 @@ test('cross-workflow preparation never reuses the previous green notice, counts 
 test('late preflight for another workflow returns its frozen result without changing the newer form or request', async t => {
   const { studio, create, result } = preflightFixture(t); let first, second;
   studio.api = () => new Promise(resolve => { if (!first) first = resolve; else second = resolve; });
-  const originalDocument = structuredClone(studio.editor.doc), frozenInput = { sourcePath: '/old-source.epro2' }, older = studio.preflight({ quiet: true, document: originalDocument, input: frozenInput });
-  studio.editor.doc = create('板卡资料字段'); studio.syncDocument(); const latest = studio.preflight({ quiet: true, input: { sourcePath: '/current.epro2' } });
+  const originalDocument = structuredClone(studio.editor.doc), frozenInput = { sourcePath: '/old-source.csv' }, older = studio.preflight({ quiet: true, document: originalDocument, input: frozenInput });
+  studio.editor.doc = create('basic'); studio.syncDocument(); const latest = studio.preflight({ quiet: true, input: { sourcePath: '/current.csv' } });
   const oldResult = result(21); first(oldResult); assert.equal(await older, oldResult); assert.equal(studio.preflightResult, null); assert.equal(studio.inputNotice.textContent, ''); assert.equal(studio.check.disabled, true, 'old finally must not re-enable the newer request');
   const newestResult = result(); second(newestResult); await latest;
-  assert.equal(studio.preflightResult, newestResult); assert.match(studio.inputNotice.textContent, /7 项输入.*4 项来源文件/); assert.equal(studio.check.disabled, false); assert.equal(frozenInput.sourcePath, '/old-source.epro2'); assert.deepEqual(originalDocument.nodes[0].config.fields, INPUT_FIELD_PRESETS.find(item => item.label === '使用指南资料字段').fields);
+  assert.equal(studio.preflightResult, newestResult); assert.match(studio.inputNotice.textContent, /7 项输入.*4 项来源文件/); assert.equal(studio.check.disabled, false); assert.equal(frozenInput.sourcePath, '/old-source.csv'); assert.deepEqual(originalDocument.nodes[0].config.fields, inputFields('detail'));
 });
 
 test('editing a prepared field invalidates its admission immediately and ignores the in-flight old response', async t => {
-  const { studio, result, descendants } = preflightFixture(t, '板卡资料字段'); studio.api = async () => result(); await studio.preflight({ quiet: true, input: {} });
-  let finish; studio.api = () => new Promise(resolve => { finish = resolve; }); const pending = studio.preflight({ quiet: true, input: { sourcePath: '/previous.epro2' } });
-  const field = descendants(studio.inputs).find(item => item.dataset?.inputKey === 'sourcePath'); field.value = '/new-source.epro2'; field.dispatchEvent({ type: 'input' });
+  const { studio, result, descendants } = preflightFixture(t, 'basic'); studio.api = async () => result(); await studio.preflight({ quiet: true, input: {} });
+  let finish; studio.api = () => new Promise(resolve => { finish = resolve; }); const pending = studio.preflight({ quiet: true, input: { sourcePath: '/previous.csv' } });
+  const field = descendants(studio.inputs).find(item => item.dataset?.inputKey === 'sourcePath'); field.value = '/new-source.csv'; field.dispatchEvent({ type: 'input' });
   assert.equal(studio.preflightResult, null); assert.equal(studio.inputNotice.textContent, ''); assert.equal(studio.inputNotice.hidden, true);
   const oldResult = { ok: false, errors: [{ key: 'sourcePath', message: 'old missing file' }] }; finish(oldResult); assert.equal(await pending, oldResult);
-  assert.equal(studio.values['shared-input-id'].sourcePath, '/new-source.epro2'); assert.equal(studio.inputNotice.textContent, ''); assert.equal(studio.inputs.querySelectorAll('.wf-studio-input-error').length, 0);
+  assert.equal(studio.values['shared-input-id'].sourcePath, '/new-source.csv'); assert.equal(studio.inputNotice.textContent, ''); assert.equal(studio.inputs.querySelectorAll('.wf-studio-input-error').length, 0);
 });
 
 test('a late failure from an older check cannot replace the latest successful admission', async t => {
@@ -384,19 +388,23 @@ test('a late failure from an older check cannot replace the latest successful ad
 
 test('restoring input, editing its schema and changing the unblurred output root all invalidate preparation only', async t => {
   const { studio, result } = preflightFixture(t); studio.api = async () => result();
-  for (const change of [() => studio.restoreInput({ sourcePath: '/restored.epro2' }), () => { const next = structuredClone(studio.editor.doc); next.nodes[0].config.fields[0].required = false; studio.editor.doc = next; studio.syncDocument(); }, () => { studio.outputDirectoryInput.value = '/next-output'; studio.flushRunSettings(); }]) {
+  for (const change of [() => studio.restoreInput({ sourcePath: '/restored.csv' }), () => { const next = structuredClone(studio.editor.doc); next.nodes[0].config.fields[0].required = false; studio.editor.doc = next; studio.syncDocument(); }, () => { studio.outputDirectoryInput.value = '/next-output'; studio.flushRunSettings(); }]) {
     await studio.preflight({ quiet: true, input: {} }); assert.ok(studio.preflightResult); change(); assert.equal(studio.preflightResult, null); assert.equal(studio.inputNotice.hidden, true); assert.equal(studio.inputNotice.textContent, '');
   }
   assert.equal(studio.editor.doc.settings.outputDirectory, '/next-output');
 });
 
-test('all three visible field-preset buttons merge the latest schema while leaving prepared input drafts untouched', t => {
+test('input schema edits add only user-defined fields and preserve prepared values', t => {
   const previous = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
-  const node = { id: 'input', type: 'input', config: { fields: [{ key: 'releaseDate', label: '自定义日期', kind: 'text', required: false }, { key: 'custom', label: '备注', kind: 'text', required: false }] } }, studio = Object.create(WorkflowStudioUI.prototype); let applied = 0;
-  Object.assign(studio, { editor: { doc: { nodes: [node] }, properties: new FakeElement('aside'), settings: {}, applySettings() { applied++; } }, values: { input: { releaseDate: '2026-10-25', custom: '已准备的值' } }, runtime: { input: { value: '{"preserved":true}' } }, setTab(tab) { this.tab = tab; }, updateConfig(id, config) { const current = this.editor.doc.nodes.find(item => item.id === id); current.config = { ...current.config, ...config }; return true; } }); const before = structuredClone(studio.values);
-  studio.renderFieldSchema(node); const section = studio.editor.properties.children[0], buttons = section.children.filter(item => item.tag === 'button'), press = label => buttons.find(item => item.textContent === label).listeners.click();
-  press('使用指南资料字段'); assert.equal(node.config.fields.length, 9); press('完整HDK资料字段'); press('板卡资料字段'); press('使用指南资料字段');
-  assert.equal(node.config.fields.length, 11); assert.equal(new Set(node.config.fields.map(field => field.key)).size, 11); assert.deepEqual(node.config.fields[0], { key: 'releaseDate', label: '自定义日期', kind: 'text', required: false }); assert.equal(node.config.outputType, 'object'); assert.deepEqual(studio.values, before); assert.equal(studio.runtime.input.value, '{"preserved":true}'); assert.equal(applied, 4); assert.equal(studio.tab, 'inputs'); assert.ok(section.children.some(item => /提前准备.*匹配.*资料目录/.test(item.textContent)));
+  const node = { id: 'input', type: 'input', config: { fields: [{ key: 'custom', label: '备注', kind: 'text', required: false }] } }, studio = Object.create(WorkflowStudioUI.prototype);
+  Object.assign(studio, { editor: { doc: { nodes: [node] }, properties: new FakeElement('aside') }, values: { input: { custom: '已准备的值' } }, updateConfig(id, config) { node.config = { ...node.config, ...config }; return true; } });
+  const before = structuredClone(studio.values); studio.renderFieldSchema(node); const section = studio.editor.properties.children[0];
+  const field = name => section.children.find(item => item.attributes?.['aria-label'] === name);
+  field('新输入字段名称').value = '数据文件'; field('新输入字段键').value = 'sourceFile'; field('新输入字段类型').value = 'file';
+  field('输入允许扩展名').value = '.csv';
+  const buttons = section.children.filter(item => item.tag === 'button'); assert.deepEqual(buttons.map(item => item.textContent), ['添加输入字段']);
+  buttons[0].listeners.click(); assert.deepEqual(node.config.fields, [{ key: 'custom', label: '备注', kind: 'text', required: false }, { key: 'sourceFile', label: '数据文件', kind: 'file', required: true, extensions: ['.csv'] }]);
+  assert.deepEqual(studio.values, before);
 });
 
 test('review target options contain only true upstream retryable capabilities and warn without rewriting an old invalid target', t => {
@@ -560,12 +568,12 @@ test('preflight, save and run snapshots flush the latest unblurred output-root c
 
 test('file browser navigates to the typed directory with its button, then chooses the actual returned file', async t => {
   const old = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (old) globalThis.document = old; else delete globalThis.document; });
-  const directory = '/fixtures/documents/reference-materials', file = directory + '/project.epro2', requests = []; let chosen;
-  const studio = Object.create(WorkflowStudioUI.prototype); studio.fileDialog = new FakeElement('dialog'); studio.api = async url => { const query = new URL(url, 'http://localhost').searchParams; requests.push({ directory: query.get('directory'), kind: query.get('kind'), extensions: query.get('extensions') }); return query.get('directory') === directory ? { directory, parent: '/fixtures/documents', roots: [], entries: [{ name: 'project.epro2', path: file, kind: 'file', selectable: true }] } : { directory: '', roots: [{ label: '工作区', path: '/workspace' }], entries: [] }; };
-  await studio.pickPath({ kind: 'file', label: '原始 EPRO2 工程', extensions: ['.epro2'] }, '', value => { chosen = value; });
+  const directory = '/fixtures/documents/reference-materials', file = directory + '/project.csv', requests = []; let chosen;
+  const studio = Object.create(WorkflowStudioUI.prototype); studio.fileDialog = new FakeElement('dialog'); studio.api = async url => { const query = new URL(url, 'http://localhost').searchParams; requests.push({ directory: query.get('directory'), kind: query.get('kind'), extensions: query.get('extensions') }); return query.get('directory') === directory ? { directory, parent: '/fixtures/documents', roots: [], entries: [{ name: 'project.csv', path: file, kind: 'file', selectable: true }] } : { directory: '', roots: [{ label: '工作区', path: '/workspace' }], entries: [] }; };
+  await studio.pickPath({ kind: 'file', label: '原始文件', extensions: ['.csv'] }, '', value => { chosen = value; });
   const [, location, nav, list] = studio.fileDialog.children; location.value = directory;
   await nav.children.find(item => item.textContent === '前往目录').listeners.click();
-  assert.equal(requests.at(-1).directory, directory); assert.equal(requests.at(-1).extensions, '.epro2'); assert.equal(location.value, directory); assert.equal(list.children[0].textContent, '□ project.epro2');
+  assert.equal(requests.at(-1).directory, directory); assert.equal(requests.at(-1).extensions, '.csv'); assert.equal(location.value, directory); assert.equal(list.children[0].textContent, '□ project.csv');
   await list.children[0].listeners.click(); assert.equal(chosen, file); assert.equal(studio.fileDialog.open, false);
 });
 
@@ -635,9 +643,13 @@ test('pending Skill reads disable applying and cannot overwrite a different work
   editor.doc = { id: 'new-workflow', nodes: [] }; editor.propertyDrafts = new Map(); assert.equal(mergeSkillSelectionDraft(editor, 'old-workflow', 'skill', 'old-ref', `sha256:${'b'.repeat(64)}`), false); assert.equal(editor.propertyDrafts.size, 0);
 });
 
-test('mandatory image tools expose a checked disabled review control and merge summaries contain no undefined text', t => {
+test('code nodes configure image review through the common control and merge summaries stay readable', t => {
   const old = globalThis.document; globalThis.document = { createElement: tag => new FakeElement(tag) }; t.after(() => { if (old) globalThis.document = old; else delete globalThis.document; });
-  const metadata = WORKFLOW_TOOLS.find(tool => tool.reviewRequired); assert.ok(metadata); const parent = new FakeElement('aside'), studio = Object.create(WorkflowStudioUI.prototype); studio.editor = { properties: parent }; studio.renderCapabilityConfig(createNode('tool', { x: 0, y: 0 }, { config: { executionMode: 'tool', toolName: metadata.id, reviewImages: false } })); const label = parent.children[0].children[1], checkbox = label.children[0]; assert.equal(checkbox.checked, true); assert.equal(checkbox.disabled, true);
+  const parent = new FakeElement('aside'), studio = Object.create(WorkflowStudioUI.prototype), changes = [];
+  studio.editor = { properties: parent }; studio.updateConfig = (id, config) => changes.push({ id, config });
+  studio.renderCapabilityConfig(createNode('tool', {}, { id: 'render', config: { executionMode: 'code', language: 'javascript', code: 'return input;', reviewImages: true } }));
+  const checkbox = parent.children[0].children[1].children[0]; assert.equal(checkbox.checked, true); assert.equal(checkbox.disabled, false);
+  checkbox.checked = false; checkbox.listeners.change(); assert.deepEqual(changes, [{ id: 'render', config: { reviewImages: false } }]);
   const summary = WorkflowEditor.prototype.summary(createNode('merge')); assert.match(summary, /汇总/); assert.doesNotMatch(summary, /undefined/);
 });
 test('human review requires revise feedback and sends approve/revise/stop through the actual review route', async t => {

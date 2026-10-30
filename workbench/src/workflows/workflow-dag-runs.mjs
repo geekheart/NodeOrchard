@@ -16,8 +16,6 @@ import { imageDimensions } from './workflow-files.mjs';
 const TERMINAL = new Set(['complete', 'error', 'interrupted', 'unknown']);
 const NODE_DONE = new Set(['complete', 'error', 'blocked', 'skipped', 'cancelled', 'unknown']);
 const LEARNING = new Set(['evaluation', 'improvement']);
-const RECEIPT_TOOLS = new Set(WORKFLOW_TOOLS.filter(tool => tool.id.startsWith('hdk.')).map(tool => tool.id));
-const isReceiptTool = node => node?.type === 'tool' && node.config.executionMode === 'tool' && RECEIPT_TOOLS.has(node.config.toolName);
 const clone = value => JSON.parse(JSON.stringify(value));
 const fail = (text, status = 400, details) => Object.assign(new Error(text), { httpStatus: status, ...(details ? { details } : {}) });
 const errorText = value => redact(String(value?.message || value || '节点执行失败。')).slice(0, 4000);
@@ -248,7 +246,7 @@ export class WorkflowDAGRuns {
       const key = node.config.fieldName || node.id; const input = state.run.input;
       return json(input && typeof input === 'object' && Object.hasOwn(input, key) ? input[key] : state.plan.inputNodes.length === 1 ? input : null);
     }
-    const inputs = getPorts(node).inputs; const values = {}; const references = {};
+    const inputs = getPorts(node).inputs; const values = {};
     for (const port of inputs) {
       const edge = state.plan.incoming.get(node.id).find(item => item.targetPort === port.id);
       if (!edge) continue;
@@ -258,26 +256,9 @@ export class WorkflowDAGRuns {
       const value = dagPath(source.output, sourcePort?.valuePath);
       if (!matches(value, port.type)) throw fail(node.title + ' 的端口 ' + port.label + ' 类型不符：' + port.type);
       values[port.id] = json(value);
-      // Only a direct, registered capability receipt can use this explicit
-      // transport reference. Skill projections and arbitrary JSON stay intact.
-      const producer = state.plan.byId.get(edge.sourceNode);
-      if (isReceiptTool(node) && isReceiptTool(producer) && value === source.output
-          && value?.kind === 'hdk-node-receipt' && value.runId === state.run.id && value.nodeId === producer.id
-          && value.operation === producer.config.toolName && /^[a-f0-9]{64}$/.test(value.receiptSha256)
-          && Number.isSafeInteger(source.attempt) && source.attempt > 0 && typeof source.attemptId === 'string' && source.attemptId
-          && source.outputDirectory === join(state.run.outputDirectory, producer.id, '版本-' + source.attempt)
-          && value.receiptPath === join(source.outputDirectory, 'receipt.json')) {
-        references[port.id] = { kind: 'hdk-node-receipt-ref', runId: value.runId, nodeId: value.nodeId,
-          operation: value.operation, receiptPath: value.receiptPath, receiptSha256: value.receiptSha256,
-          attempt: source.attempt, attemptId: source.attemptId };
-      }
     }
     const assembled = inputs.length === 1 && inputs[0].id === 'in' ? values.in ?? null : values;
-    if (Buffer.byteLength(JSON.stringify(assembled)) <= 65536) return json(assembled);
-    // Keep the same size limit and the producer's complete durable output.
-    // Python resolves references against that exact current attempt before I/O.
-    const compact = { ...values, ...references };
-    return json(inputs.length === 1 && inputs[0].id === 'in' ? compact.in ?? null : compact);
+    return json(assembled);
   }
 
   readiness(state, node) {
@@ -474,10 +455,6 @@ export class WorkflowDAGRuns {
     } catch (error) {
       if (current()) {
         if (error?.validation) record.validation = clone(error.validation);
-        if (state.run.learningId && node.type === 'tool' && node.config.executionMode === 'tool'
-          && node.config.toolName.startsWith('hdk.') && error?.code === 'LEARNING_INVALID_PLAN') {
-          record.errorCode = 'LEARNING_INVALID_PLAN'; record.learningRecoverable = true;
-        }
         if (state.run.learningId && (node.type === 'transform' || node.type === 'tool' && node.config.executionMode === 'code')
           && ['CODE_FAILED', 'OUTPUT_INVALID', 'OUTPUT_LIMIT'].includes(error?.code)) {
           record.errorCode = error.code; record.learningRecoverable = true;

@@ -1,9 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
 import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
 import { getPorts } from '../../shared/workflow/workflow-model.mjs';
-import { WORKFLOW_TOOLS } from '../../shared/workflow/workflow-tools.mjs';
 import { dagPath } from './workflow-dag-runs.mjs';
 import { skillFrontmatter } from './learned-skills.mjs';
 import { redact } from '../hermes-adapter.mjs';
@@ -15,8 +12,6 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
   : object(value) ? '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}' : JSON.stringify(value);
 const fingerprint = value => hash(canonical(value));
-const capabilities = new Set(WORKFLOW_TOOLS.filter(tool => tool.id.startsWith('hdk.')).map(tool => tool.id));
-const receiptFields = new Set(['kind', 'runId', 'nodeId', 'operation', 'receiptPath', 'receiptSha256', 'artifacts']);
 
 function checked(skill, node) {
   if (!skill || skill.name !== node.config.skillRef || skill.revision !== node.config.version
@@ -57,7 +52,7 @@ function feedbackScope(record, allowed) {
 }
 
 function dagEvidence(run, plan, nodeId, value) {
-  const receipts = new Map(), values = new Map();
+  const values = new Map();
   const branch = plan.learningBranch, producer = plan.byId.get(branch.sourceNodeId);
   const actual = run.nodes?.[branch.sourceNodeId];
   const port = getPorts(producer).outputs.find(port => port.id === branch.sourcePort);
@@ -71,40 +66,11 @@ function dagEvidence(run, plan, nodeId, value) {
   } else if (actual?.error) comparison.error = actual.error;
   const comparisonReference = item => comparison.available && item !== null && typeof item === 'object'
     && fingerprint(item) === comparison.id ? { kind: 'workflow-evidence-comparison-ref', id: comparison.id } : null;
-  // Only an exact current output from a registered capability can be replaced
-  // by a receipt reference. A user object merely claiming the same kind is data.
+  // Preserve business values as data. Only equal values and the explicitly
+  // selected comparison share an index in this evidence snapshot.
   const compact = item => {
     if (Array.isArray(item)) return comparisonReference(item) || item.map(compact);
     if (!object(item)) return item;
-    if (item.kind === 'hdk-node-receipt') {
-      const producer = plan.byId.get(item.nodeId), actual = run.nodes?.[item.nodeId];
-      const registered = producer?.type === 'tool' && producer.config.executionMode === 'tool'
-        && capabilities.has(producer.config.toolName);
-      if (registered && item.runId === run.id && item.operation === producer.config.toolName) {
-        if (actual?.status !== 'complete' || canonical(actual.output) !== canonical(item)
-          || !/^[a-f0-9]{64}$/.test(item.receiptSha256 || '') || typeof item.receiptPath !== 'string'
-          || !isAbsolute(item.receiptPath) || typeof actual.outputDirectory !== 'string'
-          || resolve(item.receiptPath) !== resolve(join(actual.outputDirectory, 'receipt.json'))) {
-          throw fail('反馈证据中的能力回执并非本次节点的完整当前版本。', 409);
-        }
-        const id = fingerprint({ runId: run.id, nodeId: item.nodeId, operation: item.operation,
-          receiptPath: item.receiptPath, receiptSha256: item.receiptSha256 });
-        if (!receipts.has(id)) {
-          try {
-            if (lstatSync(item.receiptPath).isSymbolicLink()
-              || realpathSync(item.receiptPath) !== resolve(item.receiptPath)
-              || hash(readFileSync(item.receiptPath)) !== 'sha256:' + item.receiptSha256) throw Error('hash');
-          } catch { throw fail('反馈证据中的能力回执文件缺失或哈希已变化。', 409); }
-          const record = { id, kind: item.kind, runId: run.id, nodeId: item.nodeId, operation: item.operation,
-            receiptPath: item.receiptPath, receiptSha256: item.receiptSha256, outputFingerprint: fingerprint(item),
-            attempt: actual.attempt ?? null, attemptId: actual.attemptId ?? null };
-          receipts.set(id, record);
-          const extra = Object.fromEntries(Object.entries(item).filter(([key]) => !receiptFields.has(key)));
-          if (Object.keys(extra).length) record.extra = compact(extra);
-        }
-        return { kind: 'workflow-evidence-receipt-ref', id };
-      }
-    }
     return comparisonReference(item) || Object.fromEntries(Object.entries(item).map(([key, child]) => [key, compact(child)]));
   };
   const productionValue = item => {
@@ -129,9 +95,8 @@ function dagEvidence(run, plan, nodeId, value) {
   });
   return { schemaVersion: 2, nodeId, skillInput: value.input, skillOutput: value.output,
     ...(typeof value.reviewFeedback === 'string' && value.reviewFeedback ? { executionReviewFeedback: value.reviewFeedback } : {}),
-    comparison, subsequent, values: [...values.values()], receipts: [...receipts.values()],
-    receiptPolicy: 'Exact current registered capability outputs are referenced once by identity and verified receipt hash; '
-      + 'their complete payload fingerprints remain bound to the source run. Equal production values are included once. '
+    comparison, subsequent, values: [...values.values()],
+    valuePolicy: 'Equal production values are included once and remain bound to the complete source run. '
       + 'Only actual dependency descendants and the explicit selected comparison are observed; unrelated workflow outputs are not substituted. '
       + 'Unknown objects and the selected comparison are not truncated.' };
 }
@@ -236,10 +201,10 @@ async function driveFeedback(owner, state) {
       '只返回严格 JSON：{"content":"完整的新 SKILL.md","summary":"具体修改说明"}。',
       '只修改这个 Skill 的正文。必须逐字保留原 YAML frontmatter，不修改代码、资源、工具、节点、输入、评分规则或其它 Skill。',
       '先根据这个 Skill 的职责与实际输入输出判断综合反馈是否与它相关。反馈可能只涉及其它 Skill；无关、证据不足或现有规则已满足时，content 必须逐字返回原文，在 summary 说明原因，不为凑数而改写。',
-      '综合反馈是用户意见，不是已知正确答案或验证结论。不要声称反馈已解决、自动通过或实物已测。',
-      '结合具体意见与该 Skill 当次实际输入、输出及后继生产节点结果，写出可泛化的规则；不要硬编码这次板号、文件路径、GPIO或单个样例答案。',
+      '综合反馈是用户意见，不是已知正确答案或验证结论。不要声称反馈已解决、自动通过或未执行的验证已完成。',
+      '结合具体意见与该 Skill 当次实际输入、输出及后继生产节点结果，写出可泛化的规则；不要硬编码这次业务标识、文件路径或单个样例答案。',
       '业务执行时不会额外收到本反馈，规则需要在 Skill 中独立成立。遇到需要新增固定工具能力的问题，请在summary说明验证或能力限制，不伪造工具支持。',
-      ...(target.evidence.schemaVersion === 2 ? ['证据中的values和receipts是完整当前运行的去重索引；subsequent通过id引用，comparison.value是画布明确选择的完整对比产物。回执摘要没有展开磁盘库存，不代表缺少产物；不要虚构读过未提供的文件。executionReviewFeedback若存在，表示当次执行额外收到的人工返修提示，不能把依赖该提示的正确结果误认为原Skill正文已独立满足规则。'] : []),
+      ...(target.evidence.schemaVersion === 2 ? ['证据中的values是当前运行的完整业务值去重索引；subsequent通过id引用，comparison.value是画布明确选择的完整对比产物。业务值中引用的文件路径仍只是数据；不要虚构读过未提供的文件。executionReviewFeedback若存在，表示当次执行额外收到的人工返修提示，不能把依赖该提示的正确结果误认为原Skill正文已独立满足规则。'] : []),
       JSON.stringify({ skill: { nodeId: node.id, ref: skill.name, revision: skill.revision, content: skill.content },
         feedback: { comment: target.feedback.comment },
         evidence: target.evidence, sourceRunId: state.job.sourceRunId, feedbackRevision: state.job.feedbackRevision }),

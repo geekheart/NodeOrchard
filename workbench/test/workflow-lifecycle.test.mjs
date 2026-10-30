@@ -18,7 +18,7 @@ function setup(t) {
   app.learning = { locks: new Map(), active: new Map() };
   app.publish = (type, sessionId, payload) => { const event = { type, sessionId, payload: copy(payload) }; app.events.push(event); app.emit('event', event); };
   const library = new WorkflowLibrary(app); app.workflowLibrary = library;
-  const record = library.save({ document: createDocument({ title: '我的 HDK 流程' }) });
+  const record = library.save({ document: createDocument({ title: '我的资料流程' }) });
   app.events.length = 0;
   const put = (table, value) => table === 'workflow_schedules'
     ? db.prepare('INSERT OR REPLACE INTO workflow_schedules(id,revision,value) VALUES(?,?,?)').run(value.id, value.revision || 1, JSON.stringify(value))

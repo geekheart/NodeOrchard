@@ -11,19 +11,19 @@ class Element {
   addEventListener(name, fn) { this.listeners[name] = fn; }
 }
 const all = node => [node, ...(node.children || []).flatMap(all)];
-const artifact = (id, producer, name, mimeType = 'application/octet-stream') => ({ id, nodeId: producer, name, mimeType,
+const artifact = (id, producer, name, mimeType = 'application/octet-stream') => ({ id, runId: 'run', nodeId: producer, name, mimeType,
   sha256: id.padEnd(64, 'a'), attempt: 3, previewUrl: '/preview/' + id, downloadUrl: '/download/' + id });
 function fixture(t) {
   const previous = globalThis.document; globalThis.document = { createElement: tag => new Element(tag), activeElement: null };
   t.after(() => { if (previous) globalThis.document = previous; else delete globalThis.document; });
   const picture = artifact('picture', 'sop', 'wiring.png', 'image/png'), workbook = artifact('workbook', 'sop', 'process.xlsx'),
-    pdf = artifact('pdf', 'sop', 'print.pdf', 'application/pdf'), sop = artifact('sop', 'sop', '测试说明.md', 'text/plain'),
-    index = artifact('index', 'sop', '构建文件与源码索引.md', 'text/plain'), old = artifact('old-build', 'build', 'old-build.bin');
+    pdf = artifact('pdf', 'sop', 'print.pdf', 'application/pdf'), sop = artifact('sop', 'sop', '操作说明.md', 'text/plain'),
+    index = artifact('index', 'sop', '源文件索引.md', 'text/plain'), old = artifact('old-build', 'build', 'old-build.bin');
   const run = { id: 'run', status: 'waiting_review', document: { mode: 'execute', nodes: [
-    { id: 'build', type: 'tool', title: '上游固件' }, { id: 'sop', type: 'tool', title: '本次测试说明' },
-    { id: 'gate', type: 'human', title: '审核测试说明', config: { prompt: '查看原件后决定' } },
+    { id: 'build', type: 'tool', title: '上游资料' }, { id: 'sop', type: 'skill', title: '本次文档', config: {} },
+    { id: 'gate', type: 'human', title: '审核文档', config: { prompt: '查看原件后决定', reviewTargetNodeId: 'sop' } },
     { id: 'other-gate', type: 'human', title: '其它审核', config: {} }], edges: [{ sourceNode: 'sop', targetNode: 'gate' }] },
-    nodes: { gate: { status: 'waiting_review', attempt: 2, input: { kind: 'hdk-node-receipt', runId: 'run', nodeId: 'sop' },
+    nodes: { sop: { status: 'complete', attempt: 3, artifacts: [picture, workbook, pdf, sop, index] }, gate: { status: 'waiting_review', attempt: 2, input: { userData: true },
       artifacts: [picture, workbook, pdf, sop, index, old], review: {} }, 'other-gate': { status: 'waiting_review', review: {} } } };
   const calls = [], messages = [], studio = Object.create(WorkflowStudioUI.prototype);
   studio.editor = { toast: message => messages.push(message) }; studio.runtime = { storeRun() {}, render() {} };
@@ -35,8 +35,8 @@ test('pending review separates direct current originals from inherited files and
   const { run, picture, workbook, pdf, sop, index, old } = fixture(t), before = JSON.stringify(run);
   const groups = reviewFileGroups(run, 'gate', [picture]);
   assert.equal(groups.exact, false); assert.deepEqual(groups.current, [workbook, pdf, sop, index]); assert.deepEqual(groups.references, [old]);
-  run.nodes.gate.input.runId = 'different-run'; assert.deepEqual(reviewFileGroups(run, 'gate', [picture]).current, []);
-  run.nodes.gate.input.runId = 'run'; assert.equal(JSON.stringify(run), before);
+  run.nodes.gate.input = { nodeId: 'build', runId: 'run' }; assert.deepEqual(reviewFileGroups(run, 'gate', [picture]).current, [workbook, pdf, sop, index]);
+  run.nodes.gate.input = { userData: true }; assert.equal(JSON.stringify(run), before);
 });
 
 test('recorded approval files require both exact artifact ID and SHA, never basename or upstream inference', t => {
@@ -54,18 +54,18 @@ test('review shows original XLSX PDF SOP and source index links after preview wi
   for (const item of [workbook, pdf, sop, index]) assert.ok(all(groups[0]).some(node => node.tag === 'a' && node.href === item.downloadUrl), item.name);
   assert.equal(all(groups[0]).some(node => node.href === old.downloadUrl), false);
   assert.equal(nodes.filter(node => node.tag === 'img' && node.src === picture.previewUrl).length, 1);
-  assert.ok(all(groups[0]).some(node => node.textContent?.includes('本次测试说明 · 第 3 次尝试')));
+  assert.ok(all(groups[0]).some(node => node.textContent?.includes('本次文档 · 第 3 次尝试')));
 });
 
 test('overview and inspector share latest draft and submit that value from either action group', async t => {
   const { run, studio, calls } = fixture(t), main = studio.reviewControls(run, 'gate'), compact = studio.reviewControls(run, 'gate', { compact: true }), other = studio.reviewControls(run, 'other-gate');
   const field = box => box.children.find(node => node.tag === 'textarea'), edit = (box, value) => { field(box).value = value; field(box).listeners.input(); };
   edit(main, '先看原始XLSX'); assert.equal(field(compact).value, '先看原始XLSX');
-  edit(compact, '最新意见：对照接线图调整SOP'); assert.equal(field(main).value, field(compact).value); assert.equal(field(other).value, '');
+  edit(compact, '最新意见：对照源文件调整文档'); assert.equal(field(main).value, field(compact).value); assert.equal(field(other).value, '');
   // Even a stale DOM value must not replace the latest shared input draft.
   field(main).value = 'stale DOM value';
   await main.children.at(-1).children[1].listeners.click();
-  assert.equal(calls.length, 1); assert.equal(calls[0].body.feedback, '最新意见：对照接线图调整SOP'); assert.equal(calls[0].body.action, 'revise');
+  assert.equal(calls.length, 1); assert.equal(calls[0].body.feedback, '最新意见：对照源文件调整文档'); assert.equal(calls[0].body.action, 'revise');
 });
 
 test('review pending state disables both copies and prevents duplicate submissions, then restores after error', async t => {
@@ -79,7 +79,7 @@ test('review pending state disables both copies and prevents duplicate submissio
   assert.ok([...mainActions, ...compactActions].every(item => !item.disabled)); assert.match(messages[0], /保存失败/);
 });
 
-test('HDK execution progress excludes learning only and never counts failures or blocked nodes as completed', () => {
+test('execution progress excludes learning only and never counts failures or blocked nodes as completed', () => {
   const nodes = Array.from({ length: 25 }, (_, index) => ({ id: 'n' + index, type: index === 23 ? 'evaluation' : index === 24 ? 'improvement' : 'tool' }));
   const run = { document: { mode: 'execute', nodes }, nodes: Object.fromEntries(nodes.map((node, index) => [node.id, { status: index < 18 ? 'complete' : index < 21 ? 'waiting_review' : index < 23 ? 'pending' : 'skipped' }])) };
   assert.deepEqual(runProgress(run), { completed: 18, total: 23, running: 0, skippedLearning: 2 });
@@ -103,4 +103,24 @@ test('desktop grid and narrow property drawer breakpoints do not overlap at 1000
   const gridMinimums = [...studio.matchAll(/@media\s*\(min-width:\s*(\d+)px\)\s*\{[^@]*?grid-template-columns/g)].map(match => Number(match[1]));
   assert.deepEqual(gridMinimums, [1051]); assert.match(editor, /@media\s*\(max-width:\s*1050px\)[\s\S]*?\.wf-properties\s*\{\s*position:\s*absolute/);
   for (const width of [999, 1000, 1024, 1050, 1051]) assert.equal(width >= gridMinimums[0] && width <= 1050, false, `No reserved grid plus overlaid drawer at ${width}px`);
+});
+
+
+test('pending review never treats another run or a stale producer attempt as its current input', t => {
+  const { run, workbook, pdf } = fixture(t);
+  workbook.runId = 'other-run'; pdf.attempt = 2;
+  const groups = reviewFileGroups(run, 'gate');
+  assert.equal(groups.current.includes(workbook), false); assert.equal(groups.current.includes(pdf), false);
+  assert.ok(groups.references.includes(workbook)); assert.ok(groups.references.includes(pdf));
+  // Forged business data cannot name a producer from another graph branch.
+  run.nodes.gate.input = { nodeId: 'build', runId: 'run', kind: 'custom-receipt' };
+  assert.equal(reviewFileGroups(run, 'gate').current.some(item => item.nodeId === 'build'), false);
+});
+
+test('pending review follows registered files through a code step that only passes values through', t => {
+  const { run, workbook } = fixture(t);
+  run.document.nodes.push({ id: 'normalize', type: 'tool', config: { executionMode: 'code' } });
+  run.document.edges = [{ sourceNode: 'sop', targetNode: 'normalize' }, { sourceNode: 'normalize', targetNode: 'gate' }];
+  run.nodes.normalize = { status: 'complete', attempt: 1, artifacts: [] };
+  assert.ok(reviewFileGroups(run, 'gate').current.includes(workbook));
 });

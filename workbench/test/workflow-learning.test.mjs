@@ -201,12 +201,12 @@ test('a persistent human review resumes its original run and immutable batch aft
   assert.equal(app.memoryScopeReleases.at(-1), started.id);
 });
 
-test('only registered typed HDK plan errors become learning diagnostics, retaining actual Skill inputs and outputs', async t => {
+test('a business-specific code rejection cannot widen Skill-only learning into repairing downstream code', async t => {
   const { app, manager } = setup(t);
   let document = createDocument({ schemaVersion: 2, title: '受控计划拒绝' }); document.mode = 'learn';
   document.nodes = [createNode('input', { x: 0, y: 0 }, { id: 'input', config: { outputType: 'object' } }),
     createNode('skill', { x: 200, y: 0 }, { id: 'skill-0', config: { inputType: 'object', outputType: 'object', skillRef: 'fixture-0', version: revision(CONTENT) } }),
-    createNode('tool', { x: 400, y: 0 }, { id: 'render', config: { executionMode: 'tool', toolName: 'hdk.four.pinout-front', inputType: 'object', outputType: 'object' } }),
+    createNode('tool', { x: 400, y: 0 }, { id: 'render', config: { executionMode: 'code', language: 'javascript', code: 'return input;', inputType: 'object', outputType: 'object' } }),
     createNode('human', { x: 500, y: 0 }, { id: 'review', config: { inputType: 'object', outputType: 'object', reviewTargetNodeId: 'skill-0' } }),
     createNode('output', { x: 600, y: 0 }, { id: 'output' }),
     createNode('evaluation', { x: 700, y: 200 }, { id: 'evaluation', config: { comparison: 'exact' } }),
@@ -220,23 +220,20 @@ test('only registered typed HDK plan errors become learning diagnostics, retaini
   app.onStart = run => {
     const skill = run.document.nodes.find(node => node.id === 'skill-0');
     if (skill.config.skillRef === 'fixture-0') queueMicrotask(() => app.complete(run.id, null, 'error', {
-      failedNodeIds: ['render'], currentNodeId: 'render', error: 'Actual label is 20px high, row pitch is 19px',
-      nodes: { 'skill-0': { status: 'complete', input: { allowedLabels: ['LDO4?'] }, output: { fontSize: 18 } },
-        render: { status: 'error', errorCode: 'LEARNING_INVALID_PLAN', learningRecoverable: true, error: 'Actual label is 20px high, row pitch is 19px' },
+      failedNodeIds: ['render'], currentNodeId: 'render', error: 'Business constraint rejected the generated plan',
+      nodes: { 'skill-0': { status: 'complete', input: { allowedValues: ['option-a'] }, output: { fontSize: 18 } },
+        render: { status: 'error', errorCode: 'CUSTOM_PLAN_REJECTED', learningRecoverable: true, error: 'Business constraint rejected the generated plan' },
         output: { status: 'blocked' } },
     }));
     else queueMicrotask(() => app.complete(run.id, { valid: true }, 'complete', { nodes: { 'skill-0': { status: 'complete', input: {}, output: {} }, output: { status: 'complete', output: { valid: true } } } }));
     return Promise.resolve(copy(run));
   };
-  const started = await manager.start({ document, input: { rawFile: 'test-only.epro2' }, expected: { valid: true }, maxRounds: 2 });
+  const started = await manager.start({ document, input: { rawFile: 'test-only.json' }, expected: { valid: true }, maxRounds: 2 });
   for (let index = 0; index < 200 && !TERMINAL.has(manager.get(started.id).status); index++) await immediate();
   const result = manager.get(started.id);
-  assert.equal(result.status, 'complete', JSON.stringify(result));
-  const failed = result.rounds[0].cases[0];
-  assert.equal(failed.recoverable, true); assert.equal(failed.score, 0); assert.equal(failed.output.kind, 'controlled-skill-plan-rejection');
-  assert.deepEqual(failed.skillInputs['skill-0'], { allowedLabels: ['LDO4?'] });
-  assert.deepEqual(failed.output.skillOutputs['skill-0'], { fontSize: 18 });
-  assert.match(app.prompts[0], /Actual label is 20px high/); assert.match(app.prompts[0], /allowedLabels/);
+  assert.equal(result.status, 'error', JSON.stringify(result));
+  assert.equal(app.prompts.length, 0, 'Skill-only learning cannot repair an unrelated business code rejection.');
+  assert.equal(app.created.length, 0);
 });
 
 function finished(app, manager, id) {

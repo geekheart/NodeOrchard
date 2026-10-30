@@ -14,7 +14,7 @@ const terminalRun = (id = 'run-a', overrides = {}) => ({ id, workflowId: 'workfl
 const targets = [
   { nodeId: 'export', title: '导出与命名', skillRef: 'export-skill', version: 'sha256:a', status: 'complete' },
   { nodeId: 'process', title: '工艺要求', skillRef: 'process-skill', version: 'sha256:b', status: 'complete' },
-  { nodeId: 'firmware', title: '测试固件', skillRef: 'firmware-skill', version: 'sha256:c', status: 'complete' },
+  { nodeId: 'instructions', title: '操作说明', skillRef: 'instructions-skill', version: 'sha256:c', status: 'complete' },
   { nodeId: 'sop', title: '测试说明', skillRef: 'sop-skill', version: 'sha256:d', status: 'complete' },
 ];
 const response = (feedback = null, overrides = {}) => ({ feedback, targets: structuredClone(targets), canReview: true, reason: '', ...overrides });
@@ -42,7 +42,7 @@ test('only terminal ordinary runs and completed versioned targets are eligible f
   assert.match(feedbackRunReason(terminalRun('a', { status: 'running' })), /尚未结束/);
   assert.match(feedbackRunReason(terminalRun('a', { document: { mode: 'learn' } })), /学习运行/);
   const { ui } = setup(t, async () => response(null, { targets: [{ ...targets[0], status: 'skipped' }, { ...targets[1], version: '' }, targets[2]] })); await open(ui);
-  assert.deepEqual(ui.eligibleTargets(ui.currentState()).map(item => item.nodeId), ['firmware']); assert.equal(ui.targetsHint.textContent, '本次已完成的 Skill：测试固件');
+  assert.deepEqual(ui.eligibleTargets(ui.currentState()).map(item => item.nodeId), ['instructions']); assert.equal(ui.targetsHint.textContent, '本次已完成的 Skill：操作说明');
 });
 
 test('form has exactly one empty textarea and no score, category fields or checkboxes', async t => {
@@ -82,18 +82,18 @@ test('save plus learning uses only expectedRevision and comment, then saved revi
     if (path.endsWith('/feedback/learn')) return { id: 'learning-a', kind: 'feedback' };
     return new Promise(resolve => { resolveSave = () => resolve({ feedback: record('run-a', 3, options.body.comment) }); });
   }); runtime.onFeedbackLearning = async job => jobs.push(job);
-  await open(ui); ui.comment.input('USB 检查需增加失败原因，测试说明增加接线照片');
+  await open(ui); ui.comment.input('USB 检查需增加失败原因，测试说明增加输入照片');
   const first = ui.submit(true); await ui.submit(true); assert.equal(calls.length, 1); assert.equal(ui.comment.disabled, true); resolveSave(); await first;
-  assert.equal(calls.length, 2); assert.deepEqual(calls[0].body, { expectedRevision: 2, comment: 'USB 检查需增加失败原因，测试说明增加接线照片' });
+  assert.equal(calls.length, 2); assert.deepEqual(calls[0].body, { expectedRevision: 2, comment: 'USB 检查需增加失败原因，测试说明增加输入照片' });
   assert.deepEqual(calls[1].body, { feedbackRevision: 3 }); assert.equal(jobs[0].id, 'learning-a'); assert.equal(ui.currentState().dirty, false); assert.match(ui.notice.textContent, /已启动/);
 });
 
 test('save failures retain editable comprehensive drafts and manual retry preserves the exact text', async t => {
   let fail = true, posts = 0;
   const { ui } = setup(t, async (_path, options) => { if (!options) return response(); posts++; if (fail) throw new Error('网络中断'); return { feedback: record('run-a', 1, options.body.comment) }; });
-  await open(ui); ui.comment.input('接线步骤缺少照片\n请补充 USB 排查'); await ui.submit();
-  assert.equal(ui.currentState().dirty, true); assert.equal(ui.comment.value, '接线步骤缺少照片\n请补充 USB 排查'); assert.equal(ui.saveButton.disabled, false); assert.match(ui.notice.textContent, /网络中断/);
-  fail = false; await ui.submit(); assert.equal(posts, 2); assert.equal(ui.currentState().dirty, false); assert.equal(ui.currentState().feedback.comment, '接线步骤缺少照片\n请补充 USB 排查');
+  await open(ui); ui.comment.input('输入步骤缺少照片\n请补充 USB 排查'); await ui.submit();
+  assert.equal(ui.currentState().dirty, true); assert.equal(ui.comment.value, '输入步骤缺少照片\n请补充 USB 排查'); assert.equal(ui.saveButton.disabled, false); assert.match(ui.notice.textContent, /网络中断/);
+  fail = false; await ui.submit(); assert.equal(posts, 2); assert.equal(ui.currentState().dirty, false); assert.equal(ui.currentState().feedback.comment, '输入步骤缺少照片\n请补充 USB 排查');
 });
 
 test('CAS rejection keeps the draft and blocks writes until latest revision is read and accepted', async t => {

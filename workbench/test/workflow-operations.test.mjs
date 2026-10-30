@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executeOperation, validateOperationNode, OPERATION_LIMITS } from '../src/workflows/workflow-operations.mjs';
+import { createDocument, createNode, connectNodes, validateDocument } from '../shared/workflow/workflow-model.mjs';
+import { planWorkflow } from '../shared/workflow/workflow-plan.mjs';
 import { WORKFLOW_TOOLS, validateWorkflowToolConfig } from '../shared/workflow/workflow-tools.mjs';
 
 const operation = (config = {}) => ({ type: 'tool', config: {
@@ -21,7 +23,7 @@ async function workspace(t) {
 }
 
 test('metadata and pure validator select exactly one active implementation and enforce known ports', () => {
-  assert.deepEqual(WORKFLOW_TOOLS.filter(item => !item.id.startsWith('hdk.')).map(item => item.id), ['text.trim', 'text.uppercase', 'json.parse', 'json.stringify', 'json.keys']);
+  assert.deepEqual(WORKFLOW_TOOLS.map(item => item.id), ['text.trim', 'text.uppercase', 'json.parse', 'json.stringify', 'json.keys']);
   assert.equal(new Set(WORKFLOW_TOOLS.map(item => item.id)).size, WORKFLOW_TOOLS.length);
   assert.ok(Object.isFrozen(WORKFLOW_TOOLS));
   assert.deepEqual(validateOperationNode(tool('text.trim', { code: 'while(true){}', language: 'ignored inactive language', inputType: 'text', outputType: 'text' })),
@@ -363,4 +365,21 @@ test('invalid controller context fails before any local code executes', async t 
   for (const context of [null, [], { runId: '../escape' }, { learningId: false }, { nodeId: 'space id' }]) {
     await assert.rejects(executeOperation({ node, input: {}, cwd, context }), { code: 'CONTEXT_INVALID' });
   }
+});
+
+
+test('missing external tools preserve historical documents but block execution before any operation runs', () => {
+  let document = { ...createDocument({ schemaVersion: 2 }), nodes: [
+    createNode('input', {}, { id: 'input', config: { outputType: 'object' } }),
+    createNode('tool', {}, { id: 'external', title: 'My external operation', config: { executionMode: 'tool', toolName: 'external.removed', inputType: 'object', outputType: 'object' } }),
+    createNode('output', {}, { id: 'output' }),
+  ] };
+  for (const [sourceNode, targetNode] of [['input', 'external'], ['external', 'output']]) {
+    document = connectNodes(document, { sourceNode, sourcePort: 'out', targetNode, targetPort: 'in' });
+  }
+  const frozen = JSON.stringify(document), restored = validateDocument(JSON.parse(frozen));
+  assert.equal(JSON.stringify(restored), frozen);
+  assert.equal(restored.nodes[1].config.toolName, 'external.removed');
+  assert.throws(() => planWorkflow(restored), /所需工具未安装或已移除：external\.removed/);
+  assert.equal(JSON.stringify(document), frozen);
 });

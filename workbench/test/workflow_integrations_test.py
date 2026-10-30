@@ -31,7 +31,7 @@ class IntegrationsTests(unittest.TestCase):
         root.mkdir(); templates.mkdir()
         sources = {'bundled': set(), 'hub': set()}
         service.dependencies.update(skills_root=lambda:root, resolve_skill_dir=lambda name, category:root/name,
-            workbench_skills_root=lambda:templates, skill_sources=lambda:sources,
+            skill_sources=lambda:sources,
             skill_lock=lambda name:nullcontext(),
             skill_entries=lambda:[{'name': path.name, 'description': 'synthetic', 'category': 'general', 'path': str(path)}
                 for path in root.iterdir() if path.is_dir() and (path/'SKILL.md').is_file()])
@@ -99,7 +99,8 @@ class IntegrationsTests(unittest.TestCase):
 
     def test_native_skill_create_is_new_slug_only_and_records_dependency_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
-            service, root, _, _, calls = self.skill_fixture(temporary)
+            service, root, templates, _, calls = self.skill_fixture(temporary)
+            templates.rmdir()
             params={'name':'image-poster','description':'图片输出','instructions':'Use image_generate once.','required_toolsets':['image_gen'], 'operation_id':'create-poster'}
             result = service.create_skill(params)
             self.assertEqual(result['skill']['requiredToolsets'], ['image_gen'])
@@ -118,7 +119,7 @@ class IntegrationsTests(unittest.TestCase):
             with self.assertRaises(ValueError): service.create_skill(params | {'name':'a'*65})
             with self.assertRaises(ValueError): service.create_skill(params | {'name':'new-without-id', 'operation_id':None})
 
-    def test_skill_catalog_protects_builtin_copies_and_never_adopts_existing_local_or_hub_packages(self):
+    def test_skill_catalog_uses_native_provenance_and_never_promotes_copied_business_templates(self):
         with tempfile.TemporaryDirectory() as temporary:
             service, root, templates, sources, _ = self.skill_fixture(temporary)
             for name in ('native-builtin', 'old-local', 'hub-installed'):
@@ -129,7 +130,7 @@ class IntegrationsTests(unittest.TestCase):
             before = sorted(path.name for path in root.parent.iterdir())
             rows = {row['name']:row for row in service.skills_catalog()['skills']}
             self.assertEqual(rows['native-builtin']['origin']['kind'], 'hermes-builtin')
-            self.assertEqual(rows['copied-template']['origin']['kind'], 'workbench-builtin')
+            self.assertEqual(rows['copied-template']['origin']['kind'], 'unknown')
             self.assertEqual(rows['old-local']['origin']['kind'], 'unknown')
             self.assertEqual(rows['hub-installed']['source'], 'hub')
             self.assertTrue(all(not row['origin']['canDelete'] for row in rows.values()))

@@ -1,5 +1,0 @@
-# Bundled Codex document Python runtime, used with -I by hdk/runtime.py.
-# Hermes' own Python environment does not need document packages.
-pypdf==6.10.0
-Pillow==12.3.0
-reportlab==4.4.9

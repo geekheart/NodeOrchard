@@ -608,7 +608,7 @@ test('root conversation discovers and reviews a real nested human gate, rejectin
   const spoof = { ...copy(realChild), id: crypto.randomUUID() };
   f.app.workflows.write.run(spoof.id, JSON.stringify(spoof));
   await assert.rejects(() => f.app.conversations.message(document.id, message(document, '通过', { context: context(spoof) })), /子运行不属于/);
-  const approved = await f.app.conversations.message(document.id, message(document, '通过，纳入 HDK', { context: pending[0].context }));
+  const approved = await f.app.conversations.message(document.id, message(document, '审核通过', { context: pending[0].context }));
   assert.equal(approved.turn.outcome.status, 'complete'); assert.equal(approved.turn.outcome.runId, realChild.id);
   const done = await until(() => { const value = f.app.workflows.get(start.id); return value.status === 'complete' && value; });
   assert.equal(done.output, 'nested'); assert.equal(waiting.nodes.component.status, 'waiting_review');

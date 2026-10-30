@@ -119,10 +119,7 @@ function plannerCatalogs(document, text, skills, profile) {
   if (/(?:Skill|技能)/i.test(text)) types.add('skill');
   if (/(?:条件|否则|分支|condition)/i.test(text)) types.add('condition');
   if (/(?:汇总|并行|合并|merge)/i.test(text)) types.add('merge');
-  const score = relevance(text), usedTools = new Set(document.nodes.map(node => node.config.toolName).filter(Boolean));
-  const relevantTools = WORKFLOW_TOOLS.filter(row => !row.id.startsWith('hdk.') || usedTools.has(row.id) || score(row) >= 4);
-  const toolGroups = new Set(relevantTools.filter(row => row.id.startsWith('hdk.')).map(row => row.id.split('.')[1]));
-  const tools = full ? [...WORKFLOW_TOOLS] : WORKFLOW_TOOLS.filter(row => relevantTools.includes(row) || toolGroups.has(row.id.split('.')[1]));
+  const score = relevance(text), tools = [...WORKFLOW_TOOLS];
   const existing = new Set(document.nodes.map(node => node.config.skillRef).filter(Boolean));
   const rankedSkills = skills.map((row, index) => ({ row, index, score: score(row) })).filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index).slice(0, 12).map(item => item.row);

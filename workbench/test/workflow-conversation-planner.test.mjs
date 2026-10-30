@@ -23,7 +23,7 @@ test('an empty-draft file task receives focused real contracts instead of unrela
   assert.equal(prompt.split(text).length - 1, 1, 'the current requirement appears only once');
   const source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
   assert.equal(source.catalogSelection.profile, 'focused');
-  assert(source.catalogSelection.tools.omitted > 0);
+  assert.equal(source.catalogSelection.tools.omitted, 0);
   assert(source.catalogSelection.skills.omitted > 0);
   const configs = JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
   for (const type of ['input', 'tool', 'transform', 'validation', 'human', 'output']) assert(configs.some(row => row.type === type));
@@ -31,7 +31,7 @@ test('an empty-draft file task receives focused real contracts instead of unrela
   assert.match(prompt, /图片.*human|图片.*人工审核/);
   assert.match(prompt, /context\.outputDirectory/);
   assert.equal(source.runtimeContract.policy.mayModifyApplicationSource, false);
-  assert.equal(prompt.includes('hdk.guide.annotate-front-zh'), false);
+  assert.deepEqual(JSON.parse(prompt.match(/TOOL_CATALOG=(.*)\n/)[1]).map(row => row.id), ['text.trim', 'text.uppercase', 'json.parse', 'json.stringify', 'json.keys']);
 });
 
 test('file generation instructions use each worker language actual context and input access rules', async () => {
@@ -73,7 +73,7 @@ test('planning sees the fixed direct parent and preserves provenance when config
 test('focused catalogs retain current typed nodes, used tools and exact pinned Skills', async () => {
   const doc = document(); doc.nodes = [
     createNode('condition', {}, { id: 'branch' }),
-    createNode('tool', {}, { id: 'native', config: { executionMode: 'tool', toolName: 'hdk.guide.prepare' } }),
+    createNode('tool', {}, { id: 'native', config: { executionMode: 'tool', toolName: 'json.keys', inputType: 'object', outputType: 'array' } }),
     createNode('skill', {}, { id: 'pinned', config: { skillRef: 'old-fixed-skill', version: 'sha256:old' } }),
   ];
   const { app, calls } = fixture({ text: '保留已有能力。', operations: [] });
@@ -82,7 +82,7 @@ test('focused catalogs retain current typed nodes, used tools and exact pinned S
   const prompt = calls[0].prompt, source = JSON.parse(prompt.split('USER_SOURCE_JSON=')[1]);
   assert.equal(source.catalogSelection.profile, 'focused');
   assert(JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]).some(row => row.type === 'condition'));
-  assert(JSON.parse(prompt.match(/TOOL_CATALOG=(.*)\n/)[1]).some(row => row.id === 'hdk.guide.prepare'));
+  assert(JSON.parse(prompt.match(/TOOL_CATALOG=(.*)\n/)[1]).some(row => row.id === 'json.keys'));
   assert(JSON.parse(prompt.match(/SKILL_CATALOG=(.*)\n/)[1]).some(row => row.ref === 'old-fixed-skill' && row.revision === 'sha256:old'));
 });
 
@@ -100,7 +100,7 @@ test('complex graphs and explicit full profiles keep complete real contracts ins
     const catalog = JSON.parse(prompt.match(/CONFIG_CATALOG=(.*)\n/)[1]);
     assert(catalog.some(row => row.type === 'foreach'));
     assert(catalog.some(row => row.type === 'improvement'));
-    assert.match(prompt, /hdk\.guide\.annotate-front-zh/);
+    assert.match(prompt, /json\.keys/);
   }
   const f = fixture({ text: 'invalid', operations: [] });
   await assert.rejects(planWorkflowConversation(f.app, { text: '测试', document: document(), contractProfile: 'invented' }), /上下文配置无效/);

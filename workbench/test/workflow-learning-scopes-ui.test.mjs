@@ -60,7 +60,7 @@ test('tool improvement references clear on standalone derivation and remap when 
   assert.deepEqual(improvement.config.targetNodeIds, ['worker']);
 });
 
-test('the editor applies selected tool code or a complete workflow candidate as one undo while keeping the current layout', () => {
+test('the editor applies a candidate as one undo and preserves layout for code-only changes', () => {
   for (const scope of ['tools', 'workflow']) {
     const base = learningDocument(scope); let candidate = structuredClone(base); candidate.mode = 'execute';
     if (scope === 'tools') candidate.nodes.find(node => node.id === 'worker').config.code = 'return { ...input, normalized: true };';
@@ -71,9 +71,11 @@ test('the editor applies selected tool code or a complete workflow candidate as 
         { op: 'connect', sourceNode: 'normalize', sourcePort: 'out', targetNode: 'output', targetPort: 'in' }]).document;
     }
     const current = structuredClone(base); current.nodes.find(node => node.id === 'worker').x = 444; current.viewport.x = 99;
-    const editor = Object.assign(Object.create(WorkflowEditor.prototype), { doc: current, propertyDrafts: new Map(), history: [], future: [], cancelGesture() {}, cancelConnection() {}, pruneSelection() {}, renderGraph() {}, renderProperties() {}, scheduleSave() {} });
+    const editor = Object.assign(Object.create(WorkflowEditor.prototype), { doc: current, propertyDrafts: new Map(), offsets: new Map(), history: [], future: [], cancelGesture() {}, cancelConnection() {}, pruneSelection() {}, renderGraph() {}, measurePorts() {}, renderProperties() {}, scheduleSave() {} });
     editor.applyLearningDocument(candidate, { baseDocument: base, scope, trainableNodeIds: ['worker'] });
-    assert.equal(editor.doc.mode, 'execute'); assert.equal(editor.doc.nodes.find(node => node.id === 'worker').x, 444); assert.equal(editor.doc.viewport.x, 99); assert.equal(editor.history.length, 1);
+    assert.equal(editor.doc.mode, 'execute'); assert.equal(editor.doc.viewport.x, 99); assert.equal(editor.history.length, 1);
+    if (scope === 'tools') assert.equal(editor.doc.nodes.find(node => node.id === 'worker').x, 444);
+    else assert.notEqual(editor.doc.nodes.find(node => node.id === 'worker').x, 444);
     if (scope === 'tools') assert.match(editor.doc.nodes.find(node => node.id === 'worker').config.code, /normalized/);
     else assert.equal(editor.doc.nodes.filter(node => node.type === 'transform').length, 1);
   }

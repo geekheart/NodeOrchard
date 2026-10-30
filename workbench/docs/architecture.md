@@ -19,7 +19,7 @@ flowchart LR
   APP --> ENGINE["src/workflows 调度与审核"]
   ENGINE --> DOMAIN
   ENGINE --> DB[("私有 SQLite")]
-  ENGINE --> TOOLS["工具 / 代码 / HDK 能力"]
+  ENGINE --> TOOLS["通用工具 / 代码 / 子流程"]
   ENGINE --> HERMES["Python gateway → Hermes"]
   HERMES --> MODEL["Hermes 配置的模型提供商"]
   ENGINE --> ORIGINALS["工作流文件夹 / runs 执行原件"]
@@ -48,8 +48,9 @@ flowchart LR
 | `workflow-presets.mjs`、`workflow-node-presets.mjs` 与节点库控件 | 节点派生定义、固定直接父级、不可变版本和实例来源展示 | 因父级更新改写已有实例、执行派生内容或补造历史父级 |
 | `public/` | 页面、画布、输入表单和交互状态 | 可信授权、伪造服务端运行状态 |
 | `python/` | Hermes JSON-RPC、Skill 冻结、学习记忆 scope、代码 worker | 工作流业务编排 |
-| `hdk/` | EDA／图像／文档／固件的固定工具与强校验 | 猜硬件事实、伪造实测成功 |
-| `skills/` | 维护中的细粒度能力指令、模板和资源 | 本地训练答案、候选或运行快照 |
+| `assistant-skills/` | 内部助手使用已有通用应用接口的操作指令 | 行业业务实现、用户训练答案或运行快照 |
+
+行业业务复用 Hermes 管理的 Skill、现有工具／代码节点和节点派生。核心不注册行业工具目录，不执行外置旧业务源码；历史工作流和运行原件保持原位，迁移后需另行验证。
 
 共享模块既供 Node 导入，也以精确白名单 URL 提供给浏览器。静态服务不允许访问整个仓库。模块移动修正真实入口和 worker 路径，不保留无意义的旧转发文件。
 
@@ -73,7 +74,7 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 - 交付失败可单独重试；副本变化生成新交付修订。复制不会触发节点或模型重跑。
 - 现代 DAG 的交付范围由已完成输出节点明确声明的文件及节点自身保存结果决定；继承的产物索引只用于核对，不作为整批复制清单。每份成果须匹配本次生产节点的当前尝试、登记 SHA 与大小，复制前后复核；编译依赖、历史版本和未声明中间文件保留在原件目录。
 - 显式资料包按同一生产节点登记的包清单展开，成员受清单 SHA、相对路径、大小和当前版本约束，不能借包清单复制运行根或其它目录。子流程对外声明的成果先核验、归集至父节点当前尝试，再以父运行文件引用继续传递，保留原始来源。
-- `workflow/`、旧状态、私人 HDK 配置／训练记录和验证截图均由 Git 忽略；只有源码模板、通用示例与脱敏 fixture 可发布。
+- `workflow/`、旧状态、私人业务配置／训练记录和验证截图均由 Git 忽略；只有源码模板、通用示例与脱敏 fixture 可发布。
 
 不能把代码目录整理当作移动历史数据库、修改已完成结果或重新批准产物的理由。
 
@@ -136,7 +137,7 @@ AI 方案的预应用与并发检查仍用完整 `documentFingerprint()`；仅�
 - 自动化测试统一在 `test/`；Python 测试与 fixture 也集中于此。
 - 一次性绑定个人案例的旧工作流生成器已删除；实际业务图从编辑器搭建。
 - 仍被当前能力调用的旧 Python 实现保留；旧 schema1 放行证据不因重构自动更新。
-- 发布前运行 `npm --prefix workbench test` 和 `npm --prefix workbench run check:git`。纯源码包的测试不能隐式依赖私人训练答案或本机板卡资料。
+- 发布前运行 `npm --prefix workbench test` 和 `npm --prefix workbench run check:git`。纯源码包的测试不能隐式依赖私人训练答案或本机业务资料。
 
 ## 应用诊断
 

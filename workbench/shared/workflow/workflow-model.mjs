@@ -267,7 +267,7 @@ export function nodeConfigurationContract(type, { schemaVersion = 2 } = {}) {
     ...(schemaVersion === 2 ? [...Object.keys(V2_DEFAULTS), ...(type === 'output' ? ['stage'] : [])] : [])])];
   const enums = { language: [...CODE_LANGUAGES], executionMode: [...TOOL_EXECUTION_MODES], inputType: [...PORT_TYPES], outputType: [...PORT_TYPES],
     failurePolicy: ['stop', 'retry'], trigger: ['manual', 'schedule'], comparison: ['exact', 'model'], scope: ['skills', 'tools', 'workflow'], stage: ['final', 'intermediate'],
-    resource: ['default', 'model', 'eda', 'browser', 'drawio', 'memory', 'build'], sourceKind: ['value', 'file', 'folder', 'image'] };
+    resource: ['default', 'model', 'browser', 'memory', 'build'], sourceKind: ['value', 'file', 'folder', 'image'] };
   return { type, schemaVersion, defaults, allowedConfigKeys,
     enums: Object.fromEntries(Object.entries(enums).filter(([key]) => allowedConfigKeys.includes(key))) };
 }

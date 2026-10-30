@@ -23,7 +23,7 @@ NodeOrchard 是面向个人的本地 AI 工作流应用。通过节点画布或 
 
 应用负责编辑、调度、产物与审核，**Hermes 是 Agent 核心**，负责工具调用、Skills、记忆、模型连接与认证。工作台读取 Hermes 的配置，并通过顶部入口选择服务商和模型；选择由 Hermes 校验和保存。普通工具与代码流程可以独立运行，无需连接模型。
 
-> 当前定位：本机、单用户、自行部署。主应用不依赖前端构建服务或独立数据库；HDK 工程能力是可选的本机专业集成，需要另行准备依赖。
+> 当前定位：本机、单用户、自行部署的通用工作流软件。主应用不依赖前端构建服务或独立数据库；业务能力复用 Hermes Skill、工具与代码节点。
 
 > **安装前提：使用 Skill、AI 对话与学习功能前，请先安装 Hermes Agent，配置模型服务商并验证 Hermes 能正常对话。** 按[快速开始](#快速开始)准备 Hermes，再启动 NodeOrchard。
 
@@ -282,8 +282,7 @@ NodeOrchard/
 │   ├── shared/workflow/      前后端共用的纯模型、端口与协议
 │   ├── public/               浏览器页面、画布与主题
 │   ├── python/               Hermes 桥接与 Python 执行器
-│   ├── skills/               人工维护的 Skill、源码模板与 schema
-│   ├── hdk/                  可选工程能力、转换器适配与强校验
+│   ├── assistant-skills/     内部助手使用通用应用接口的操作指令
 │   ├── examples/             可分享的通用流程与数据集
 │   ├── test/                 自动化测试与脱敏 fixture
 │   ├── scripts/              开发检查及工具
@@ -296,13 +295,11 @@ NodeOrchard/
 
 依赖方向为界面／后端到共享模型。`shared/workflow/` 不依赖 DOM、文件系统、HTTP 或数据库；浏览器只通过静态资源白名单读取共享模块。详细设计见[整体架构](workbench/docs/architecture.md)。
 
-### 可选 HDK 工程能力
+### 业务能力
 
-仓库包含原生 EDA 导出、实拍 Pinout、接口标注、双语指南、工艺要求、固件编译和测试说明等集成。它们依赖本机资料与外部工具，**不属于基础启动流程**。
+行业业务通过已有的 Hermes Skill、工具／代码节点和节点派生接入，核心负责调度、输入校验、版本、人工审核和产物管理。需要软件、SDK 或转换器时，由相应业务 Skill 或代码声明并使用其实际运行环境。
 
-当前工程集成在 macOS 本机环境验证，涉及嘉立创 EDA 专业版、Chrome／Playwright、draw.io、外部转换器、Python 包及指定 SDK／编译器；部分渲染与文档脚本还存在 Codex runtime 和应用安装路径约束。不能直接视为跨平台的一键工程导出工具。
-
-开始前阅读 [HDK 能力边界](workbench/hdk/ARCHITECTURE.md)、[四文件流程](workbench/docs/four-files-workflow.md)与[应用配置](workbench/README.md#配置)，准备自己的工程、照片、模板和资源覆盖配置。缺依赖时应补齐环境；固件编译成功仍不代表实板测试通过。
+原 HDK 业务源码已移至仓库外的本地 `NodeOrchard-HDK/` 保留，不随本仓库发布。它是待迁移的源码档案，旧实现仍依赖原应用的运行绑定与回执协议，不能直接作为已可运行的独立集成。已有工作流、配置和运行原件保持原状；历史行业节点需要人工迁移后才能继续执行，不自动改写或重跑。
 
 ## 开发、测试与发布边界
 
@@ -312,7 +309,7 @@ npm --prefix workbench run check:git
 git diff --cached --stat
 ```
 
-测试固定使用 `test/*.test.mjs`，Python 测试由包装器调用；不要用裸 `node --test` 自动发现，以免启动常驻 fixture。部分外部工具测试在依赖缺失时明确跳过，真实模型与硬件验收需单独执行。
+测试固定使用 `test/*.test.mjs`，Python 测试由包装器调用；不要用裸 `node --test` 自动发现，以免启动常驻 fixture。部分外部工具测试在依赖缺失时明确跳过，真实模型与业务验收需单独执行。
 
 `check:git` 检查已跟踪文件及未忽略的候选文件，包括个人主目录字面量和私有目录边界；它不修改暂存区、不上传文件。提交前仍需审阅实际暂存内容。
 
@@ -366,7 +363,7 @@ git diff --cached --stat
 
 ## 致谢与许可状态
 
-感谢 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供 Agent、Skills 和记忆运行时；[Multica](https://github.com/multica-ai/multica) 为应用导航与工作流列表设计提供参考。可选转换器及内含第三方代码的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+感谢 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供 Agent、Skills 和记忆运行时；[Multica](https://github.com/multica-ai/multica) 为应用导航与工作流列表设计提供参考。外部运行时及设计参考的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 **NodeOrchard 原创代码的项目许可证尚未选定。** 仓库公开不代表已经授予开源许可证；各第三方组件继续遵循其自身条款。
 自由对话先由AI轻量判断类型，创建／修改直接进入候选生成，故障排查再按需取证；用户不用选择类型。右侧对话可调用全局诊断工具，按需读取运行与 Hermes 工具证据、截图或录制只读复现；精简上下文并复用有效证据，在原气泡显示阶段、耗时和中断前的诊断进度。总控可一次读取指定聊天事项的模型调用诊断，并通过固定短请求检查当前模型连接；等待首字、输出停滞与整轮截止分别监测，失败保留证据，不自动重放业务。详见 [应用诊断](workbench/docs/application-diagnostics.md)。

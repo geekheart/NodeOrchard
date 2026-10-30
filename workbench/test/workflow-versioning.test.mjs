@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocument, createNode, connectNodes, getPorts, validateDocument } from '../shared/workflow/workflow-model.mjs';
 import { planWorkflow, learningBranch } from '../shared/workflow/workflow-plan.mjs';
-import { builtinNodePresets } from '../shared/workflow/workflow-presets.mjs';
 import { validateNodeValue } from '../shared/workflow/workflow-validation.mjs';
 import { prepareWorkflowVersion } from '../shared/workflow/workflow-versioning.mjs';
 
@@ -19,7 +18,7 @@ function graph(nodes, edges, settings = { maxConcurrency: 3, outputDirectory: '/
   for (const [sourceNode, targetNode, targetPort = 'in', sourcePort = 'out'] of edges) document = connectNodes(document, { sourceNode, sourcePort, targetNode, targetPort });
   return validateDocument(document);
 }
-function simple(fields = [{ key: 'sourcePath', label: '工程文件', kind: 'file', required: true, extensions: ['.epro2'], role: 'source' },
+function simple(fields = [{ key: 'sourcePath', label: '工程文件', kind: 'file', required: true, extensions: ['.json'], role: 'source' },
   { key: 'count', label: '数量', kind: 'number', required: true }]) {
   return graph([node('input', 'input', { fieldName: 'preparedInput', fields, value: null }),
     node('tool', 'trim', { executionMode: 'tool', toolName: 'json.keys', resource: 'default', timeoutSeconds: 180, outputType: 'array' }),
@@ -28,14 +27,15 @@ function simple(fields = [{ key: 'sourcePath', label: '工程文件', kind: 'fil
 function reviewSkills() {
   const nodes = [node('input', 'input', { fields: [{ key: 'sourcePath', label: '工程文件', kind: 'file', required: true }] })];
   const edges = [];
-  for (const [index, toolName, resource] of [['a', 'hdk.full.native', 'eda'], ['b', 'hdk.full.process', 'default'], ['c', 'hdk.full.sop', 'default']]) {
+  for (const index of ['a', 'b', 'c']) {
     nodes.push(node('skill', `skill-${index}`, { skillRef: `skill-${index}-ref`, version: sourceVersion, timeoutSeconds: 300 }));
-    const preset = builtinNodePresets().find(row => row.toolName === toolName);
-    nodes.push(node('tool', `tool-${index}`, { executionMode: 'tool', toolName, resource, timeoutSeconds: 600,
-      reviewImages: true, code: '', language: 'javascript' }, preset.definition.node.ports));
+    nodes.push(node('tool', `tool-${index}`, { executionMode: 'code', resource: 'default', timeoutSeconds: 600,
+      reviewImages: true, code: 'return input;', language: 'javascript' }, {
+      inputs: [{ id: 'facts', label: '资料', type: 'object', required: true }, { id: 'plan', label: '计划', type: 'object', required: true }],
+      outputs: [{ id: 'out', label: '结果', type: 'object' }],
+    }));
     nodes.push(node('human', `human-${index}`, { reviewTargetNodeId: `skill-${index}`, prompt: '核对当前实际产物，要求修改会回到指定 Skill。' }));
     edges.push(['input', `skill-${index}`], ['input', `tool-${index}`, 'facts'], [`skill-${index}`, `tool-${index}`, 'plan'], [`tool-${index}`, `human-${index}`], [`human-${index}`, 'merge', index]);
-    if (index === 'c') edges.push(['input', `tool-${index}`, 'firmware']);
   }
   nodes.push(node('merge', 'merge', {}, { inputs: ['a', 'b', 'c'].map(id => ({ id, label: id, type: 'object', required: true })), outputs: [{ id: 'out', label: '汇总', type: 'object' }] }),
     node('output', 'final'), node('evaluation', 'evaluation', { comparison: 'model', valuePath: 'learningComparison' }),
@@ -71,9 +71,9 @@ test('all required input branches pass through typed checks, including numeric z
   assert.equal(doc.edges.filter(edge => edge.sourceNode === input.id).length, 1);
   assert(doc.edges.some(edge => edge.sourceNode === check.id && edge.targetNode === result.report.nodeIdMap.trim));
   assert.equal(check.config.rules.filter(rule => rule.valuePath === 'count' && rule.check === 'nonempty').length, 0);
-  assert.doesNotThrow(() => validateNodeValue({ sourcePath: '/prepared/input.epro2', count: 0 }, check.config.rules));
+  assert.doesNotThrow(() => validateNodeValue({ sourcePath: '/prepared/input.json', count: 0 }, check.config.rules));
   assert.throws(() => validateNodeValue({ sourcePath: ' ', count: 0 }, check.config.rules), /工程文件不能为空/);
-  assert.throws(() => validateNodeValue({ sourcePath: '/prepared/input.epro2', count: '0' }, check.config.rules), /数量应为数字/);
+  assert.throws(() => validateNodeValue({ sourcePath: '/prepared/input.json', count: '0' }, check.config.rules), /数量应为数字/);
   assert.throws(() => validateNodeValue({ count: 0 }, check.config.rules), /请准备工程文件/);
 });
 
@@ -81,7 +81,7 @@ test('three Skill plans, directly consumed human approvals, learning observation
   const source = reviewSkills(), before = structuredClone(source);
   const result = prepareWorkflowVersion(source, { idFactory: factory() }), doc = result.document, ids = result.report.nodeIdMap;
   assert.deepEqual(source, before); assert.equal(result.report.skillCount, 3);
-  assert.equal(result.report.toolPresets, 3); assert.equal(result.report.stageOutputs, 3);
+  assert.equal(result.report.toolPresets, 0); assert.equal(result.report.stageOutputs, 3);
   assert.deepEqual(result.report.learningTargets, ['a', 'b', 'c'].map(key => ids[`skill-${key}`]));
   for (const key of ['a', 'b', 'c']) {
     const oldSkill = source.nodes.find(row => row.id === `skill-${key}`), newSkill = doc.nodes.find(row => row.id === ids[`skill-${key}`]);
@@ -119,17 +119,17 @@ test('preset source metadata is attached without replacing custom instance ports
   assert.equal(preserved.report.toolPresets, 0);
 });
 
-test('review-bound Pinout verifier still directly consumes the human node, never the new stage output', () => {
-  const fromPreset = (name, id) => {
-    const preset = builtinNodePresets().find(row => row.toolName === name);
-    return node('tool', id, preset.definition.node.config, preset.definition.node.ports);
-  };
+test('a reviewed business verifier still directly consumes the human node, never the new stage output', () => {
+  const renderer = id => node('tool', id, { executionMode: 'code', code: 'return input;', language: 'javascript', reviewImages: true }, {
+    inputs: [{ id: 'facts', label: '资料', type: 'object', required: true }, { id: 'plan', label: '计划', type: 'object', required: true }],
+    outputs: [{ id: 'out', label: '结果', type: 'object' }],
+  });
   const source = graph([node('input', 'input', { fields: [{ key: 'sourcePath', label: '来源工程', kind: 'file', required: true }] }),
-    node('skill', 'skill', { skillRef: 'pinout-layout', version: sourceVersion }),
-    fromPreset('hdk.four.pinout-front', 'front'), fromPreset('hdk.four.pinout-back', 'back'),
+    node('skill', 'skill', { skillRef: 'document-layout', version: sourceVersion }),
+    renderer('front'), renderer('back'),
     node('merge', 'images', {}, { inputs: [{ id: 'front', label: '正面', type: 'object', required: true }, { id: 'back', label: '背面', type: 'object', required: true }], outputs: [{ id: 'out', label: '两面图', type: 'object' }] }),
-    node('human', 'review', { prompt: 'VO4，无 MAIN，核对当前两张实际图片。', reviewTargetNodeId: 'skill' }),
-    fromPreset('hdk.pinout.verify', 'verify'), node('output', 'final')],
+    node('human', 'review', { prompt: '核对当前两张实际图片。', reviewTargetNodeId: 'skill' }),
+    node('tool', 'verify', { executionMode: 'code', code: 'return input;', language: 'javascript' }, { inputs: [{ id: 'images', label: '已审核图片', type: 'object', required: true }], outputs: [{ id: 'out', label: '结果', type: 'object' }] }), node('output', 'final')],
   [['input', 'skill'], ['input', 'front', 'facts'], ['input', 'back', 'facts'], ['skill', 'front', 'plan'], ['skill', 'back', 'plan'],
     ['front', 'images', 'front'], ['back', 'images', 'back'], ['images', 'review'], ['review', 'verify', 'images'], ['verify', 'final']]);
   const { document, report } = prepareWorkflowVersion(source, { idFactory: factory() }), ids = report.nodeIdMap;

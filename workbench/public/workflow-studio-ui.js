@@ -1,6 +1,6 @@
 import { createNode, getPorts, connectNodes, validateDocument, updateNode, NODE_TYPES } from '../shared/workflow/workflow-model.mjs';
 import { setToolbarControl } from './workflow-toolbar-controls.js';
-import { FIELD_KINDS, INPUT_FIELD_PRESETS, mergeInputFields, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutDocument, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
+import { FIELD_KINDS, STUDIO_STATUS, isV2, inputEntries, structuredInput, valuesFromInput, portCompatible, layoutDocument, runArtifacts, shortVersion, reviewTargetArtifacts, groupArtifacts, orderedNodeStates, manifestSourceCount, canRerunNode, nodeInspectionVersions, reviewTargetNodes } from '../shared/workflow/workflow-studio-utils.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { workflowInputDefault } from '../shared/workflow/workflow-inputs.mjs';
 import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revision.mjs';
@@ -51,20 +51,36 @@ export function nodePreviewArtifacts(run, workflowId, nodeId) {
 }
 
 // The approval snapshot is authoritative when present. A pending gate has no
-// approved hashes yet: show its direct receipt files separately from references.
+// approved hashes yet: separate current producer files from upstream references.
 export function reviewFileGroups(run, nodeId, pictures = []) {
   const state = run?.nodes?.[nodeId] || {}, items = state.artifacts || [], displayed = new Set(pictures.map(item => item.id || item.artifactId));
   const hashes = state.review?.artifactHashes, exact = Array.isArray(hashes), bound = new Set((hashes || []).map(item => `${item.id}\0${item.sha256}`)), producers = new Set();
-  const visit = value => {
-    if (!value || typeof value !== 'object') return;
-    if (['hdk-node-receipt', 'hdk-node-receipt-ref'].includes(value.kind) && value.runId === run.id && typeof value.nodeId === 'string') { producers.add(value.nodeId); return; }
-    for (const child of Object.values(value)) visit(child);
+  // Pending approval follows the actual graph and registered artifacts, never
+  // a business object's self-reported receipt or producer identity.
+  const currentArtifact = item => {
+    const producer = run.nodes?.[item.nodeId];
+    return item.runId === run.id && Number.isSafeInteger(item.attempt) && item.attempt > 0
+      && item.attempt === producer?.attempt && producer.artifacts?.some(original =>
+        (original.id || original.artifactId) === (item.id || item.artifactId) && original.sha256 === item.sha256
+        && original.nodeId === item.nodeId && original.runId === run.id && original.attempt === item.attempt);
   };
-  if (!exact) visit(state.input);
+  if (!exact) {
+    const pending = [nodeId], visited = new Set([nodeId]);
+    while (pending.length) {
+      const target = pending.pop();
+      for (const edge of run?.document?.edges || []) {
+        if (edge.targetNode !== target || visited.has(edge.sourceNode)) continue;
+        visited.add(edge.sourceNode);
+        if (items.some(item => item.nodeId === edge.sourceNode && currentArtifact(item))) producers.add(edge.sourceNode);
+        else pending.push(edge.sourceNode);
+      }
+    }
+  }
   const current = [], references = [];
   for (const item of items) {
     if (displayed.has(item.id || item.artifactId)) continue;
-    const included = exact ? bound.has(`${item.id || item.artifactId}\0${item.sha256}`) : producers.has(item.nodeId);
+    const included = exact ? bound.has(`${item.id || item.artifactId}\0${item.sha256}`)
+      : producers.has(item.nodeId) && currentArtifact(item);
     (included ? current : references).push(item);
   }
   return { current, references, exact };
@@ -89,42 +105,6 @@ export function assertChildRunBinding(parent, nodeId, state, child) {
   const workflowId = definition.config?.document?.id;
   if (workflowId && (child.workflowId !== workflowId || child.document?.id !== workflowId)) throw new Error('子流程执行快照与此组合节点不匹配。');
   return child;
-}
-
-// Show only the final receipt's own files, never the output node's inherited
-// artifact collection. URLs remain the existing opaque artifact endpoints.
-export function deliveryResults(run) {
-  if (run?.status !== 'complete' || run.learningId || run.document?.mode === 'learn') return [];
-  const definitions = run.document?.nodes || [], results = [], seen = new Set();
-  for (const output of definitions.filter(node => node.type === 'output')) {
-    const state = run.nodes?.[output.id], token = state?.output;
-    if (state?.status !== 'complete' || token?.kind !== 'hdk-node-receipt' || token.runId !== run.id
-      || !['hdk.full.verify', 'hdk.full.archive-delivery'].includes(token.operation) || token.status !== 'complete' || token.qualified !== true
-      || !/^[a-f0-9]{64}$/.test(token.receiptSha256 || '')) continue;
-    const producer = definitions.find(node => node.id === token.nodeId), current = run.nodes?.[token.nodeId];
-    if (producer?.type !== 'tool' || producer.config?.executionMode !== 'tool' || producer.config?.toolName !== token.operation
-      || !WORKFLOW_TOOLS.some(tool => tool.id === token.operation) || current?.status !== 'complete'
-      || !Number.isSafeInteger(current.attempt) || current.attempt < 1 || typeof current.attemptId !== 'string' || !current.attemptId
-      || !/^[A-Za-z0-9_-]+$/.test(token.nodeId) || typeof run.outputDirectory !== 'string'
-      || current.outputDirectory !== `${run.outputDirectory}/${token.nodeId}/版本-${current.attempt}`
-      || token.receiptPath !== `${current.outputDirectory}/receipt.json`
-      || JSON.stringify(current.output) !== JSON.stringify(token) || !Array.isArray(token.artifacts) || token.artifacts.length < 2 || token.artifacts.length > 64) continue;
-    const artifacts = []; let valid = true;
-    for (const reference of token.artifacts) {
-      if (!reference || typeof reference !== 'object' || typeof reference.path !== 'string' || !reference.path.startsWith(current.outputDirectory + '/')
-        || reference.path.split('/').some(part => part === '.' || part === '..') || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) { valid = false; break; }
-      const matches = (Array.isArray(current.artifacts) ? current.artifacts : []).filter(item => item.runId === run.id && item.nodeId === producer.id && item.attempt === current.attempt
-        && item.path === reference.path && item.sha256 === reference.sha256 && typeof (item.id || item.artifactId) === 'string');
-      const item = matches[0], id = item?.id || item?.artifactId, endpoint = id ? `/api/workflow-v2/artifacts/${encodeURIComponent(id)}` : '';
-      if (!item || item.previewUrl !== endpoint || item.downloadUrl !== endpoint + '?download=1') { valid = false; break; }
-      artifacts.push(item);
-    }
-    if (!valid || !artifacts.some(item => item.role === 'full-hdk-delivery' && /\.zip$/i.test(item.path))
-      || !artifacts.some(item => ['full-hdk-verification', 'archive-verification'].includes(item.role) && /\.json$/i.test(item.path))) continue;
-    const key = `${token.nodeId}:${token.receiptSha256}`; if (seen.has(key)) continue; seen.add(key);
-    results.push({ output, producer, token, artifacts });
-  }
-  return results;
 }
 
 export class WorkflowStudioUI {
@@ -352,17 +332,11 @@ export class WorkflowStudioUI {
   }
   renderFieldSchema(node) {
     const section = element('section', 'wf-property-section wf-studio-field-schema'); section.append(element('h3', '', '运行输入表单'), element('p', 'wf-field-help', '字段定义准备清单。文件哈希由系统计算。'));
-    for (const preset of INPUT_FIELD_PRESETS) section.append(button(preset.label, () => {
-      const current = this.editor.doc.nodes.find(item => item.id === node.id); if (!current) return;
-      if (!this.updateConfig(node.id, { outputType: 'object', fields: mergeInputFields(current.config.fields, preset.fields) })) return;
-      this.setTab('inputs'); this.panelSettings().libraryClosed = false; this.editor.applySettings();
-    }, 'wf-button'));
-    section.append(element('p', 'wf-field-help', '预设只补齐缺少的字段，保留已有配置和自定义字段。请提前准备与当前工程匹配的已核验配置文件、实拍照片和资料目录。'));
     for (const [index, field] of (node.config.fields || []).entries()) { const row = element('div', 'wf-studio-schema-row'); row.append(element('strong', '', field.label), element('small', '', `${field.key} · ${FIELD_KINDS.find(kind => kind[0] === field.kind)?.[1] || field.kind}${field.required ? ' · 必填' : ''}`), button('删除', () => this.updateConfig(node.id, { fields: node.config.fields.filter((_, i) => i !== index) }), 'wf-button wf-studio-small')); section.append(row); }
-    const label = element('input'); label.placeholder = '例如 正面照片'; label.setAttribute('aria-label', '新输入字段名称'); const key = element('input'); key.placeholder = '字段键，例如 frontImage'; key.setAttribute('aria-label', '新输入字段键'); const kind = element('select'); kind.setAttribute('aria-label', '新输入字段类型'); for (const [value, name] of FIELD_KINDS) { const option = element('option', '', name); option.value = value; kind.append(option); }
+    const label = element('input'); label.placeholder = '例如 输入文件'; label.setAttribute('aria-label', '新输入字段名称'); const key = element('input'); key.placeholder = '字段键，例如 sourceFile'; key.setAttribute('aria-label', '新输入字段键'); const kind = element('select'); kind.setAttribute('aria-label', '新输入字段类型'); for (const [value, name] of FIELD_KINDS) { const option = element('option', '', name); option.value = value; kind.append(option); }
     const extensions = element('input'); extensions.placeholder = '扩展名，例如 .png,.jpg（可选）'; extensions.setAttribute('aria-label', '输入允许扩展名');
     const required = element('input'); required.type = 'checkbox'; required.checked = true; const requiredLabel = element('label', 'wf-studio-checkbox'); requiredLabel.append(required, element('span', '', '必填'));
-    const match = element('input'); match.placeholder = '文件夹匹配，例如 *.epro2（可选）'; match.setAttribute('aria-label', '输入文件夹匹配'); const role = element('input'); role.placeholder = '资料角色，例如 source（可选）'; role.setAttribute('aria-label', '输入资料角色');
+    const match = element('input'); match.placeholder = '文件夹匹配，例如 *.csv（可选）'; match.setAttribute('aria-label', '输入文件夹匹配'); const role = element('input'); role.placeholder = '资料角色，例如 source（可选）'; role.setAttribute('aria-label', '输入资料角色');
     section.append(label, key, kind, extensions, match, role, requiredLabel, button('添加输入字段', () => { const name = key.value.trim(); if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) return this.editor.toast('字段键需以英文字母开头，仅含字母、数字和下划线。', true); if ((node.config.fields || []).some(field => field.key === name)) return this.editor.toast('字段键已存在。', true); this.updateConfig(node.id, { fields: [...(node.config.fields || []), { key: name, label: label.value.trim() || name, kind: kind.value, required: required.checked, ...(extensions.value.trim() ? { extensions: extensions.value.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(match.value.trim() ? { match: match.value.trim() } : {}), ...(role.value.trim() ? { role: role.value.trim() } : {}) }] }); })); this.editor.properties.insertBefore(section, this.editor.properties.querySelector('.wf-property-form'));
   }
   updateConfig(id, config) { try { this.editor.commit(updateNode(this.editor.doc, id, { config }), '更新节点配置'); return true; } catch (error) { this.editor.toast(error.message, true); return false; } }
@@ -539,7 +513,7 @@ export class WorkflowStudioUI {
       box.append(pictures);
     } else if (state.artifacts?.length) box.append(element('p', 'wf-field-help', '此审核节点没有可直接展示的生成图片，请先查看下方审核输入文件。'));
     const files = reviewFileGroups(run, id, targets);
-    for (const [items, title, help] of [[files.current, files.exact ? '精确绑定的审核文件' : '当前审核输入文件（待决定）', files.exact ? '按本节点已记录的产物 ID 与 SHA 匹配；不改变原审核决定。' : '来自本次输入回执的直接生产节点；尚未获得本次批准。'], [files.references, '上游参考文件', '保留上游资料的访问入口；展示这些文件不代表对其作出独立批准。']]) {
+    for (const [items, title, help] of [[files.current, files.exact ? '精确绑定的审核文件' : '当前审核输入文件（待决定）', files.exact ? '按本节点已记录的产物 ID 与 SHA 匹配；不改变原审核决定。' : '来自本次工作流直接上游的已登记产物；尚未获得本次批准。'], [files.references, '上游参考文件', '保留上游资料的访问入口；展示这些文件不代表对其作出独立批准。']]) {
       if (!items.length) continue;
       const details = element('details', 'wf-studio-review-files'); details.append(element('summary', '', `${title} · ${items.length} 项`), element('p', 'wf-field-help', help), this.artifactGallery(items, { run, showOrigin: true })); box.append(details);
     }
@@ -598,21 +572,6 @@ export class WorkflowStudioUI {
       card.append(element('strong', '', item.label || item.name || '产物'), element('small', '', [item.mimeType, Number.isFinite(item.size) ? `${Math.max(1, Math.round(item.size / 1024))} KB` : ''].filter(Boolean).join(' · '))); if (showOrigin) { const producer = run?.document?.nodes?.find(node => node.id === item.nodeId); card.append(element('small', '', `来源：${producer?.title || item.nodeId || '未记录节点'} · 第 ${item.attempt || 1} 次尝试`)); } const actions = element('div', 'wf-studio-inline-actions'); if (preview) { const link = element('a', 'wf-button', '预览'); link.href = preview; link.target = '_blank'; link.rel = 'noopener'; actions.append(link); } if (item.downloadUrl) { const link = element('a', 'wf-button', '下载'); link.href = item.downloadUrl; link.download = item.name || ''; actions.append(link); } if (run && this.editor?.conversation) actions.append(button('反馈此产物', () => this.editor.conversation.focusContext({ runId: run.id, nodeId: item.nodeId, attempt: item.attempt, attemptId: run.nodes?.[item.nodeId]?.attemptId, artifactIds: [item.id || item.artifactId] }, { intent: 'auto' }))); card.append(actions); list.append(card); }
     return list;
   }
-  renderDeliveries(run) {
-    const results = deliveryResults(run); if (!results.length) return null;
-    const section = element('section', 'wf-studio-deliveries'); section.setAttribute('aria-label', '本次交付成果'); section.append(element('h3', '', '本次交付成果'));
-    for (const { output, producer, token, artifacts } of results) {
-      const card = element('article', 'wf-studio-delivery'); card.append(element('h4', '', output.title || '最终输出'), element('p', 'wf-field-help', `来自本次固定回执：${producer.title || producer.id} · 第 ${run.nodes[producer.id].attempt} 次尝试`));
-      if (typeof token.packagePath === 'string' && token.packagePath) { const label = element('label', 'wf-studio-delivery-path'); label.append(element('span', '', '成果包原件目录')); const path = element('input'); path.type = 'text'; path.readOnly = true; path.value = token.packagePath; path.setAttribute('aria-label', '本次成果包原件目录'); label.append(path); card.append(label); }
-      const checks = token.qualitySummary?.checks, entries = checks && typeof checks === 'object' && !Array.isArray(checks) ? Object.values(checks) : [], notes = [];
-      if (entries.length) notes.push(`固定回执检查 ${entries.filter(value => value === true).length} / ${entries.length} 通过`);
-      if (token.physicalTestStatus === 'not-run') notes.push('未进行实板测试'); if (token.releaseQualified === false) notes.push('未发布放行');
-      if (Array.isArray(token.unresolved) && token.unresolved.length) notes.push(`${token.unresolved.length} 项待确认事项`);
-      if (notes.length) card.append(element('p', 'wf-studio-delivery-status', notes.join(' · ')));
-      card.append(this.artifactCards(artifacts, { run, showOrigin: true })); section.append(card);
-    }
-    return section;
-  }
   renderRunLocations(run) {
     const locations = element('div', 'wf-studio-run-locations');
     const separated = run.storageVersion === 2 || Object.hasOwn(run, 'deliveryDirectory') || Boolean(run.delivery);
@@ -645,7 +604,7 @@ export class WorkflowStudioUI {
     if (!run) this.runSurface.append(element('p', 'wf-field-help', '尚未运行'));
     else { this.runSurface.append(this.renderRunLocations(run)); const states = orderedNodeStates(run), { completed, total, running, skippedLearning } = runProgress(run); this.runSurface.append(element('p', 'wf-field-help', `${completed} / ${total} ${run.document?.mode === 'learn' ? '节点' : '业务节点'}完成 · ${running} 项同时运行${skippedLearning ? ` · ${skippedLearning} 个学习节点已跳过` : ''}${run.queuePosition ? ` · 队列位置 ${run.queuePosition}` : ''}`)); const progress = element('progress'); progress.max = Math.max(1, total); progress.value = completed; this.runSurface.append(progress);
       const steps = element('div', 'wf-studio-run-steps'); for (const [id, state] of states) { const item = button(`${run.document.nodes.find(node => node.id === id)?.title || id} · ${STUDIO_STATUS[state.status] || state.status}`, () => { this.editor.selectNode(id); this.renderInspectorData(id); }, 'wf-studio-run-step'); item.dataset.status = state.status; steps.append(item); } this.runSurface.append(steps);
-      const deliveries = this.renderDeliveries(run); if (deliveries) this.runSurface.append(deliveries);
+
       for (const [id, state] of states) if (state.status === 'waiting_review') this.runSurface.append(this.reviewControls(run, id)); const artifacts = runArtifacts(run); if (artifacts.length) { this.runSurface.append(element('h3', '', '全部产物'), this.artifactGallery(artifacts, { run, showOrigin: true }), button('打开本次输出目录', async () => { try { await this.api('/api/workflow-v2/open-directory', { method: 'POST', body: { runId: run.id } }); } catch (error) { this.editor.toast(error.message, true); } })); }
       if (run.error) this.runSurface.append(element('p', 'wf-studio-input-error', display(run.error)));
     }

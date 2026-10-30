@@ -64,7 +64,7 @@ function contextView(value) {
   const file = own(value, 'file');
   if (typeof file === 'string') {
     const relative = file.replace(/\\/g, '/');
-    if (relative.length <= 180 && /^(?:src|public|shared|python|hdk)\/[A-Za-z0-9_./-]+\.(?:mjs|js|py|css|html)$/.test(relative)
+    if (relative.length <= 180 && /^(?:src|public|shared|python)\/[A-Za-z0-9_./-]+\.(?:mjs|js|py|css|html)$/.test(relative)
       && relative.split('/').every(part => part && !part.startsWith('.')) && safeLabel(relative)) result.file = relative;
   }
   const route = own(value, 'route');

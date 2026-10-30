@@ -46,10 +46,10 @@ test('invalid later operation atomically rejects the entire batch and checks typ
   assert.throws(() => applyWorkflowOperations(document, wrongType), /端口类型不兼容/); assert.deepEqual(document, before);
 });
 
-test('connect uses registered professional tool ports and keeps mandatory image review metadata', () => {
-  const result = applyWorkflowOperations(blank(), [{ op: 'add-node', ref: 'image', type: 'tool', config: { executionMode: 'tool', toolName: 'hdk.four.pinout-front', reviewImages: false } }]);
-  const tool = result.document.nodes[0]; assert.deepEqual(getPorts(tool).inputs.map(row => row.id), ['facts', 'plan']);
-  assert.equal(tool.config.resource, 'browser'); assert.equal(tool.config.reviewImages, true);
+test('connect uses registered generic tool types and preserves explicit review configuration', () => {
+  const result = applyWorkflowOperations(blank(), [{ op: 'add-node', ref: 'keys', type: 'tool', config: { executionMode: 'tool', toolName: 'json.keys', reviewImages: false } }]);
+  const tool = result.document.nodes[0]; assert.deepEqual(getPorts(tool).inputs.map(row => row.id), ['in']);
+  assert.equal(tool.config.inputType, 'object'); assert.equal(tool.config.outputType, 'array'); assert.equal(tool.config.reviewImages, false);
   assert.throws(() => applyWorkflowOperations(blank(), [{ op: 'add-node', ref: 'bad', type: 'tool', config: { toolName: 'secret.exec' } }]), /已注册/);
   const switched = applyWorkflowOperations(result.document, [{ op: 'update-node', nodeId: tool.id, config: { toolName: 'text.trim' } }]).document.nodes[0];
   assert.deepEqual(getPorts(switched).inputs.map(row => row.id), ['in']); assert.equal(getPorts(switched).inputs[0].type, 'text');

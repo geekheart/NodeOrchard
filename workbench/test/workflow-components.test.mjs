@@ -43,7 +43,7 @@ function multiGraph() {
   const merge = node('merge', 'merge', {}, { inputs: [{ id: 'a', label: '资料A', type: 'object', required: true }, { id: 'b', label: '资料B', type: 'object', required: true }], outputs: [{ id: 'out', label: '资料集合', type: 'object' }] });
   const calculate = code('calculate', 'return {left: input.a.value + input.b.value, right: {board: input.a.board, count: input.b.value * 2}};', {
     inputs: [{ id: 'in', label: '资料', type: 'object', required: true }], outputs: [
-      { id: 'left', label: '和', type: 'number', valuePath: 'left' }, { id: 'right', label: '板卡摘要', type: 'object', valuePath: 'right' }],
+      { id: 'left', label: '和', type: 'number', valuePath: 'left' }, { id: 'right', label: '数据摘要', type: 'object', valuePath: 'right' }],
   });
   return graph([node('input', 'first', { fieldName: 'first' }), node('input', 'second', { fieldName: 'second' }), merge, calculate,
     node('output', 'out-left'), node('output', 'out-right')], [['first', 'merge', 'a'], ['second', 'merge', 'b'], ['merge', 'calculate'], ['calculate', 'out-left', 'in', 'left'], ['calculate', 'out-right', 'in', 'right']]);
@@ -55,7 +55,7 @@ test('real multi-input multi-output execution is identical before folding, after
   const expected = { 'out-left': 11, 'out-right': { board: 'P4C61-TINY', count: 16 } };
   assert.deepEqual((await execute(manager, doc, input)).output, expected);
   const analysis = analyzeSelection(doc, ['merge', 'calculate']); assert.equal(analysis.inputs.length, 2); assert.equal(analysis.outputs.length, 2);
-  const folded = extractSelection(doc, ['merge', 'calculate'], { title: '计算板卡摘要' });
+  const folded = extractSelection(doc, ['merge', 'calculate'], { title: '计算数据摘要' });
   assert.deepEqual(doc, frozen); assert.equal(getPorts(folded.node).inputs[0].id, 'arg-1');
   const inside = await execute(manager, folded.document, input); assert.deepEqual(inside.output, expected);
   assert.equal(inside.nodes[folded.node.id].subflowProgress.results.length, 1);
@@ -65,7 +65,7 @@ test('real multi-input multi-output execution is identical before folding, after
 
 test('saved component instance remaps internal outputs and review IDs while preserving executable public interface', async t => {
   const { manager } = await setup(t); const original = multiGraph(); const folded = extractSelection(original, ['merge', 'calculate']);
-  const definition = presetDefinitionFromNode(folded.node, { title: '我的板卡计算组合' });
+  const definition = presetDefinitionFromNode(folded.node, { title: '我的数据计算组合' });
   const instance = instantiatePreset({ id: 'preset-board-summary', version: 3, definition }, { x: 500, y: 300 });
   assert.notEqual(instance.config.document.id, folded.workflow.id); assert.equal(instance.origin.version, 3);
   const oldOutputIds = new Set(folded.workflow.nodes.filter(row => row.type === 'output').map(row => row.id));
@@ -178,13 +178,12 @@ test('condition branches enclosed through an optional merge execute identically 
   }
 });
 
-test('run-bound HDK receipt producer and consumer cannot be split across a component boundary', () => {
-  const prepared = node('tool', 'prepared', { executionMode: 'tool', toolName: 'hdk.four.prepare', inputType: 'object', outputType: 'object' });
-  const native = node('tool', 'native', { executionMode: 'tool', toolName: 'hdk.four.native', inputType: 'object', outputType: 'object' });
-  const doc = graph([node('input', 'input'), prepared, native, node('output', 'output')], [['input', 'prepared'], ['prepared', 'native'], ['native', 'output']]);
-  assert.throws(() => extractSelection(doc, ['prepared']), /同次运行.*回执/);
-  assert.throws(() => extractSelection(doc, ['native']), /同次运行.*回执/);
-  assert.doesNotThrow(() => planWorkflow(extractSelection(doc, ['prepared', 'native']).document));
+test('generic code producer and consumer can be folded independently using ordinary values', () => {
+  const doc = graph([node('input', 'input'), code('prepared'), code('consumer'), node('output', 'output')],
+    [['input', 'prepared'], ['prepared', 'consumer'], ['consumer', 'output']]);
+  for (const ids of [['prepared'], ['consumer'], ['prepared', 'consumer']]) {
+    assert.doesNotThrow(() => planWorkflow(extractSelection(doc, ids).document));
+  }
 });
 
 test('optional input from an outside conditional branch is rejected before folding can turn absence into null', () => {

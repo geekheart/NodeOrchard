@@ -155,8 +155,6 @@ class WorkflowIntegrations:
                 return {'bundled': _read_bundled_names(), 'hub': _read_hub_installed_names(),
                         'protected': set(PROTECTED_BUILTIN_SKILLS) | set(ESSENTIAL_SKILLS)}
             return sources
-        if name == 'workbench_skills_root':
-            return lambda: Path(__file__).resolve().parents[1] / 'skills'
         raise ValueError('Unsupported native integration interface.')
 
     def _skill_protection(self):
@@ -167,21 +165,10 @@ class WorkflowIntegrations:
         protected = sources.get('protected', ())
         if not isinstance(protected, (set, list, tuple, frozenset)) or any(not isinstance(value, str) for value in protected):
             raise ValueError('Native Skill protected names are unavailable.')
-        templates = set()
-        root = Path(self._native('workbench_skills_root')())
-        if root.is_symlink() or not root.is_dir() or root.resolve() != root:
-            raise ValueError('Workbench Skill source directory is unavailable.')
-        for path in sorted(root.iterdir()):
-            if not path.is_dir() or path.is_symlink():
-                continue
-            if (path/'SKILL.md').is_file():
-                templates.add(read_skill_bundle(path)['bundleRevision'])
-        return {'bundled': set(sources['bundled']), 'hub': set(sources['hub']), 'templates': templates, 'protected': set(protected)}
+        return {'bundled': set(sources['bundled']), 'hub': set(sources['hub']), 'protected': set(protected)}
 
-    def _builtin_origin(self, name, path, bundle, protection):
+    def _builtin_origin(self, name, path, protection):
         root = Path(self._native('skills_root')())
-        if bundle and bundle['bundleRevision'] in protection['templates']:
-            return {'kind': 'workbench-builtin', 'label': '工作台内置', 'canDelete': False}
         # A same-named project/external Skill is not the manifest's installed
         # package. Keep it read-only without inventing native builtin provenance.
         if name in protection['bundled'] and path and root.resolve() == root and path.resolve() == path and root in path.parents:
@@ -191,7 +178,7 @@ class WorkflowIntegrations:
     def _provenance(self):
         def protected(name, path, bundle):
             protection = self._skill_protection()
-            return bool(self._builtin_origin(name, path, bundle, protection)) or name in protection['bundled'] or name in protection['hub'] or name in protection['protected']
+            return bool(self._builtin_origin(name, path, protection)) or name in protection['bundled'] or name in protection['hub'] or name in protection['protected']
         return SkillProvenance(Path(self._native('skills_root')()), builtin_guard=protected)
 
     def skills_catalog(self):
@@ -216,7 +203,7 @@ class WorkflowIntegrations:
             try:
                 path = Path(entry['path']) if isinstance(entry.get('path'), str) else None
                 bundle = read_skill_bundle(path) if path and path.is_absolute() else None
-                origin = self._builtin_origin(name, path, bundle, protection)
+                origin = self._builtin_origin(name, path, protection)
                 if origin:
                     row['origin'] = origin
                 elif bundle:

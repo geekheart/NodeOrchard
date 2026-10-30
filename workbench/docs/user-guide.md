@@ -112,7 +112,7 @@ Skills 页和节点选择器均可“新建 Skill”。图片模板预填 `image
 | `json.stringify` | 生成 JSON 文本 | any → text |
 | `json.keys` | 读取对象字段名 | object → array |
 
-另已注册七个`hdk.four.*`专业能力，覆盖资料核验、原生SCH/STEP、CAD、Pinout事实与正反面出图、汇总验收。它们通过来源绑定回执交接，不依赖旧流水线共享阶段文件；专业业务迁移状态以重构记录为准。
+业务能力通过 Hermes 管理的 Skill 或代码节点接入；应用内置目录只提供上述通用工具，不包含行业工具和模板。
 
 本版不会把 Hermes / MCP 展示清单中的任意工具名称直接当作可执行节点；工具模式仅调用已注册实现。
 
@@ -139,10 +139,6 @@ Skill 的审批 / 澄清会汇总到看板的待处理区域，可进入关联�
 交付副本保存失败会单独显示错误，执行原件与已完成节点保持原样。可点击“重试保存交付副本”重新保存；副本之后被删改时，可用“检查并补齐交付副本”。这些操作不重新执行节点、调用模型或要求再次审核，变化的内容发布到新交付修订，不覆盖已有副本。旧运行按原目录继续读取，不批量迁移或改写历史回执。`WORKBENCH_RUN_ROOT` 可显式指定执行原件根目录；使用自定义 `WORKBENCH_DATA_DIR` 或 `WORKBENCH_WORKSPACE_ROOT` 的隔离环境会自动派生该环境内的运行目录，避免测试写入真实用户目录。
 
 “减少动效”只调整连线和界面的视觉效果，不会暂停或取消后台任务。
-
-## epro2 四文件生成
-
-独立四文件工作流从同一输入原生导出 SCH PDF 与 STEP，使用 OpenStep2DWG 生成二维 DWG，再从实际 PAD_NET、原生编号焊盘和已校准的正反面实拍图生成 OpenPinMap 引脚图。四项成果按案例命名，另保留可编辑项目、回读报告和源哈希；不复用旧案例引脚或模型。使用方式、依赖准备与准确边界见 [四文件工作流](four-files-workflow.md)。
 
 ## 运行结果综合反馈
 
@@ -245,7 +241,6 @@ WORKBENCH_RUN_REAL_SMOKE=1 npm run smoke
 ## 工程入口
 
 - [整体架构](architecture.md)
-- [板卡双语使用指南工作流](user-guide-workflow.md)
 - `src/server.mjs`：本地 HTTP/SSE 和客户端校验。
 - `src/application.mjs`：应用会话、运行状态、双向请求与恢复。
 - `src/hermes-adapter.mjs`：Hermes stdio JSON-RPC、子进程与退出处理。

@@ -338,7 +338,7 @@ test('first round removes the memory-preparation placeholder and subsequent upda
 function feedbackLearning(overrides = {}) {
   const value = job(), candidate = structuredClone(value.bestDocument); candidate.mode = 'learn';
   return { ...value, kind: 'feedback', sourceRunId: 'actual-run', feedbackRevision: 4, input: null, expected: null, config: { trainableNodeIds: ['skill'] }, bestRound: null, bestScore: null, bestDocument: null, candidateDocument: candidate, validationStatus: 'not-run', reason: 'feedback-candidate-ready',
-    feedbackSnapshot: { schemaVersion: 2, comment: '测试固件缺少 USB 错误原因，请补足诊断步骤。其它内容保持。', targets: [{ nodeId: 'skill', title: '测试固件' }, { nodeId: 'not-selected', title: '导出与命名' }] },
+    feedbackSnapshot: { schemaVersion: 2, comment: '操作说明缺少 输入错误原因，请补足诊断步骤。其它内容保持。', targets: [{ nodeId: 'skill', title: '操作说明' }, { nodeId: 'not-selected', title: '导出与命名' }] },
     rounds: [{ index: 0, status: 'complete', score: null, cases: [], changes: [{ nodeId: 'skill', before: { ref: 'original', revision, content: '原始正文' }, after: { ref: 'wb-learn-candidate', revision: nextRevision, content: '增加明确错误原因' }, summary: '补足诊断步骤' }] }], ...overrides };
 }
 
@@ -354,21 +354,21 @@ test('feedback results show one overall comment and pending validation without r
   instance.jobs.set(value.id, value); instance.jobId = value.id; instance.editor.doc = structuredClone(value.document); instance.render();
   assert.equal(instance.status.textContent, '候选已生成 · 未验证'); assert.equal(instance.status.dataset.status, 'pending'); assert.equal(instance.resultsLayout.hidden, true); assert.equal(instance.feedbackResults.hidden, false); assert.equal(instance.restoreButton.hidden, true);
   assert.equal(instance.best.textContent, '未验证 · 待用户复评'); assert.equal(instance.apply.textContent, '应用候选到草稿（未验证）'); assert.equal(instance.apply.disabled, false);
-  assert.equal(instance.feedbackComment.children.length, 1); assert.equal(instance.feedbackComment.children[0].children[0].textContent, '综合反馈'); assert.equal(instance.feedbackComment.children[0].children[1].textContent, value.feedbackSnapshot.comment); assert.equal(instance.feedbackComment.children[0].children.length, 3); assert.match(instance.feedbackComment.children[0].children[2].textContent, /检查范围：测试固件/); assert.doesNotMatch(instance.feedbackComment.children[0].children[2].textContent, /导出与命名/);
-  assert.match(instance.feedbackCandidateNotice.textContent, /未验证/); assert.equal(instance.feedbackChanges.children.length, 1); assert.match(instance.feedbackChanges.children[0].children[0].textContent, /测试固件/);
+  assert.equal(instance.feedbackComment.children.length, 1); assert.equal(instance.feedbackComment.children[0].children[0].textContent, '综合反馈'); assert.equal(instance.feedbackComment.children[0].children[1].textContent, value.feedbackSnapshot.comment); assert.equal(instance.feedbackComment.children[0].children.length, 3); assert.match(instance.feedbackComment.children[0].children[2].textContent, /检查范围：操作说明/); assert.doesNotMatch(instance.feedbackComment.children[0].children[2].textContent, /导出与命名/);
+  assert.match(instance.feedbackCandidateNotice.textContent, /未验证/); assert.equal(instance.feedbackChanges.children.length, 1); assert.match(instance.feedbackChanges.children[0].children[0].textContent, /操作说明/);
   instance.jobs.set(value.id, { ...value, kind: undefined }); instance.render(); assert.equal(instance.feedbackResults.hidden, true); assert.equal(instance.resultsLayout.hidden, false);
 });
 
 test('old feedback learning displays historical comments as one overall text without rating controls', t => {
   fakeDOM(t); const { instance } = mountedInspection(), value = feedbackLearning({ feedbackSnapshot: { items: [
-    { nodeId: 'skill', title: '测试固件', score: 0, comment: '增加 USB 错误原因', selectedForLearning: true },
+    { nodeId: 'skill', title: '操作说明', score: 0, comment: '增加 输入错误原因', selectedForLearning: true },
     { nodeId: 'not-selected', title: '导出与命名', score: 99, comment: '日期统一', selectedForLearning: false },
   ] } });
   instance.renderFeedbackResult(value);
   assert.equal(instance.feedbackComment.children.length, 1);
-  assert.equal(instance.feedbackComment.children[0].children[1].textContent, '测试固件：增加 USB 错误原因\n\n导出与命名：日期统一');
+  assert.equal(instance.feedbackComment.children[0].children[1].textContent, '操作说明：增加 输入错误原因\n\n导出与命名：日期统一');
   assert.equal(instance.feedbackComment.children[0].children.length, 3);
-  assert.match(instance.feedbackChanges.children[0].children[0].textContent, /测试固件/);
+  assert.match(instance.feedbackChanges.children[0].children[0].textContent, /操作说明/);
 });
 
 test('feedback that made no changes and active preparation use no baseline or success claims', t => {

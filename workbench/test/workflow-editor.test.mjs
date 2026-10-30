@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WorkflowEditor } from '../public/workflow-editor.js';
 import { WorkflowStudioUI } from '../public/workflow-studio-ui.js';
-import { createDocument, createNode, connectNodes, validateDocument, serializeDocument, updateNode } from '../shared/workflow/workflow-model.mjs';
+import { createDocument, createNode, connectNodes, validateDocument, serializeDocument, updateNode, getPorts } from '../shared/workflow/workflow-model.mjs';
 import { workflowInputDefault, workflowInputValue } from '../shared/workflow/workflow-inputs.mjs';
 import { WORKFLOW_TOOLS } from '../shared/workflow/workflow-tools.mjs';
 import { planWorkflow } from '../shared/workflow/workflow-plan.mjs';
@@ -402,32 +402,32 @@ function capabilityLibrary(t) {
 test('built-in tool derivations reuse search and native keyboard click while creating one complete registered tool', t => {
   globalValue(t, 'Element', FakeElement); const { instance, search, items, buttons } = capabilityLibrary(t); instance.renderLibrary();
   assert.deepEqual(items.children.filter(section => section.children[0]?.textContent === '内置派生节点').map(section => section.children[0].textContent), ['内置派生节点']); assert.ok(buttons().some(item => item.dataset.type === 'tool' && !item.dataset.toolName), 'the generic code/tool entry remains available');
-  search.value = 'OpenInterfaceMark'; instance.renderLibrary(); const entries = buttons(); assert.equal(entries.length, 4); assert.ok(entries.every(item => item.dataset.toolName.startsWith('hdk.guide.annotate-')));
+  search.value = 'text.uppercase'; instance.renderLibrary(); const entries = buttons(); assert.equal(entries.length, 1); assert.equal(entries[0].dataset.toolName, 'text.uppercase');
   const selected = entries[0], metadata = WORKFLOW_TOOLS.find(tool => tool.id === selected.dataset.toolName); let prevented = false; instance.onKeyDown({ key: 'Enter', target: selected, preventDefault() { prevented = true; } }); assert.equal(prevented, false, 'Enter keeps the native button click'); instance.onClick({ target: selected, detail: 0 });
-  assert.equal(instance.doc.nodes.length, 1); assert.equal(instance.doc.edges.length, 0); const node = instance.doc.nodes[0]; assert.equal(node.title, metadata.label); assert.equal(node.config.executionMode, 'tool'); assert.equal(node.config.toolName, metadata.id); assert.deepEqual(node.ports, metadata.ports); assert.equal(node.config.resource, metadata.resource); assert.equal(node.config.timeoutSeconds, metadata.defaultConfig.timeoutSeconds); assert.equal(node.config.reviewImages, true); assert.equal(metadata.reviewRequired, true);
-  instance.renderLibrary(); assert.equal(search.value, 'OpenInterfaceMark'); assert.equal(buttons().length, 4, 'creating a node must not reset the search');
+  assert.equal(instance.doc.nodes.length, 1); assert.equal(instance.doc.edges.length, 0); const node = instance.doc.nodes[0]; assert.equal(node.title, metadata.label); assert.equal(node.config.executionMode, 'tool'); assert.equal(node.config.toolName, metadata.id); assert.deepEqual(getPorts(node), { inputs: [{ id: 'in', label: '输入', type: metadata.inputType }], outputs: [{ id: 'out', label: '输出', type: metadata.outputType }] }); assert.equal(node.config.resource ?? 'default', 'default'); assert.equal(node.config.timeoutSeconds, 120); assert.equal(node.config.reviewImages, false);
+  instance.renderLibrary(); assert.equal(search.value, 'text.uppercase'); assert.equal(buttons().length, 1, 'creating a node must not reset the search');
 });
 
-test('professional pointer dragging follows the existing preview/drop path and preserves all metadata ports and resource settings', t => {
-  const { instance, search, attached, buttons } = capabilityLibrary(t); search.value = 'hdk.full.sop'; instance.renderLibrary(); const selected = buttons().find(item => item.dataset.toolName === 'hdk.full.sop'), metadata = WORKFLOW_TOOLS.find(tool => tool.id === 'hdk.full.sop'), original = structuredClone(metadata);
+test('configured tool pointer dragging follows the existing preview/drop path and preserves all metadata ports and resource settings', t => {
+  const { instance, search, attached, buttons } = capabilityLibrary(t); search.value = 'json.stringify'; instance.renderLibrary(); const selected = buttons().find(item => item.dataset.toolName === 'json.stringify'), metadata = WORKFLOW_TOOLS.find(tool => tool.id === 'json.stringify'), original = structuredClone(metadata);
   instance.canvas.classList.toggle = () => {};
   instance.canvas.getBoundingClientRect = () => ({ left: 137, top: 59, right: 1337, bottom: 859, width: 1200, height: 800 });
   instance.onPointerDown({ target: selected, button: 0, pointerId: 7, clientX: 60, clientY: 200 }); assert.equal(instance.gesture.toolName, metadata.id); assert.equal(selected.capturedPointer, 7);
   instance.onPointerMove({ target: selected, pointerId: 7, clientX: 600, clientY: 400 }); assert.equal(attached[0].textContent, metadata.label); instance.onPointerUp({ pointerId: 7, clientX: 600, clientY: 400 });
-  assert.equal(instance.doc.nodes.length, 1); assert.equal(instance.doc.edges.length, 0); const node = instance.doc.nodes[0]; assert.equal(node.title, metadata.label); assert.equal(node.config.toolName, metadata.id); assert.deepEqual(node.ports, metadata.ports); assert.equal(node.config.resource, 'default'); assert.equal(node.config.reviewImages, true); assert.equal(node.config.timeoutSeconds, 600); assert.deepEqual(metadata, original); assert.equal(search.value, 'hdk.full.sop'); assert.equal(instance.gesture, null); assert.equal(attached[0].removed, true);
+  assert.equal(instance.doc.nodes.length, 1); assert.equal(instance.doc.edges.length, 0); const node = instance.doc.nodes[0]; assert.equal(node.title, metadata.label); assert.equal(node.config.toolName, metadata.id); assert.deepEqual(getPorts(node), { inputs: [{ id: 'in', label: '输入', type: metadata.inputType }], outputs: [{ id: 'out', label: '输出', type: metadata.outputType }] }); assert.equal(node.config.resource ?? 'default', 'default'); assert.equal(node.config.reviewImages, false); assert.equal(node.config.timeoutSeconds, 120); assert.deepEqual(metadata, original); assert.equal(search.value, 'json.stringify'); assert.equal(instance.gesture, null); assert.equal(attached[0].removed, true);
 });
 
-test('direct professional creation still validates registration, schema and mandatory downstream human approval', () => {
+test('direct configured tool creation validates registration and schema while code image review remains enforced', () => {
   const instance = editor(createDocument({ schemaVersion: 2 })); instance.selectNode = () => {}; let message = ''; instance.toast = text => { message = text; };
-  instance.addNode('tool', { x: 0, y: 0 }, { toolName: 'hdk.full.not-registered' }); assert.equal(instance.doc.nodes.length, 0); assert.match(message, /已注册/);
-  instance.doc = createDocument(); instance.addNode('tool', { x: 0, y: 0 }, { toolName: 'hdk.guide.drawio' }); assert.equal(instance.doc.nodes.length, 0); assert.match(message, /升级/);
-  instance.doc = createDocument({ schemaVersion: 2 }); instance.addNode('tool', { x: 300, y: 0 }, { toolName: 'hdk.guide.drawio' }); const tool = instance.doc.nodes[0]; tool.config.reviewImages = false;
-  let doc = { ...instance.doc, nodes: [createNode('input', { x: 0, y: 0 }, { id: 'input', config: { outputType: 'object' } }), tool, createNode('output', { x: 600, y: 0 }, { id: 'output' })] };
-  doc = connectNodes(doc, { sourceNode: 'input', sourcePort: 'out', targetNode: tool.id, targetPort: 'facts' }); doc = connectNodes(doc, { sourceNode: tool.id, sourcePort: 'out', targetNode: 'output', targetPort: 'in' }); assert.throws(() => planWorkflow(doc), /人工审核/); assert.doesNotThrow(() => validateDocument(doc));
+  instance.addNode('tool', { x: 0, y: 0 }, { toolName: 'external.not-registered' }); assert.equal(instance.doc.nodes.length, 0); assert.match(message, /已注册/);
+  instance.doc = createDocument(); instance.addNode('tool', { x: 0, y: 0 }, { toolName: 'text.trim' }); assert.equal(instance.doc.nodes.length, 0); assert.match(message, /升级/);
+  const tool = createNode('tool', { x: 300, y: 0 }, { id: 'render', config: { executionMode: 'code', language: 'javascript', code: 'return input;', reviewImages: true } });
+  let doc = { ...createDocument({ schemaVersion: 2 }), nodes: [createNode('input', { x: 0, y: 0 }, { id: 'input', config: { outputType: 'object' } }), tool, createNode('output', { x: 600, y: 0 }, { id: 'output' })] };
+  doc = connectNodes(doc, { sourceNode: 'input', sourcePort: 'out', targetNode: tool.id, targetPort: 'in' }); doc = connectNodes(doc, { sourceNode: tool.id, sourcePort: 'out', targetNode: 'output', targetPort: 'in' }); assert.throws(() => planWorkflow(doc), /人工审核/); assert.doesNotThrow(() => validateDocument(doc));
 });
 
 function learningPortFixture() {
-  const instance = editor(createDocument({ schemaVersion: 2 })); instance.selectNode = () => {}; instance.addNode('tool', { x: 1600, y: 0 }, { toolName: 'hdk.full.verify' }); const producer = instance.doc.nodes[0];
+  const instance = editor(createDocument({ schemaVersion: 2 })); instance.selectNode = () => {}; instance.addNode('tool', { x: 1600, y: 0 }, { toolName: 'json.keys' }); const producer = instance.doc.nodes[0];
   instance.doc.nodes.push(createNode('evaluation', { x: 0, y: 1000 }, { id: 'evaluation' }), createNode('improvement', { x: 320, y: 1000 }, { id: 'improvement' })); instance.doc = connectNodes(instance.doc, { sourceNode: 'evaluation', sourcePort: 'out', targetNode: 'improvement', targetPort: 'in' }); instance.doc.mode = 'learn';
   const socket = (node, port, direction) => { const button = new FakeElement('button'); button.className = 'wf-port'; button.dataset = { node, port, direction }; return button; }, source = socket(producer.id, 'out', 'output'), target = socket('evaluation', 'in', 'input');
   Object.assign(instance.canvas, { contains: () => true, focus() {}, setPointerCapture() {} }); instance.contextMenu.hidden = true; instance.refreshPortHints = () => {}; instance.drawPendingConnection = () => {}; instance.playConnectionPulse = () => {};

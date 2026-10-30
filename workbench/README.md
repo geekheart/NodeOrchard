@@ -48,7 +48,7 @@ Skills 页和节点选择器可新建 Skill，图片模板调用 Hermes 原生�
 
 从项目根目录运行 `npm --prefix workbench start`，或在本目录运行 `npm start`，打开 http://127.0.0.1:4318 。
 
-默认查找 Hermes 安装 `~/.hermes/hermes-agent`，在界面点击“连接 Hermes”后读取当前模型与已配置目录。顶部可切换服务商和模型，选择由 Hermes 原生接口校验并持久化；新增提供商和认证先在 Hermes 完成，再刷新目录。支持 Hermes 已配置且认证已确认的提供商，ChatGPT 订阅是其中一种选择。纯本地工具／代码流程可离线运行；工程转换和编译需要相应本机依赖，缺失时明确报告。
+默认查找 Hermes 安装 `~/.hermes/hermes-agent`，在界面点击“连接 Hermes”后读取当前模型与已配置目录。顶部可切换服务商和模型，选择由 Hermes 原生接口校验并持久化；新增提供商和认证先在 Hermes 完成，再刷新目录。支持 Hermes 已配置且认证已确认的提供商，ChatGPT 订阅是其中一种选择。纯本地工具／代码流程可离线运行；业务 Skill 和代码调用的软件需要实际可用的本机依赖，缺失时明确报告。
 
 macOS 的 Hermes 子进程在没有显式代理环境设置时自动继承系统静态 HTTP／HTTPS 代理；仅在进程启动时读取，不改系统或 Hermes 配置。空值优先、绕过列表及不支持的代理类型见[代理继承](docs/hermes-protocol.md#代理继承)。
 
@@ -60,17 +60,17 @@ macOS 的 Hermes 子进程在没有显式代理环境设置时自动继承系统
 | `workflow/workflows/<id>/` | 每个工作流的定义、完整 AI 对话、素材与运行文件 | 忽略 |
 | `workflow/artifacts/` | 普通会话产物 | 忽略 |
 | `workflow/outputs/` | 保留旧交付副本 | 忽略 |
-| `workflow/config/` | 本机资源覆盖与当前板卡配置 | 忽略 |
+| `workflow/config/` | 用户自行维护的本机业务配置 | 忽略 |
 | `workflow/workflow-sessions/` | 各节点的隔离 Skill 会话与冻结 bundle | 忽略 |
 | `workbench/.local/` | 现有 SQLite、Skill 快照、依赖与缓存 | 忽略，保留历史 |
 | `workbench/workspaces/` | 旧会话和交付目录 | 忽略，保留历史 |
 | 本机应用数据目录 `…/PersonalAgentWorkbench/runs/` | 保留旧执行原件、回执、节点版本 | 仓库外 |
-| `skills/` | 内置 Skill、固件模板和 schema | 源码 |
-| `hdk/learning/` 中的案例与答案 | 私人学习记录 | 忽略，通用 schema／说明除外 |
+| `assistant-skills/` | 内部助手使用应用接口的通用指令 | 源码 |
+| 旧 `hdk/` 下残留的本机配置与学习记录 | 历史私人数据，原位保留 | 忽略 |
 
 新任务的默认相对目录为 `.`，直接在 `workflow/` 工作。旧内置偏好 `default` 仅在旧默认布局升级时迁移一次，自定义配置保持；不批量搬移历史文件或改写审核。
 
-迁移已有流程时，在软件的“运行前准备”中选择 `workflow/config/` 下的当前配置，清空旧的输出根目录即可继承新默认值。复制配置先校验内容 SHA，保留配置内已核验的资料路径；不要全局替换历史目录。已有学习合同与旧门禁仍可能被兼容能力引用，应保留其本机原件，不能为了清理目录重写哈希或删除学习记录。
+迁移已有流程时，先检查其 Skill、代码、依赖与输入契约，再通过软件准备新的执行配置。复制配置先校验内容 SHA，保留已核验的资料路径；不要全局替换历史目录。旧运行、来源哈希和学习记录保持原位，源码整理不自动迁移或执行历史业务。
 
 每个工作流使用独立文件夹，编辑器可直接打开；新运行的原件与默认交付分别保存在自身 `runs/` 和 `outputs/`。`.workflow` 是包含目录内容的标准 ZIP 包，导入创建新副本。已有外部原件保留原路径、冻结记录和 SHA，迁移只复制归集；目录布局、资料完整性及导入历史只读规则统一见[工作流文件夹与便携包](docs/workflow-packages.md)。交付复制失败仍可单独重试，不重跑节点或人工审核。
 
@@ -82,7 +82,7 @@ macOS 的 Hermes 子进程在没有显式代理环境设置时自动继承系统
 - `shared/diagnostics.mjs`：有界诊断摘要与凭据脱敏，不裁剪实际运行数据。
 - `public/`：页面、画布、DOM 交互与主题。
 - `python/`：Hermes JSON-RPC、Skill 冻结与 Python 代码执行。
-- `hdk/`：固定工程能力、转换器集成和验收；`skills/`：能力指令与资源模板。
+- `assistant-skills/`：内部助手使用已有通用应用能力的操作指令；业务 Skill 由 Hermes 管理。
 - `test/`：Node、Python 测试及脱敏 fixture；`scripts/`：检查与转换工具。
 - `examples/`：通用流程与数据集；`docs/`：操作、设计与维护说明。
 
@@ -101,7 +101,7 @@ npm run check:git
 
 发布检查涵盖已跟踪与未被忽略的候选文件，同时检查真实个人主目录字面量；不修改暂存区、不上传。仅检查文件路径边界时可直接运行 `node scripts/check-git-boundary.mjs`。
 
-一次性、绑定个人历史运行的工作流生成器已移除；实际流程从编辑器构建或导入用户自己的备份。测试构建器只存在于 fixture，不会生成业务产物。公开示例不包含本机板卡配置、黄金答案或学习结果。
+一次性、绑定个人历史运行的工作流生成器已移除；实际流程从编辑器构建或导入用户自己的备份。测试构建器只存在于 fixture，不会生成业务产物。公开示例不包含本机业务配置、黄金答案或学习结果。
 
 ## 配置
 
@@ -114,18 +114,10 @@ npm run check:git
 | `WORKBENCH_HERMES_ROOT` | `~/.hermes/hermes-agent` |
 | `WORKBENCH_HERMES_PYTHON` | Hermes 安装内 `venv/bin/python` |
 | `WORKBENCH_HERMES_HOME` | `~/.hermes` |
-| `WORKBENCH_HDK_SOURCE_ROOT` | 旧工程能力的本机资料根；可显式指定 |
-| `WORKBENCH_HDK_PROCESS_TEMPLATE` | 本机工艺模板文件；不会打包到源码 |
-| `WORKBENCH_HDK_PINOUT_REFERENCE` | 本机 Pinout 学习参考图 |
-| `WORKBENCH_HDK_RESOURCE_OVERLAY` | 默认 `workflow/config/hdk-resources.local.json`；仅覆盖本机资料位置 |
-| `WORKBENCH_HDK_ESPRESSIF_HOME` | 默认 `~/.espressif`；本机固件工具链根目录 |
-| `WORKBENCH_HDK_COMPILER_BIN` | 可显式指定交叉编译器目录，否则使用工具链根内预设的固定版本目录 |
-| `WORKBENCH_HDK_CMAKE_BIN` | 可显式指定 CMake 工具目录 |
-| `WORKBENCH_HDK_NINJA_BIN` | 可显式指定 Ninja 工具目录 |
 
 显式设置数据目录／工作环境的隔离实例在其隔离目录派生运行根；生产默认仍使用独立本机存储。
 
-更多说明：[完整操作指南](docs/user-guide.md) · [整体架构](docs/architecture.md) · [节点与恢复](docs/workflow-inputs-and-recovery.md) · [工程能力](hdk/ARCHITECTURE.md) · [协作规则](../AGENTS.md)。
+更多说明：[完整操作指南](docs/user-guide.md) · [整体架构](docs/architecture.md) · [节点与恢复](docs/workflow-inputs-and-recovery.md) · [协作规则](../AGENTS.md)。
 
 ## 应用诊断
 
