@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { escapeSourceMarkup, readRuntimeSource, sourceDisplayText, sourceReadPage } from './application-runtime-sources.mjs';
+import { initializeReadOnlyVerifications, verifyReadOnlyTests } from './application-maintenance-verification.mjs';
 
 const execute = promisify(execFile);
 const MAX_FILE = 256 * 1024, MAX_PATCH = 1024 * 1024, MAX_OUTPUT = 32768;
@@ -18,6 +19,10 @@ const PROTECTED = new Set([
   ...['assistant-permissions-ui.js', 'source-repair-ui.js', 'app.js'].map(name => 'workbench/public/' + name),
   ...['application-source-repairs.test.mjs', 'application-source-tools.test.mjs', 'application-runtime-sources.test.mjs', 'source-repair-ui.test.mjs', 'assistant-permission-settings.test.mjs',
     'application-assistant-permissions.test.mjs', 'application-conversation-hub.test.mjs', 'application-diagnostic-escalation.test.mjs', 'assistant-permissions-ui.test.mjs'].map(name => 'workbench/test/' + name),
+  'workbench/src/application-maintenance-verification.mjs', 'workbench/test/application-maintenance-verification.test.mjs',
+  ...['application-maintenance', 'application-maintenance-reproduction'].flatMap(name => [`workbench/src/${name}.mjs`, `workbench/test/${name}.test.mjs`]),
+  'workbench/public/maintenance-task-ui.js', 'workbench/test/maintenance-task-ui.test.mjs',
+  'workbench/test/application-maintenance-http.test.mjs',
 ]);
 const own = (value, key) => Object.hasOwn(value, key);
 const hash = value => 'sha256:' + createHash('sha256').update(value).digest('hex');
@@ -56,6 +61,7 @@ export class ApplicationSourceRepairs {
     this.closed = false; this.busy = false; this.active = null; this.owned = new Map(); this.known = new Set();
     this.db.exec(`CREATE TABLE IF NOT EXISTS source_repair_records (id TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_repair_operations (id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_hash TEXT NOT NULL,repair_id TEXT NOT NULL,status TEXT NOT NULL,result TEXT);`);
+    initializeReadOnlyVerifications(this.db);
     for (const row of this.db.prepare("SELECT * FROM source_repair_operations WHERE status='running'").all()) {
       this.db.prepare("UPDATE source_repair_operations SET status='unknown',result=? WHERE id=?").run(JSON.stringify({ repairId: row.repair_id, status: 'unknown', operationId: row.id }), row.id);
       const record = this.record(row.repair_id); if (record) { if (row.kind === 'patch' || row.kind === 'rollback') record.status = 'unknown';
@@ -541,5 +547,6 @@ export class ApplicationSourceRepairs {
       } finally { if (directory) await rm(directory, { recursive: true, force: true }); }
     });
   }
+  async verifyReadOnlyTests(input, context = {}) { return verifyReadOnlyTests(this, input, context); }
   async close() { if (this.closed) return; this.closed = true; const active = this.active; active?.controller.abort(); await active?.work.catch(() => {}); await this.ready.catch(() => {}); }
 }

@@ -124,6 +124,14 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.method === 'POST' && path === '/api/app-assistant/messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000)));
       const assistantAction = path.match(/^\/api\/app-assistant\/turns\/([A-Za-z0-9_-]+)\/action$/);
       if (req.method === 'POST' && assistantAction) return json(res, 200, await application.applicationAssistant.action(assistantAction[1], await readJson(req, 4096)));
+      const maintenanceArtifact = path.match(/^\/api\/maintenance\/experiments\/([A-Za-z0-9_-]+)\/artifacts\/([A-Za-z0-9_-]+)$/);
+      if (req.method === 'GET' && maintenanceArtifact) {
+        if (requestURL.search) return json(res, 400, { error: '实验产物不接受查询参数。' });
+        const file = await application.applicationAssistant.maintenance.artifact(maintenanceArtifact[1], maintenanceArtifact[2]);
+        res.writeHead(200, { 'Content-Type': file.mime, 'Cache-Control': 'no-store', 'Content-Length': file.bytes.length,
+          ...(file.mime === 'application/octet-stream' ? { 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(file.name) } : {}) });
+        return res.end(file.bytes);
+      }
       const diagnosticCapture = path.match(/^\/api\/app-diagnostics\/captures\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
       if (req.method === 'GET' && diagnosticCapture) {
         const file = await application.applicationAssistant.captureFile(diagnosticCapture[1], diagnosticCapture[2]);
@@ -445,6 +453,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app.js': ['app.js', 'text/javascript'],
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
+        '/maintenance-task-ui.js': ['maintenance-task-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
         '/source-repair-ui.js': ['source-repair-ui.js', 'text/javascript'],
         '/shortcut-settings-ui.js': ['shortcut-settings-ui.js', 'text/javascript'],

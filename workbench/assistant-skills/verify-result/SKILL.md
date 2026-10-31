@@ -12,4 +12,6 @@ description: 核验本应用运行状态、真实交付文件及修复验证结�
 
 源码修复验证仅在工具已开放时按 `repair-application` 处理。
 
+维护实验按task／experiment身份核对快照、沙箱与终态；`verified`／`candidate_verified`只证明所列隔离范围，不代表原工作流或软件问题全部恢复。失败或unknown继续保留缺口，细则见 `docs/application-maintenance.md`。
+
 完成标准：说明实际验过的运行、产物及结果，指出未验证内容和下一步。以可读证据结束，不虚构文件、评分、自动重试或成功结论；不因验证任务修改用户真实工作流或重放业务操作。

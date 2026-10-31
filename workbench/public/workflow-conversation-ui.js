@@ -6,6 +6,7 @@ import { reviewRevisionPolicy } from '../shared/workflow/workflow-review-revisio
 import { bindChatSendShortcut, updateChatShortcutHints } from './keyboard-shortcuts.js';
 import { ConversationAttachments } from './conversation-attachments.js';
 import { PendingNoticeDismissals, pendingNoticeKey } from './pending-notice-dismissals.js';
+import { projectMaintenanceTask, rememberMaintenanceTask, renderMaintenanceTask } from './maintenance-task-ui.js';
 
 export { conversationTurnGroups } from '../shared/workflow/workflow-conversation-issues.mjs';
 
@@ -218,6 +219,8 @@ export class WorkflowConversationUI {
     const conversation = snapshot?.conversation; if (!conversation || conversation.workflowId !== id || !Array.isArray(conversation.turns)) throw new Error('对话记录与当前工作流不匹配。');
     const state = this.state(id); if (Number(conversation.revision || 0) < Number(state.conversation.revision || 0)) return false;
     const previous = new Map(state.conversation.turns.map(turn => [turn.id, turn.outcome])), wasLoaded = state.loaded;
+    for (const turn of conversation.turns) if (turn.assistant?.maintenanceTask) rememberMaintenanceTask(state, turn.assistant.maintenanceTask,
+      { supervisor: this.isMaintenanceSupervisor(), conversationId: id, workflowId: id });
     const outcomes = snapshot.turn ? [snapshot.turn] : wasLoaded ? conversation.turns.filter(turn => turn.outcome?.status === 'complete' && (previous.get(turn.id)?.status !== 'complete' || previous.get(turn.id)?.completedAt !== turn.outcome.completedAt)) : conversation.turns.slice(-1);
     state.conversation = conversation; state.pending = Array.isArray(snapshot.pending) ? snapshot.pending : state.pending; state.loaded = true;
     void this.syncOutcomes(outcomes, id);
@@ -267,6 +270,7 @@ export class WorkflowConversationUI {
   }
   onEvent(event) {
     if (!this.workflowId || !this.currentDocument()) return;
+    if (event?.type === 'application.maintenance') { this.acceptMaintenanceEvent(event.payload); return; }
     if (event?.type === 'workflow.document' || event?.name === 'workflow.document') { const id = (event.payload || event.data)?.workflow?.id; if (id === this.workflowId && !this.state().loaded && !this.state().loading) void this.load(true); return; }
     if (event?.type === 'workflow.run' || event?.name === 'workflow.run') {
       const run = (event.payload || event.data)?.run || event.payload || event.data; if (!run?.id || run.learningId || run.memoryScopeId) return;
@@ -279,6 +283,31 @@ export class WorkflowConversationUI {
     if (event?.type !== 'workflow.conversation' && event?.name !== 'workflow.conversation') return;
     const snapshot = event.payload || event.data || event, id = snapshot.workflowId || snapshot.conversation?.workflowId; if (!id) return;
     try { this.accept(snapshot, id); } catch { /* A subsequent explicit refresh exposes malformed server state. */ }
+  }
+  isMaintenanceSupervisor() { return false; }
+  acceptMaintenanceEvent(payload) {
+    const task = projectMaintenanceTask(payload?.task);
+    if (!task || payload.conversationId !== task.conversationId) return false;
+    const supervisor = this.isMaintenanceSupervisor(), id = supervisor ? task.conversationId : this.workflowId;
+    if (!id || !this.states.has(id) || this.detachedWorkflows?.has(id)) return false;
+    const state = this.state(id), known = state.conversation.turns.some(turn => turn.assistant?.maintenanceTask?.id === task.id && turn.assistant.maintenanceTask.conversationId === task.conversationId);
+    if (!supervisor && !known) return false;
+    const accepted = rememberMaintenanceTask(state, task, { supervisor, conversationId: id, workflowId: id }); if (!accepted) return false;
+    for (const turn of state.conversation.turns) if (turn.id === task.sourceTurnId || turn.assistant?.maintenanceTask?.id === task.id) {
+      turn.assistant = { ...turn.assistant, maintenanceTask: accepted };
+    }
+    if (this.workflowId === id) this.render(); return true;
+  }
+  maintenanceTaskView(turn) {
+    const state = this.state(), supervisor = this.isMaintenanceSupervisor(), raw = turn.assistant?.maintenanceTask;
+    const task = raw ? rememberMaintenanceTask(state, raw, { supervisor, conversationId: this.workflowId, workflowId: this.workflowId })
+      : [...(state.maintenanceTasks?.values() || [])].find(item => item.sourceTurnId === turn.id && (supervisor ? item.conversationId === this.workflowId : item.workflowId === this.workflowId));
+    if (!task) return null;
+    const latest = state.conversation.turns.filter(item => item.assistant?.maintenanceTask?.id === task.id || item.id === task.sourceTurnId).at(-1);
+    if (latest && latest.id !== turn.id) return null;
+    return renderMaintenanceTask(task, { supervisor, busy: this.editor.libraryReadOnly || this.actionPending.has(`${task.conversationId}:${task.id}:stop-maintenance`),
+      continueDisabled: state.sending || state.conversation.turns.some(item => ['thinking', 'queued'].includes(item.status)),
+      onContinue: value => this.continueMaintenanceTask?.(value), onStop: value => this.stopMaintenanceTask?.(value, turn.id) });
   }
   queuePendingRefresh() {
     if (!this.workflowId || !this.currentDocument()) return;
@@ -428,6 +457,7 @@ export class WorkflowConversationUI {
     const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', turnStatus(turn))); assistant.append(meta);
     const text = turn.assistant?.text || turn.error?.message || (typeof turn.error === 'string' ? turn.error : '') || (['thinking', 'queued'].includes(turn.status) ? '正在生成回复…' : '已记录'); assistant.append(element('p', 'wf-conversation-prose', text));
     const progress = this.diagnosticProgressView(turn); if (progress) assistant.append(progress);
+    const maintenance = this.maintenanceTaskView(turn); if (maintenance) assistant.append(maintenance);
     if (Array.isArray(turn.assistant?.summary) && turn.assistant.summary.length) { const list = element('ul', 'wf-conversation-plan-summary'); for (const item of turn.assistant.summary) list.append(element('li', '', item)); assistant.append(list); }
     if (turn.assistant?.operations?.length) assistant.append(this.proposalView(turn));
     if (turn.assistant?.evidence?.length) {

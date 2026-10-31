@@ -15,10 +15,11 @@ const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect', 'runtime.code.check']);
 const MANAGE = new Set(['workflow.copy', 'workflow.create-test', 'workflow.delete']);
 const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'conversation.delegate', 'conversation.escalate', 'conversation.escalation']);
+const MAINTENANCE = new Set(['maintenance.task', 'maintenance.experiment']);
 const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.search', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
 const SOURCE_READ = new Set(['app.source.list', 'app.source.read', 'app.source.search']);
 const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment']);
-const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.trace', 'assistant.probe', 'assistant.experiment']);
+const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, ...MAINTENANCE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.trace', 'assistant.probe', 'assistant.experiment']);
 
 // Resolve even a not-yet-created path through its existing parent. A lexical
 // prefix alone admits symlinks and is insufficient for an assistant folder.
@@ -93,6 +94,7 @@ export class ApplicationAssistantPermissions {
   allowed(name, scope) {
     this.check(scope); const p = scope.permissions;
     if (!KNOWN.has(name)) return false;
+    if (MAINTENANCE.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.appLogs;
     if (SOURCE_READ.has(name)) return scope.role === 'supervisor' && (p.sourceRead === true || p.sourceRepair === true);
     if (SOURCE.has(name)) return scope.role === 'supervisor' && p.sourceRepair === true && !scope.readOnly;
     if (name === 'assistant.experiment') return scope.role === 'supervisor' && p.modelExperiment === true && p.workflowRead && p.appLogs && !scope.readOnly;

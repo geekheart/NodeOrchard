@@ -18,6 +18,7 @@ import { projectConversationIssues, conversationTurnGroups, canRetryConversation
 import { AssistantDiagnosticTurn, ASSISTANT_DIAGNOSTIC_LIMITS, compactDiagnosticContext, diagnosticScope, diagnosticRequestKey, validateDiagnosticArguments, completedStaticCodeCheck } from './assistant-diagnostic-turn.mjs';
 import { ATTACHMENT_MESSAGE_TEXT, attachmentRefs, storedAttachmentRefs, resolveAssistantAttachments, attachmentModelSource, attachmentImageOptions } from './assistant-attachments.mjs';
 import { projectConversationContinuation } from './workflows/workflow-conversation-context.mjs';
+import { ApplicationMaintenance, MAINTENANCE_LIMITS } from './application-maintenance.mjs';
 
 export const APPLICATION_CONVERSATION_ID = 'global-application';
 const execute = promisify(execFile);
@@ -64,6 +65,7 @@ export class ApplicationAssistant {
       if (turn.status === 'thinking') { turn.status = 'interrupted'; turn.assistant.text = '服务重启中断了诊断；已保留进度，未自动重复工具操作。';
         finishDiagnostic(turn.assistant, 'interrupted', turn.assistant.text); turn.updatedAt = new Date().toISOString(); this.save(turn); }
     }
+    this.maintenance = new ApplicationMaintenance(app, this);
   }
   tools(scope) { const all = this.capabilities.tools(); return scope ? this.permissions.tools(all, scope) : all; }
   save(turn) { this.db.prepare('UPDATE application_conversation_turns SET value=? WHERE id=?').run(JSON.stringify(turn), turn.id); }
@@ -108,7 +110,11 @@ export class ApplicationAssistant {
         WHERE m.turn_id IS NULL ORDER BY t.rowid DESC LIMIT 100`).all()
       : this.db.prepare(`SELECT t.value FROM application_conversation_membership m JOIN application_conversation_turns t ON t.id=m.turn_id
         WHERE m.conversation_id=? ORDER BY t.rowid DESC LIMIT 100`).all(conversationId);
-    const turns = projectConversationIssues(rows.reverse().map(row => JSON.parse(row.value)));
+    const turns = projectConversationIssues(rows.reverse().map(row => {
+      const turn = JSON.parse(row.value), task = this.maintenance?.forTurn(turn.id, conversationId);
+      if (task) turn.assistant.maintenanceTask = this.maintenance.project(task);
+      return turn;
+    }));
     return { conversationId, conversation: { ...metadata, workflowId: conversationId, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [] };
   }
   listConversations() {
@@ -202,7 +208,8 @@ export class ApplicationAssistant {
     if (this.closed) fail('应用助手已关闭。', 409);
     if (typeof input.clientMessageId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.clientMessageId)) fail('消息 ID 无效。');
     if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 12000 || input.text.includes('\0')) fail('请输入最多 12000 字符的消息。');
-    const context = structuredClone(object(input.context || {}, ['workflowId', 'runId', 'nodeId', 'runSelection']));
+    const context = structuredClone(object(input.context || {}, ['workflowId', 'runId', 'nodeId', 'runSelection', 'maintenanceTaskId']));
+    if (context.maintenanceTaskId) this.maintenance.assertTaskContext(context.maintenanceTaskId, conversationId);
     if (refs.length && !context.workflowId) context.workflowId = refs[0].workflowId;
     const clientKey = conversationId === APPLICATION_CONVERSATION_ID ? input.clientMessageId : conversationId + ':' + input.clientMessageId;
     const digest = hash(readOnly ? { input, escalation } : input), previous = this.db.prepare('SELECT digest,value FROM application_conversation_turns WHERE client_id=?').get(clientKey);
@@ -263,15 +270,24 @@ export class ApplicationAssistant {
         turn.assistant = { ...turn.assistant, ...result }; turn.status = result.operations?.length ? 'proposed' : 'complete'; finishDiagnostic(turn.assistant, 'complete');
       } catch (error) { if (this.closed) return; turn.status = controller.signal.aborted ? 'interrupted' : 'error'; turn.assistant.text = String(redact(error.message)).slice(0, 4000);
         finishDiagnostic(turn.assistant, turn.status, turn.assistant.text); }
-      finally { this.active.delete(turn.id); this.activeConversations.delete(conversationId); if (!this.closed) { turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId); } }
+      finally { this.active.delete(turn.id); this.activeConversations.delete(conversationId); if (!this.closed) {
+        const task = this.maintenance.forTurn(turn.id, conversationId); if (task) turn.assistant.maintenanceTask = this.maintenance.project(task);
+        turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId);
+      } }
     })();
     return this.response(turn);
   }
   async action(turnId, input, conversationId = APPLICATION_CONVERSATION_ID) {
     this.assertConversation(conversationId);
-    object(input, ['action']); const turn = this.readTurn(turnId, conversationId);
-    if (turn.escalation?.readOnly && !['interrupt-turn', 'dismiss-turn'].includes(input.action)) fail('只读升级没有修改或执行操作的权限。', 403);
-    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); return this.response(turn); }
+    object(input, ['action', 'taskId', 'expectedRevision']); const turn = this.readTurn(turnId, conversationId);
+    if (turn.escalation?.readOnly && !['interrupt-turn', 'dismiss-turn', 'stop-maintenance'].includes(input.action)) fail('只读升级没有修改或执行操作的权限。', 403);
+    if (input.action === 'stop-maintenance') {
+      this.maintenance.assertTaskContext(input.taskId, conversationId);
+      const task = this.maintenance.read(input.taskId);
+      if (![task.sourceTurnId, task.activeTurnId].includes(turnId) || task.revision !== input.expectedRevision) fail('维护任务版本或来源已变化。', 409);
+      this.active.get(task.activeTurnId)?.abort(); await this.maintenance.stop(task.id, conversationId); return this.response(turn);
+    }
+    if (input.action === 'interrupt-turn') { this.active.get(turnId)?.abort(); await this.maintenance.stopForTurn(turnId, conversationId); return this.response(turn); }
     if (input.action === 'mark-applied') {
       if (turn.outcome?.applied) return this.response(turn);
       if (turn.status !== 'proposed' || !turn.assistant.operations?.length || !turn.assistant.targetWorkflowId) fail('此事项没有可应用的工作流修改。', 409);
@@ -313,10 +329,28 @@ export class ApplicationAssistant {
     } catch (error) { trace.finish(error); throw error; }
   }
   async plan({ role = 'supervisor', readOnly = false, workflowBound = false, decision, sourceConversationId, operationNamespace = randomUUID(), diagnosticTurnId = operationNamespace, text, document, context = {}, history = [], portableContext, page = {}, signal, onSession, onProgress, onCheckpoint, checkpoint,
-    deadlineAt: parentDeadline, startedAt, modelCallOffset = 0, modelRoute: pinnedModelRoute, attachments = [] } = {}) {
+    deadlineAt: parentDeadline, startedAt, modelCallOffset = 0, modelRoute: pinnedModelRoute, attachments = [], maintenanceSegment = 1 } = {}) {
     check(signal);
     if (decision !== undefined && !this.classifiedDecisions.has(decision)) fail('对话类型必须来自服务端受控AI分类。', 403);
     const permissionScope = await this.permissions.bind({ role, readOnly, workflowBound, workflowId: document?.id || context.workflowId, document });
+    const maintenanceAuthorized = role === 'supervisor' && decision?.intent === 'diagnose' && !!sourceConversationId
+      && !!this.db.prepare('SELECT id FROM application_conversation_turns WHERE id=?').get(diagnosticTurnId)
+      && permissionScope.permissions.workflowRead && permissionScope.permissions.appLogs;
+    const maintenanceContext = { permissionScope, sourceConversationId, diagnosticTurnId, maintenanceAuthorized, workflowId: context.workflowId, runId: context.runId };
+    let maintenanceTaskId = context.maintenanceTaskId;
+    if (maintenanceAuthorized) {
+      if (context.maintenanceTaskId) {
+        this.maintenance.assertTaskContext(context.maintenanceTaskId, sourceConversationId);
+        const task = this.maintenance.read(context.maintenanceTaskId);
+        if (task.activeTurnId !== diagnosticTurnId) await this.maintenance.call('maintenance.task', { action: 'continue', taskId: task.id, expectedRevision: task.revision }, maintenanceContext);
+      } else if (maintenanceSegment === 1) {
+        const started = await this.maintenance.call('maintenance.task', { action: 'start', operationId: 'maintenance-' + diagnosticTurnId, goal: text.slice(0, 2000) }, maintenanceContext);
+        maintenanceTaskId = started.task.id;
+      }
+    }
+    maintenanceContext.maintenanceTaskId = maintenanceTaskId;
+    const maintenanceTask = () => maintenanceAuthorized && maintenanceTaskId ? this.maintenance.read(maintenanceTaskId) : null;
+    const evidenceBefore = maintenanceTask()?.evidenceVersion || 0;
     const continuation = permissionScope.permissions.workflowRead && permissionScope.workflowId
       ? projectConversationContinuation(portableContext, { workflowId: permissionScope.workflowId, readOnly: readOnly || permissionScope.role === 'supervisor' }) : undefined;
     const materials = attachments.length ? await resolveAssistantAttachments(this.app, attachments, { role, workflowId: document?.id || context.workflowId, document, permissionScope }) : [];
@@ -332,7 +366,7 @@ export class ApplicationAssistant {
       const remaining = Math.max(1, parentDeadline - turn.started);
       turn.maxDurationMs = turn.maxDurationMs === null ? remaining : Math.min(turn.maxDurationMs, remaining);
     }
-    turn.modelCalls = decision?.modelCalls || modelCallOffset;
+    turn.modelCalls = Math.max(decision?.modelCalls || 0, modelCallOffset);
     if (decision?.checkpoint?.steps) turn.steps = structuredClone(decision.checkpoint.steps);
     const selection = Object.fromEntries(['workflowId', 'runId', 'nodeId', 'runSelection'].filter(key => context[key] !== undefined).map(key => [key, context[key]]));
     if (document) { selection.document = document; selection.workflowId = document.id; }
@@ -349,11 +383,12 @@ export class ApplicationAssistant {
     };
     const complete = value => {
       turn.finish();
-      return { ...value, evidence: turn.evidence, progress: { ...turn.progress, status: 'complete' }, checkpoint: structuredClone(turn.state) };
+      const task = maintenanceTask();
+      return { ...value, ...(task ? { maintenanceTask: this.maintenance.project(task) } : {}), evidence: turn.evidence, progress: { ...turn.progress, status: 'complete' }, checkpoint: structuredClone(turn.state) };
     };
     const proposalResult = proposal => ({ ...proposal, ...(proposal.operations?.length ? {
       text: `已生成 ${proposal.operations.length} 项节点修改候选，并通过配置与连线检查。请在当前对话查看明细后应用；候选尚未应用或运行。`,
-      validation: { editorValidated: true, applied: false, executed: false },
+      validation: { ...proposal.validation, editorValidated: true, applied: false, executed: false },
     } : {}) });
     try {
       phase('snapshot', '读取应用与运行状态');
@@ -415,9 +450,11 @@ export class ApplicationAssistant {
         return complete(proposalResult(proposal));
       }
       const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope, intent: decision?.intent }), activeSignal), permissionScope);
+      if (!maintenanceAuthorized) capabilities.features = capabilities.features?.filter(feature => feature.id !== 'maintenance');
       check(activeSignal);
       const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'conversation.escalation', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.search', 'app.source.read', 'app.source.history']);
-      const tools = this.tools(permissionScope).filter(tool => decision?.intent !== 'discuss' || discussionTools.has(tool.name));
+      const tools = this.tools(permissionScope).filter(tool => (!tool.name.startsWith('maintenance.') || maintenanceAuthorized)
+        && (decision?.intent !== 'discuss' || discussionTools.has(tool.name)));
       turn.admitCheckpoint(diagnosticScope({ selection: { ...selection, role, readOnly, workflowBound, sourceConversationId, permissionRevision: permissionScope.revision }, evidence, modelRoute, capabilities, config: this.app.config, tools }), checkpoint, evidence);
       const source = { userMessage: sanitizeDiagnosticText(text), selection: Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'document')),
         ...(materialSource.length ? { attachments: materialSource } : {}),
@@ -429,6 +466,7 @@ export class ApplicationAssistant {
         recentConversation: permissionScope.permissions.workflowRead ? compactDiagnosticContext(history.slice(-6), { initial: true }) : [],
         ...(continuation ? { portableContext: continuation } : {}),
         sourceConversationId,
+        ...(maintenanceAuthorized ? { maintenanceTask: this.maintenance.project(maintenanceTask()) } : {}),
         capabilities: compactDiagnosticContext({ ...capabilities, features: capabilities.features?.map(({ id, status, tools }) => ({ id, status, tools })) }, { initial: true }) };
       const catalog = tools.map(({ name, description, inputSchema, effect, readOnly }) => ({
         name, description: description?.split('；')[0].slice(0, 64), inputSchema, effect: effect || (readOnly ? 'read-only' : 'restricted'),
@@ -437,8 +475,9 @@ export class ApplicationAssistant {
       const sourceRepair = role === 'supervisor' && !readOnly && permissionScope.permissions.sourceRepair === true;
       const sourceRead = role === 'supervisor' && (permissionScope.permissions.sourceRead === true || permissionScope.permissions.sourceRepair === true);
       const fixed = `你是工作台的${role === 'workflow' ? '当前工作流独立助手' : '总控助手'}，中文回答。权限范围以SOURCE_JSON.permissionScope和工具目录为准。独立助手只可访问绑定工作流和工作文件夹。通过目录内受控工具读取状态、运行、日志和能力，再回答或生成获准修改。原生shell、任意文件${sourceRepair ? '' : '、源码写入'}、权限设置修改、学习答案和记忆均不可用；要求扩大权限时请用户到设置页操作。\n`
-        + (sourceRead ? '源码只读权限已开放：可用app.source.list/read核对相关实现与版本，这不授予源码修改或测试能力。\n' : '')
-        + '模型链路先读assistant.diagnose摘要，再按目标call用assistant.trace分页读取连接、响应头、HTTP和SSE事件类型的元数据；未观测字段保持未知。不要用传输结束代替模型成功，不把连接耗时拆成未知的上游排队或推理时间。assistant.experiment仅在工具已开放时按人工额度做无业务工具的合成近似验证，不能复原历史提示词或自动重试未知请求，不能将一次实验等同历史根因证明。\n'
+        + (sourceRead ? '源码只读权限已开放：可用app.source.list/read核对相关实现与版本；maintenance.experiment的verify可在临时副本运行明确的相关测试，原目录不可写。\n' : '')
+        + (maintenanceAuthorized ? 'SOURCE_JSON.maintenanceTask是本轮已登记的持久维护任务。先最少取证，能复现则maintenance.experiment reproduce用保存的单节点输入在OS沙箱复现；读回回执和产物后定位与修复。workflow.propose候选不应用原工作流。源码修改未开放时用maintenance.task request-source-repair记录原因和人工设置入口，禁止绕过权限。checkpoint保存简短发现与下一步，不把记录本身当修复。已有实验按status/read-output回读，不重复执行；有新证据时系统会分段继续，结果未知必须停止重放。隔离测试通过仅证明所列范围，不代表原工作流已恢复。\n' : '')
+        + '模型链路先assistant.diagnose摘要，缺细节再assistant.trace按call分页；未观测字段未知，传输结束不代表模型成功，不能臆断上游排队或推理耗时。assistant.experiment仅按已开放权限与人工额度做无业务工具的合成验证，不复原历史提示词、不重试未知请求、不单凭实验认定历史根因。\n'
         + (sourceRepair ? '用户已手动开启实验性源码自修复。当前人工消息要求修复软件时，可自行使用app.source.list/read定位、patch改代码、test运行明确的相关测试、history核对记录，失败可继续修复或rollback。权限控制与启动入口、凭据和用户工作流数据受保护；不要修改或运行现有工作流，不自动安装依赖、重启或发布。写入不算完成，只有当前版本的隔离相关测试真实通过才报告已验证；沙箱不可用或冲突时明确说明缺口，不伪造成功。只读咨询不授权写入。\n'
           : '')
         + (decision ? `本轮AI已判断类型为${decision.intent}。${decision.intent === 'discuss' ? '直接讨论和解释；只在确有能力说明缺口时读取知识，不主动启动故障取证或生成修改。' : decision.intent === 'diagnose' ? '按用户问题取最少故障证据，再给出结论或获准的业务候选。' : '按这个类型选择已开放处理入口，分类本身不授权运行、审批、学习或应用。'}\n` : '')
@@ -455,8 +494,8 @@ export class ApplicationAssistant {
         + (role === 'workflow' ? '缺全局证据时conversation.escalate登记或start:true启动一次总控只读诊断（模型用量）；conversation.escalation按需读结论，不重复提交或轮询，不扩权、不自动改跑业务。\n' : '')
         + `workflow.run只读取历史；workflow.preflight不试跑代码。严格区分available/proposal-only/ui-only/unavailable。没有开放的能力不可虚构，已有日志不可要求用户再复制。证据不足才检查环境或截图；截图是隔离只读浏览器，不是用户当前标签页；图片由真实图像输入提供。最多${this.maxCalls}项工具查询，等待策略见BUDGET_JSON。\n`
         + `总控的workflow.copy/create-test/delete仅在用户明确要求对应管理操作时调用；禁止为诊断擅自删除或修改工作流。mutation不能批量，须明确目标和版本并提供稳定operationId。delete只进入可恢复回收站。结果未知不得换operationId重放，复制与新增测试草稿均不自动运行。app.logs可按等级、模块、时间和关联ID读取有界持久日志；优先warn及以上定位，再按requestId/runId/turnId展开info阶段，按实际交付游标分页。currentProcess中的Hermes诊断仅当前进程。\n`
-        + `总控通过conversations.list读取独立会话摘要，conversation.inspect按需读取一条会话。需要独立助手协助且用户明确委派时用conversation.delegate；它只提交只读诊断消息，不运行或修改工作流。返回turnId后可后续查看，不能重复提交或循环等候。总控主题的历史各自独立，不默认合并工作流聊天。\n`
-        + `助手对话本身失败或超时时，优先assistant.diagnose按workflowId或conversationId读取完整模型时序；它已聚合检查点、软件日志、用量和输出完整性，不再重复查询这些证据，不用session.history读取控制会话。确需验证当前连接时单独assistant.probe一次；短探测不能证明原复杂任务已恢复。先区分等待首字、输出停滞和总截止；业务修改仍用待审提案，源码修复按本轮实际工具权限处理。\n`
+        + `conversations.list读独立会话摘要，conversation.inspect读详情；用户明确委派才conversation.delegate一次只读诊断，以turnId后续查看，不重复提交或轮询、不改跑工作流；总控主题历史独立，不默认合并工作流聊天。\n`
+        + `助手失败先assistant.diagnose按workflowId/conversationId读聚合时序、检查点、日志与用量，不重复查询、不用session.history读控制会话。确需查当前连接才assistant.probe一次；短探测不代表复杂任务恢复。区分首字等待、输出停滞与总截止；业务用待审候选，源码按当前权限修复。\n`
         + `SOURCE_JSON.capabilities.loadedSkills是本轮已加载的Skill，直接使用其中说明；已有能力摘要不重复读取。BUDGET_JSON给出剩余工具、模型决策和时间；remainingMs=null表示没有应用层时间上限，继续等待上游结果、错误或用户停止，工具与决策次数仍有限。FINAL_ANSWER_ONLY=true时仅返回text，报告现有证据与缺口，不再申请工具。\n`
         + `历史按各调用timeoutPolicy判断，缺失为未知；currentPolicy仅表示当前默认值。\n`;
       for (let index = 0; index <= this.maxCalls; index++) {
@@ -482,6 +521,18 @@ export class ApplicationAssistant {
         if (Object.hasOwn(result, 'text')) {
           object(result, ['text']);
           if (typeof result.text !== 'string' || !result.text.trim() || result.text.length > 24000) fail('应用助手回复协议无效。');
+          if (maintenanceAuthorized) {
+            const task = maintenanceTask();
+            this.maintenance.finishSegment(sourceConversationId, result.text, { segment: maintenanceSegment, taskId: task.id });
+            if (finalOnly && (task.evidenceVersion || 0) > evidenceBefore && maintenanceSegment < MAINTENANCE_LIMITS.segments
+              && ['ready', 'waiting_continue'].includes(task.status)) {
+              phase('maintenance-continue', '已保存诊断进度，继续下一段维护');
+              return await this.plan({ role, readOnly, workflowBound, decision, sourceConversationId, operationNamespace, diagnosticTurnId,
+                text, document, context: { ...context, maintenanceTaskId: task.id }, history: [], portableContext: undefined, page, signal,
+                onSession, onProgress, onCheckpoint, startedAt: new Date(turn.started).toISOString(), deadlineAt,
+                modelCallOffset: turn.modelCalls, modelRoute, attachments, maintenanceSegment: maintenanceSegment + 1 });
+            }
+          }
           return complete({ text: sanitizeDiagnosticText(result.text) });
         }
         if (finalOnly) return complete({ text: `本轮查询额度已用完，已保留 ${turn.evidence.length} 项诊断证据；未执行进一步操作。现有证据不足以确认修复，不能将诊断完成视为业务已恢复。` });
@@ -527,7 +578,7 @@ export class ApplicationAssistant {
           const descriptor = tools.find(tool => tool.name === name);
           turn.toolCalls++;
           const liveSource = name.startsWith('app.source.');
-          const liveRead = liveSource || ['assistant.trace', 'conversation.escalation'].includes(name);
+          const liveRead = liveSource || name.startsWith('maintenance.') || ['assistant.trace', 'conversation.escalation'].includes(name);
           const cached = liveRead ? undefined : turn.cache.get(key) || failures.get(key);
           phase(liveSource ? 'source-repair' : name === 'workflow.propose' ? 'proposal' : 'tool-read',
             cached ? `复用已查证据：${name}` : name === 'workflow.propose' ? '生成工作流修改候选（尚未应用）' : `正在检查：${descriptor.description?.split('；')[0] || name}`,
@@ -540,11 +591,29 @@ export class ApplicationAssistant {
           try {
             called = await turn.wait(this.call(name, args, { ...selection, page, signal: activeSignal, text, history, portableContext: continuation, onSession, attachments: storedAttachmentRefs(materials),
               permissionScope, sourceConversationId, diagnosticTurnId, deadlineAt,
-              escalationAuthorized: role === 'workflow' && !readOnly && decision?.intent === 'diagnose',
+              escalationAuthorized: role === 'workflow' && !readOnly && decision?.intent === 'diagnose', maintenanceAuthorized, maintenanceTaskId,
               onProgress: modelProgress, modelRoute, toolEvidence: turn.transcript() }), activeSignal);
             check(activeSignal);
             if (called?.proposal) {
               const proposal = called.proposal;
+              if (maintenanceAuthorized) {
+                const candidate = this.maintenance.recordCandidate({ ...maintenanceContext, signal: activeSignal }, proposal);
+                if (candidate?.nodeIds.length === 1) {
+                  phase('maintenance-reproduce', '在隔离副本中验证节点修改候选');
+                  const verification = await turn.wait(this.call('maintenance.experiment', { action: 'reproduce', taskId: candidate.task.id,
+                    expectedRevision: candidate.task.revision, operationId: 'candidate-' + diagnosticTurnId,
+                    nodeId: candidate.nodeIds[0], variant: 'proposal' }, { ...maintenanceContext, signal: activeSignal }), activeSignal);
+                  proposal.validation = { ...proposal.validation, isolated: verification.experiment };
+                  if (['failed', 'fail'].includes(verification.experiment.status)) {
+                    const output = await this.call('maintenance.experiment', { action: 'read-output', taskId: candidate.task.id,
+                      experimentId: verification.experiment.id, stream: 'result' }, { ...maintenanceContext, signal: activeSignal });
+                    turn.record('maintenance.experiment', { experimentId: verification.experiment.id }, { ...verification, diagnostic: output.text }, { cacheable: false });
+                    turn.record(name, args, { proposed: true, candidateVerified: false, originalApplied: false,
+                      diagnostic: output.text, nextStep: '请根据实际隔离错误重新生成节点代码候选。' }, { cacheable: false });
+                    continue;
+                  }
+                }
+              }
               turn.record(name, args, { proposed: true, executed: false }, { key });
               turn.evidence.at(-1).status = 'complete';
               return complete(proposalResult(proposal));
@@ -564,6 +633,8 @@ export class ApplicationAssistant {
             value = { error: String(redact(error.message)).slice(0, 2000), executed: false };
           }
           const safe = turn.record(name, args, value, { key, cacheable: descriptor.effect === 'read-only' && !liveRead });
+          if (maintenanceAuthorized && value?.task?.status === 'waiting_permission') return complete({
+            text: `${value.task.permissionRequest?.reason || '下一步需要修改工作台源码。'}\n请在“设置 → 助手权限 → 总控助手”手动开启“实验性源码自修复”，然后回到此对话继续。诊断进度已保留。` });
           if (value?.executed === false && !completedStaticCodeCheck(name, value)) {
             const previous = failures.get(key);
             failures.set(key, { result: safe, collectedAt: new Date().toISOString() });
@@ -587,11 +658,13 @@ export class ApplicationAssistant {
     ({ args, context } = await this.permissions.admit(name, args, permissionScope, context));
     authorizeSupervisorMutation(this.app, name, args, context);
     const result = await this.#dispatch(name, args, context);
-    if (this.tools().find(tool => tool.name === name)?.effect !== 'mutation') await this.permissions.current(permissionScope);
+    if (context.maintenanceAuthorized && !name.startsWith('maintenance.')) this.maintenance.observe(context, name, args, result);
+    if (name.startsWith('maintenance.') || this.tools().find(tool => tool.name === name)?.effect !== 'mutation') await this.permissions.current(permissionScope);
     return this.permissions.project(result, permissionScope);
   }
   async #dispatch(name, args, context) {
     const permissionScope = context.permissionScope;
+    if (this.maintenance.handles(name)) return this.maintenance.call(name, args, context);
     if (this.sourceTools.handles(name)) return this.sourceTools.call(name, args, context);
     if (this.modelTools.handles(name)) return this.modelTools.call(name, args, context);
     if (this.hub.handles(name)) return this.hub.call(name, args, context);
@@ -646,10 +719,10 @@ export class ApplicationAssistant {
         attachments: materials.length ? await attachmentModelSource(this.app, materials) : [], ...attachmentImageOptions(this.app, materials),
         document, context, history: context.history, portableContext: context.portableContext, signal: context.signal, onSession: context.onSession,
         onProgress: context.onProgress, deadlineAt: context.deadlineAt,
-        diagnosticEvidence: (context.toolEvidence || []).filter(row => ['workflow.run', 'session.history', 'environment.probe'].includes(row.tool)
+        diagnosticEvidence: (context.toolEvidence || []).filter(row => ['workflow.run', 'session.history', 'environment.probe', 'maintenance.experiment'].includes(row.tool)
           && row.result?.restricted !== true).map(row => ({ tool: row.tool, runId: row.result?.id || row.arguments?.runId,
           status: row.result?.status, error: row.result?.error, collectedAt: row.collectedAt,
-          summary: sanitizeDiagnosticText(JSON.stringify(row.tool === 'session.history'
+          summary: sanitizeDiagnosticText(row.tool === 'maintenance.experiment' ? row.result?.diagnostic || JSON.stringify(row.result) : JSON.stringify(row.tool === 'session.history'
             ? (row.result?.messages || []).filter(message => ['tool', 'function'].includes(message.role)).slice(-4).map(message => ({
               name: message.name, text: message.text || message.content, stderr: message.context?.stderr, partial: message.partial,
             }))
@@ -721,5 +794,5 @@ export class ApplicationAssistant {
     }));
     return { versions, browser: await this.app.diagnosticBrowser?.capabilities() };
   }
-  async close() { if (this.closed) return; this.closed = true; for (const controller of this.active.values()) controller.abort(); this.active.clear(); this.activeConversations.clear(); }
+  async close() { if (this.closed) return; this.closed = true; for (const controller of this.active.values()) controller.abort(); await this.maintenance.close(); this.active.clear(); this.activeConversations.clear(); }
 }

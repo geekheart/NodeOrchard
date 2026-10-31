@@ -1,4 +1,5 @@
 import { WorkflowConversationUI } from './workflow-conversation-ui.js';
+import { projectMaintenanceTask } from './maintenance-task-ui.js';
 
 // Supervisor topics reuse the workflow conversation view while keeping their
 // identities, drafts, pending issues and late responses separate.
@@ -31,12 +32,55 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
   }
   describeContext() { return [this.editor.doc.title || '总控主题']; }
   getContext() { return {}; }
+  isMaintenanceSupervisor() { return true; }
   renderComposerHelp() { this.input.placeholder = '输入消息'; }
+  async load(force = false) {
+    const id = this.workflowId, state = id && this.state(id); if (!state || state.loading) return;
+    const refresh = force || state.maintenancePermissionsDirty === true; state.maintenancePermissionsDirty = false;
+    try { return await super.load(refresh); }
+    finally { if (state.maintenancePermissionsDirty && this.workflowId === id && !state.loading) void this.load(true); }
+  }
   onEvent(event) {
+    if (event.type === 'application.maintenance') { this.acceptMaintenanceEvent(event.payload); return; }
+    if (event.type === 'assistant.permissions.updated') {
+      for (const state of this.states.values()) if (state.maintenanceTasks?.size || state.conversation.turns.some(turn => turn.assistant?.maintenanceTask)) state.maintenancePermissionsDirty = true;
+      if (this.workflowId && this.state().maintenancePermissionsDirty) void this.load(true);
+      return;
+    }
     if (event.type !== 'application.conversation') return;
     const id = event.payload?.conversation?.workflowId;
     if (!this.states.has(id)) return;
     try { this.accept(event.payload, id); } catch {}
+  }
+  currentMaintenanceTask(value) {
+    if (value.conversationId !== this.workflowId || !this.states.has(value.conversationId)) return null;
+    const state = this.state(value.conversationId), task = projectMaintenanceTask(state.maintenanceTasks?.get(value.id)
+      || state.conversation.turns.find(turn => turn.assistant?.maintenanceTask?.id === value.id)?.assistant.maintenanceTask);
+    return task?.conversationId === value.conversationId && task.revision === value.revision ? task : null;
+  }
+  async continueMaintenanceTask(value) {
+    const task = this.currentMaintenanceTask(value); if (!task?.canContinue) return false;
+    const state = this.state();
+    if (state.sending || !state.loaded || this.editor.libraryReadOnly || state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) return false;
+    const retry = state.retry?.context?.maintenanceTaskId === task.id ? state.retry : null;
+    const request = retry || { clientMessageId: crypto.randomUUID(), intent: 'auto',
+      text: `继续维护并修复任务 ${task.id}；仅在当前权限内推进，保留原工作流`, context: { maintenanceTaskId: task.id }, page: this.getPageDiagnostics?.() || {} };
+    await this.send(request); return !state.retry;
+  }
+  async stopMaintenanceTask(value, turnId) {
+    const task = this.currentMaintenanceTask(value); if (!task?.canStop || this.editor.libraryReadOnly) return false;
+    const id = task.conversationId, key = `${id}:${task.id}:stop-maintenance`; if (this.actionPending.has(key)) return false;
+    this.actionPending.add(key); this.state(id).error = ''; this.render();
+    try {
+      const result = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId || task.sourceTurnId)}/action`, {
+        method: 'POST', body: { action: 'stop-maintenance', taskId: task.id, expectedRevision: task.revision },
+      });
+      if (result?.conversation) this.accept(result, id);
+      else if (result?.task) this.acceptMaintenanceEvent({ conversationId: id, task: result.task });
+      else throw new Error('维护状态未确认，请刷新对话。');
+      return true;
+    } catch (error) { this.state(id).error = error.message; if (this.workflowId === id) this.renderNotice(); return false; }
+    finally { this.actionPending.delete(key); if (this.workflowId === id) this.render(); }
   }
   async startRun() { this.state().error = '请先打开要运行的工作流。'; this.renderNotice(); return false; }
   render() {

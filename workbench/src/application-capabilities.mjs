@@ -4,6 +4,7 @@ import { ApplicationAssistantSkills } from './application-assistant-skills.mjs';
 import { inspectCodeRuntime } from './application-runtime-inspector.mjs';
 import { inspectSoftware } from './application-software-inspector.mjs';
 import { inspectWorkflowCode } from './application-code-inspector.mjs';
+import { APPLICATION_MAINTENANCE_TOOLS } from './application-maintenance.mjs';
 import { ASSISTANT_DIAGNOSTIC_LIMITS } from './assistant-diagnostic-turn.mjs';
 import { APPLICATION_SUPERVISOR_TOOLS } from './application-supervisor-tools.mjs';
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from './application-conversation-hub.mjs';
@@ -58,6 +59,7 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'maintenance', status: 'available', roles: ['supervisor'], tools: ['maintenance.task', 'maintenance.experiment'], note: '维护目标与证据持久保存；受控隔离节点复现、源码只读相关测试及日志产物回读不取得源码写权。沙箱不可用明确停止；需要改源码时请求人工开关，原工作流不自动修改或重跑。' },
   { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按基础PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；代码worker按次补私有命令入口，现有PATH优先，不改系统环境或节点代码。版本探测与静态检查不运行业务，不证明转换或渲染成功。' },
   { id: 'workflow-diagnostic-escalation', status: 'available', roles: ['workflow'], tools: ['conversation.escalate', 'conversation.escalation'], note: '独立会话在用户本轮排错请求下按来源轮次升级为总控只读诊断，可在原聊天读取进度与结论。受总控人工读取权限约束；每来源至多启动一次，停止或重启不重放，不转移写权限，不自动修改或运行工作流。' },
   { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
@@ -148,7 +150,7 @@ export class ApplicationCapabilities {
   tools(scope) {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS).filter(tool => tool.name !== 'assistant.experiment' || this.modelExperimentEnabled(scope)),
-      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.search', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope))];
+      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.search', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope)), ...structuredClone(APPLICATION_MAINTENANCE_TOOLS)];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }

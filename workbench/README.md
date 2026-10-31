@@ -128,4 +128,6 @@ npm run check:git
 
 诊断先使用紧凑摘要和已有证据，再补查详情；重复读取会去重，独立只读检查可批量请求。当前气泡显示实际阶段与耗时，失败和重启保留已完成诊断进度，按有效期和上下文校验复用证据，不自动重放操作。具体限制见 [上下文、进度与中断](docs/application-diagnostics.md#上下文进度与中断)。
 
+总控维护任务可保存阶段与实验回执，跨轮续接排错；支持隔离单节点复现，以及源码只读权限下的相关测试。源码修改仍需人工开启并明确继续，失败或未知不冒充修复，原工作流不改不跑，见[总控持续维护](docs/application-maintenance.md)。
+
 新增功能同步维护能力目录、工具 schema／dispatch、内部 Skill 说明和回归。工具可用、仅能提案、仅界面支持和不可用分别声明；当前没有对外 MCP server，未来适配复用同一工具与权限实现。工具、依赖与验证边界见 [应用诊断说明](docs/application-diagnostics.md)，扩展流程见 [能力维护指南](docs/application-assistant-capabilities.md)。
