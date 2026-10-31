@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WorkflowBoard, filterWorkflowBoard, workflowBoardState } from '../public/workflow-board.js';
+import { WorkflowBoard, filterWorkflowBoard, workflowBoardState, workflowBoardDisplayState, sortWorkflowBoard } from '../public/workflow-board.js';
 
 class FakeElement {
   constructor(tag) {
@@ -42,13 +42,13 @@ test('loading an empty library never creates fake cards and exposes an explicit 
 test('cards follow server state instead of treating an executed document as a running or completed task', async t => {
   const { ui, setRecords } = mounted(t); const records = [summary('a', 'draft'), summary('b', 'ready', { latestRun: { id: 'r-b', status: 'complete' } }), summary('c', 'running', { latestLearning: { id: 'l-c', status: 'running', bestScore: 0 } }), summary('d', 'attention', { latestRun: { id: 'r-d', status: 'error', error: '执行错误' }, scheduleCount: 2, nextRunAt: '2030-01-02T02:00:00.000Z' })];
   setRecords(records); await ui.load();
-  for (const item of records) assert.equal(ui.cards.get(item.id).card.parentElement, ui.columns.get(item.state).list);
-  assert.match(ui.cards.get('b').run.textContent, /已完成/); assert.equal(ui.cards.get('b').card.dataset.state, 'ready'); assert.match(ui.cards.get('c').learning.textContent, /最佳 0 分/); assert.match(ui.cards.get('d').timingText.textContent, /已启用定时 2.*下次/); assert.equal(ui.columns.get('running').count.textContent, '1');
+  for (const item of records) assert.equal(ui.cards.get(item.id).card.parentElement, ui.libraryGrid);
+  assert.match(ui.cards.get('b').run.textContent, /已完成|成功/); assert.match(ui.cards.get('b').status.textContent, /就绪/); assert.equal(ui.cards.get('b').card.dataset.state, 'ready'); assert.match(ui.cards.get('c').learning.textContent, /最佳 0 分/); assert.match(ui.cards.get('d').timingText.textContent, /已启用定时 2.*下次/); assert.equal(ui.statusFilters.get('running').count.textContent, '1');
 });
 
 test('attention explains the newest activity rather than an older run error and schedule count means enabled plans', async t => {
   const { ui, setRecords } = mounted(t); setRecords([summary('a', 'attention', { latestRun: { status: 'error', error: 'old execution error', completedAt: '2030-01-01T00:00:00Z' }, latestLearning: { status: 'exhausted', error: '', completedAt: '2030-01-02T00:00:00Z' }, scheduleCount: 0 })]); await ui.load();
-  assert.equal(ui.cards.get('a').reason.textContent, '本次学习尚未达到目标'); assert.equal(ui.cards.get('a').timingText.textContent, '暂无已启用定时任务');
+  assert.equal(ui.cards.get('a').reason.textContent, '本次学习尚未达到目标'); assert.equal(ui.cards.get('a').timing.hidden, true);
 });
 
 test('route activation loads once and hidden boards do not fetch in response to incoming events', async t => {
@@ -60,7 +60,7 @@ test('route activation loads once and hidden boards do not fetch in response to 
 test('refresh updates existing cards in place and preserves search focus, text and selection', async t => {
   const { ui, setRecords, document } = mounted(t); setRecords([summary('a')]); await ui.load(); const row = ui.cards.get('a'); ui.search.value = 'humanizer'; ui.search.selectionStart = 4; ui.search.focus();
   setRecords([summary('a', 'running', { latestRun: { id: 'r', status: 'running' } })]); await ui.load();
-  assert.equal(ui.cards.get('a'), row); assert.equal(row.card.parentElement, ui.columns.get('running').list); assert.equal(ui.search.value, 'humanizer'); assert.equal(ui.search.selectionStart, 4); assert.equal(document.activeElement, ui.search);
+  assert.equal(ui.cards.get('a'), row); assert.equal(row.card.parentElement, ui.libraryGrid); assert.equal(ui.search.value, 'humanizer'); assert.equal(ui.search.selectionStart, 4); assert.equal(document.activeElement, ui.search);
   ui.filter.value = 'ready'; ui.filter.emit('change'); assert.equal(row.card.hidden, true); assert.equal(ui.emptyClear.hidden, false);
 });
 
@@ -120,4 +120,110 @@ test('open and create callbacks are explicit, do not call a model and reject dup
 test('untrusted titles and errors use text nodes and preserve the existing card when its title changes', async t => {
   const { ui, setRecords, tags } = mounted(t), title = '<img src=x onerror=alert(1)>';
   setRecords([summary('a', 'attention', { title, latestRun: { status: 'error', error: '<script>bad()</script>' } })]); await ui.load(); assert.equal(ui.cards.get('a').title.textContent, title); assert.equal(ui.cards.get('a').reason.textContent, '<script>bad()</script>'); assert.equal(tags.includes('img'), false); assert.equal(tags.includes('script'), false);
+});
+
+
+const visibleLibraryIds = ui => Array.from(ui.libraryGrid.children).filter(card => card.dataset?.workflowId && !card.hidden).map(card => card.dataset.workflowId);
+const flatten = item => [item, ...Array.from(item.children || []).flatMap(flatten)];
+
+test('most workflows can remain ready in one responsive library without four persistent state columns', async t => {
+  const { ui, setRecords, calls } = mounted(t);
+  const ready = Array.from({ length: 16 }, (_, index) => summary('ready-' + index));
+  const records = [...ready, summary('needs-review', 'running', { latestRun: { id: 'review-run', status: 'waiting_review' } }),
+    summary('executing', 'running', { latestRun: { id: 'active-run', status: 'running' } })];
+  const before = structuredClone(records); setRecords(records); await ui.load();
+  assert.equal(visibleLibraryIds(ui).length, 18);
+  assert.equal(visibleLibraryIds(ui)[0], 'needs-review'); assert.equal(visibleLibraryIds(ui)[1], 'executing');
+  assert.equal(ui.statusFilters.get('all').count.textContent, '18'); assert.equal(ui.statusFilters.get('ready').count.textContent, '16');
+  assert.equal(ui.statusFilters.get('attention').count.textContent, '1'); assert.equal(ui.statusFilters.get('running').count.textContent, '1');
+  assert.equal(flatten(ui.root).filter(item => String(item.className || '').split(/\s+/).includes('wf-board-column')).length, 0);
+  for (const record of ready) assert.equal(ui.cards.get(record.id).card.parentElement, ui.libraryGrid);
+  assert.deepEqual(records, before); assert.deepEqual(calls, ['/api/workflow-library?lifecycle=all']);
+});
+
+test('human waiting is actionable in display and filters without changing the server-owned workflow state', () => {
+  for (const [field, status] of [['latestRun', 'waiting_review'], ['latestRun', 'waiting'], ['latestLearning', 'waiting_review'], ['latestLearning', 'waiting']]) {
+    const record = summary('waiting', 'running', { [field]: { id: 'wait-record', status } }), before = structuredClone(record);
+    assert.equal(workflowBoardState(record), 'running'); assert.equal(workflowBoardDisplayState(record), 'attention');
+    assert.deepEqual(filterWorkflowBoard([record], '', 'attention'), [record]); assert.deepEqual(filterWorkflowBoard([record], '', 'running'), []);
+    assert.deepEqual(record, before);
+  }
+  assert.equal(workflowBoardDisplayState(summary('active', 'running', { latestRun: { status: 'running' } })), 'running');
+  assert.equal(workflowBoardDisplayState({ state: 'unrecognized' }), 'attention');
+});
+
+test('priority, recency and name sorting are deterministic projections that retain input data and reusable completion', () => {
+  const records = [
+    summary('ready', 'ready', { title: 'B reusable', updatedAt: '2030-01-04T00:00:00Z', latestRun: { status: 'complete' } }),
+    summary('draft', 'draft', { title: 'C draft', updatedAt: '2030-01-03T00:00:00Z' }),
+    summary('attention', 'attention', { title: 'D failed', updatedAt: '2030-01-01T00:00:00Z' }),
+    summary('running', 'running', { title: 'A running', updatedAt: '2030-01-02T00:00:00Z' }),
+  ], before = structuredClone(records);
+  assert.deepEqual(sortWorkflowBoard(records, 'priority').map(record => record.id), ['attention', 'running', 'ready', 'draft']);
+  assert.deepEqual(sortWorkflowBoard(records, 'recent').map(record => record.id), ['ready', 'draft', 'running', 'attention']);
+  assert.deepEqual(sortWorkflowBoard(records, 'name').map(record => record.id), ['running', 'ready', 'draft', 'attention']);
+  assert.notEqual(sortWorkflowBoard(records, 'priority'), records); assert.equal(workflowBoardDisplayState(records[0]), 'ready');
+  assert.deepEqual(records, before);
+});
+
+test('status buttons and local sorting preserve focused controls and cards and do not invoke execution or extra requests', async t => {
+  const { ui, setRecords, calls, document } = mounted(t);
+  const records = [summary('b', 'ready', { title: 'B ready' }), summary('a', 'attention', { title: 'A attention' }), summary('c', 'running', { title: 'C running' })];
+  setRecords(records); await ui.load(); const row = ui.cards.get('b');
+  ui.statusFilters.get('ready').button.focus(); ui.statusFilters.get('ready').button.emit('click');
+  assert.equal(ui.filter.value, 'ready'); assert.deepEqual(visibleLibraryIds(ui), ['b']);
+  assert.equal(document.activeElement, ui.statusFilters.get('ready').button);
+  ui.statusFilters.get('all').button.emit('click');
+  row.openButton.focus(); ui.sort.value = 'name'; ui.sort.emit('change');
+  assert.deepEqual(visibleLibraryIds(ui), ['a', 'b', 'c']); assert.equal(document.activeElement, row.openButton);
+  assert.equal(ui.cards.get('b'), row); assert.deepEqual(calls, ['/api/workflow-library?lifecycle=all']);
+  ui.sort.focus(); setRecords([records[0], { ...records[1], title: 'Z attention' }, records[2]]); await ui.load();
+  assert.equal(ui.sort.value, 'name'); assert.equal(document.activeElement, ui.sort); assert.equal(ui.cards.get('b'), row);
+  assert.deepEqual(visibleLibraryIds(ui), ['b', 'c', 'a']); assert.equal(calls.length, 2);
+});
+
+test('active totals and status counts exclude trash while its own recency and the active filter survive tab switches', async t => {
+  const { ui, setRecords, calls } = mounted(t);
+  setRecords([summary('ready', 'ready'), summary('failed', 'attention'),
+    summary('old-trash', 'attention', { lifecycle: 'trashed', updatedAt: '2030-01-09T00:00:00Z', trashedAt: '2030-01-01T00:00:00Z' }),
+    summary('new-trash', 'ready', { lifecycle: 'trashed', updatedAt: '2030-01-01T00:00:00Z', trashedAt: '2030-01-02T00:00:00Z' })]);
+  await ui.load(); assert.equal(ui.total.textContent, '2'); assert.equal(ui.statusFilters.get('all').count.textContent, '2');
+  assert.equal(ui.statusFilters.get('attention').count.textContent, '1'); assert.equal(ui.lifecycleTabs.get('trashed').total.textContent, '2');
+  ui.statusFilters.get('ready').button.emit('click'); assert.deepEqual(visibleLibraryIds(ui), ['ready']);
+  ui.selectLifecycle('trashed'); assert.equal(ui.filter.value, 'ready'); assert.equal(ui.libraryGrid.hidden, true); assert.equal(ui.inactiveList.hidden, false);
+  assert.deepEqual(Array.from(ui.inactiveList.children).filter(card => !card.hidden).map(card => card.dataset.workflowId), ['new-trash', 'old-trash']);
+  ui.selectLifecycle('active'); assert.equal(ui.filter.value, 'ready'); assert.deepEqual(visibleLibraryIds(ui), ['ready']);
+  assert.deepEqual(calls, ['/api/workflow-library?lifecycle=all']);
+});
+
+test('a human-waiting workflow remains protected from trash even when its display badge asks for attention', async t => {
+  const { ui, setRecords, calls } = mounted(t); const record = summary('review', 'running', { latestRun: { status: 'waiting_review' } });
+  setRecords([record]); await ui.load(); assert.match(ui.cards.get('review').status.textContent, /待审核|需处理|待处理|需要处理/);
+  ui.toggleMenu('review'); const action = Array.from(ui.menu.children).find(item => item.tagName === 'button');
+  assert.equal(action.disabled, true); assert.equal(record.state, 'running');
+  ui.openLifecycleDialog('review', 'trash', ui.cards.get('review').more); assert.equal(ui.dialog, null);
+  assert.deepEqual(calls, ['/api/workflow-library?lifecycle=all']);
+});
+
+test('fourteen interleaved trash records cannot move a draft ahead of active workflows needing attention', async t => {
+  const { ui, setRecords, calls } = mounted(t);
+  const active = [summary('attention-old', 'attention', { updatedAt: '2030-01-01T00:00:00Z' }),
+    summary('draft-new', 'draft', { updatedAt: '2030-01-30T00:00:00Z' }),
+    summary('attention-new', 'attention', { updatedAt: '2030-01-20T00:00:00Z' })];
+  const trash = Array.from({ length: 14 }, (_, index) => summary(`trash-${index}`, index % 2 ? 'attention' : 'ready', {
+    lifecycle: 'trashed', updatedAt: '2030-02-01T00:00:00Z', trashedAt: `2030-01-${String(index + 2).padStart(2, '0')}T00:00:00Z`,
+  }));
+  const records = [active[0], ...trash.slice(0, 5), active[1], ...trash.slice(5, 10), active[2], ...trash.slice(10)];
+  const original = structuredClone(records), activeOrder = ['attention-new', 'attention-old', 'draft-new'];
+  const trashOrder = [...trash].reverse().map(item => item.id);
+  for (const input of [records, [...records].reverse(), [...records.slice(7), ...records.slice(0, 7)]]) {
+    const sorted = sortWorkflowBoard(input);
+    assert.deepEqual(sorted.filter(item => item.lifecycle !== 'trashed').map(item => item.id), activeOrder);
+    assert.deepEqual(sorted.filter(item => item.lifecycle === 'trashed').map(item => item.id), trashOrder);
+  }
+  setRecords(records); await ui.load();
+  assert.deepEqual(visibleLibraryIds(ui), activeOrder); assert.equal(ui.total.textContent, '3');
+  ui.selectLifecycle('trashed');
+  assert.deepEqual(Array.from(ui.inactiveList.children).filter(card => !card.hidden).map(card => card.dataset.workflowId), trashOrder);
+  assert.deepEqual(records, original); assert.deepEqual(calls, ['/api/workflow-library?lifecycle=all']);
 });

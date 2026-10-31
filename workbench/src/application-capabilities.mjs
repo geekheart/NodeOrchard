@@ -59,6 +59,7 @@ export const APPLICATION_ASSISTANT_TOOLS = Object.freeze([
 const INSPECTION_NAMES = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read']);
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const FEATURES = [
+  { id: 'workflow-board', status: 'ui-only', inspect: 'workflows.list', tools: [], note: '统一自适应工作流库，状态是属性；支持需处理优先、最近更新/名称排序及状态筛选，待审/待人工归需处理。活动数量不含回收站，零定时隐藏；浏览/筛选/排序不写流程或改写运行，助手仍用workflows.list读真实记录。配置就绪不代表外部依赖已验证。' },
   { id: 'maintenance', status: 'available', roles: ['supervisor'], tools: ['maintenance.task', 'maintenance.experiment'], note: '维护目标与证据持久保存；受控隔离节点复现、源码只读相关测试及日志产物回读不取得源码写权。沙箱不可用明确停止；需要改源码时请求人工开关，原工作流不自动修改或重跑。' },
   { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按基础PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；代码worker按次补私有命令入口，现有PATH优先，不改系统环境或节点代码。版本探测与静态检查不运行业务，不证明转换或渲染成功。' },
   { id: 'workflow-diagnostic-escalation', status: 'available', roles: ['workflow'], tools: ['conversation.escalate', 'conversation.escalation'], note: '独立会话在用户本轮排错请求下按来源轮次升级为总控只读诊断，可在原聊天读取进度与结论。受总控人工读取权限约束；每来源至多启动一次，停止或重启不重放，不转移写权限，不自动修改或运行工作流。' },

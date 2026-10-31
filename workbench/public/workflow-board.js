@@ -2,8 +2,8 @@ import { PendingNoticeDismissals, requestNoticeKey } from './pending-notice-dism
 
 const GROUPS = [
   { id: 'draft', title: '待完善', hint: '补齐节点与配置' },
-  { id: 'ready', title: '可运行', hint: '已具备执行条件' },
-  { id: 'running', title: '运行中', hint: '执行或学习正在进行' },
+  { id: 'ready', title: '配置就绪', hint: '结构与配置检查通过' },
+  { id: 'running', title: '进行中', hint: '执行或学习正在进行' },
   { id: 'attention', title: '需处理', hint: '检查异常或人工请求' },
 ];
 const STATES = new Set(GROUPS.map(item => item.id));
@@ -22,7 +22,7 @@ export function workflowLifecycle(summary) { return summary?.lifecycle === undef
 export function workflowLifecycleActions(summary) { const value = workflowLifecycle(summary); return value === 'active' ? ['trash'] : value === 'trashed' ? ['restore', 'purge'] : []; }
 function busyWorkflow(summary) { return summary?.state === 'running' || ACTIVE_RUNS.has(summary?.latestRun?.status) || ACTIVE_LEARNING.has(summary?.latestLearning?.status); }
 const RUN = { queued: '排队中', waiting_review: '待审核', preparing: '准备中', running: '运行中', waiting: '等待人工处理', complete: '已完成', error: '失败', interrupted: '已停止', unknown: '状态待确认' };
-const LEARNING = { running: '学习中', waiting: '等待人工处理', complete: '本次达标', exhausted: '未达目标', interrupted: '已停止', unknown: '状态待确认', error: '失败' };
+const LEARNING = { queued: '排队中', preparing: '准备中', waiting_review: '待审核', running: '学习中', waiting: '等待人工处理', complete: '本次达标', exhausted: '未达目标', interrupted: '已停止', unknown: '状态待确认', error: '失败' };
 const clean = value => String(value ?? '').replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[已隐藏密钥]').replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [已隐藏]').replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|authorization)["']?\s*[:=]\s*["']?)([^\s"',;}\]]+)/gi, '$1[已隐藏]');
 const element = (tag, className = '', value) => { const item = document.createElement(tag); if (className) item.className = className; if (value !== undefined) item.textContent = clean(value); return item; };
 const button = (label, action, className = 'button') => { const item = element('button', className, label); item.type = 'button'; item.addEventListener('click', action); return item; };
@@ -35,9 +35,18 @@ function time(value) { if (!value) return ''; const date = new Date(value); if (
 function count(value, label) { return Number.isInteger(value) && value >= 0 ? `${value} ${label}` : `${label}未采集`; }
 
 export function workflowBoardState(summary) { return STATES.has(summary?.state) ? summary.state : 'attention'; }
+const manualWait = summary => [summary?.latestRun, summary?.latestLearning].some(item => ['waiting_review', 'waiting'].includes(item?.status));
+export function workflowBoardDisplayState(summary) { return manualWait(summary) ? 'attention' : workflowBoardState(summary); }
+export function sortWorkflowBoard(workflows, order = 'priority') {
+  const stamp = item => { const value = workflowLifecycle(item) === 'trashed' ? item.trashedAt || item.archivedAt : item.updatedAt; return Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0; };
+  const rank = item => ({ attention: 0, running: 1 })[workflowBoardDisplayState(item)] ?? 2;
+  const lifecycleRank = item => ({ active: 0, trashed: 1 })[workflowLifecycle(item)] ?? 2;
+  return [...workflows].sort((a, b) => lifecycleRank(a) - lifecycleRank(b) || (order === 'name' ? String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN', { numeric: true })
+    : (order === 'priority' && workflowLifecycle(a) === 'active' && workflowLifecycle(b) === 'active' ? rank(a) - rank(b) : 0) || stamp(b) - stamp(a)) || a.id.localeCompare(b.id));
+}
 export function filterWorkflowBoard(workflows, search = '', state = 'all') {
   const query = search.trim().toLocaleLowerCase();
-  return workflows.filter(item => (state === 'all' || workflowBoardState(item) === state) && (!query || `${item.title || ''} ${Array.isArray(item.skillNames) ? item.skillNames.join(' ') : ''}`.toLocaleLowerCase().includes(query)));
+  return workflows.filter(item => (state === 'all' || workflowBoardDisplayState(item) === state) && (!query || `${item.title || ''} ${Array.isArray(item.skillNames) ? item.skillNames.join(' ') : ''}`.toLocaleLowerCase().includes(query)));
 }
 function eventProjection(event) {
   const payload = event.payload || {};
@@ -52,7 +61,7 @@ function eventProjection(event) {
 export class WorkflowBoard {
   constructor(container, { api, onOpen, onCreate, getRequests = () => [], taskURL }) {
     this.container = container; this.api = api; this.onOpen = onOpen; this.onCreate = onCreate; this.getRequests = getRequests; this.taskURL = taskURL;
-    this.active = false; this.workflows = []; this.cards = new Map(); this.pendingCards = new Map(); this.columns = new Map(); this.projections = new Map();
+    this.active = false; this.workflows = []; this.cards = new Map(); this.pendingCards = new Map(); this.statusFilters = new Map(); this.projections = new Map();
     this.pendingNotices = new PendingNoticeDismissals('requests');
     this.lifecycle = 'active'; this.lifecycleTabs = new Map(); this.openMenu = null; this.dialog = null;
     this.loading = false; this.loaded = false; this.creating = false; this.opening = new Set(); this.eventRevision = 0; this.requestSequence = 0; this.reloadNeeded = false; this.reloadTimer = null; this.loadPromise = null;
@@ -74,7 +83,13 @@ export class WorkflowBoard {
     this.filterContext = element('div', 'wf-board-filter-context'); this.filterContext.hidden = true;
     this.filterHint = element('span', 'wf-board-filter-hint'); this.clearFilterButton = button('清除筛选', () => this.clearFilters(), 'button small wf-board-clear-filters'); this.clearFilterButton.title = '清空搜索和状态筛选，保留当前页签'; this.filterContext.append(this.filterHint, this.clearFilterButton);
     this.summary = element('p', 'wf-board-summary'); this.summary.setAttribute('role', 'status');
-    this.refreshButton = button('刷新', () => void this.load()); this.refreshButton.prepend(icon('refresh')); toolbar.append(searchLabel, filterLabel, this.filterContext, this.summary, this.refreshButton);
+    this.sort = element('select'); this.sort.setAttribute('aria-label', '工作流排序');
+    for (const [value, title] of [['priority', '优先处理'], ['recent', '最近更新'], ['name', '名称']]) { const option = element('option', '', title); option.value = value; this.sort.append(option); } this.sort.value = 'priority';
+    this.refreshButton = button('刷新', () => void this.load()); this.refreshButton.prepend(icon('refresh')); toolbar.append(searchLabel, filterLabel, this.filterContext, this.summary, this.sort, this.refreshButton);
+    this.statusBar = element('div', 'wf-board-status-filters'); this.statusBar.setAttribute('role', 'group'); this.statusBar.setAttribute('aria-label', '按工作流状态筛选');
+    for (const [id, title] of [['all', '全部'], ['attention', '需处理'], ['running', '进行中'], ['draft', '待完善'], ['ready', '配置就绪']]) {
+      const control = button('', () => { this.filter.value = id; this.closeMenu(false); this.render(); }, 'wf-board-status-filter'); const label = element('span', '', title), total = element('span', 'wf-board-filter-count', '—'); control.append(label, total); control.dataset.state = id; this.statusFilters.set(id, { button: control, count: total }); this.statusBar.append(control);
+    }
     this.notice = element('div', 'wf-board-notice'); this.notice.hidden = true; this.notice.setAttribute('role', 'status'); this.noticeText = element('span'); this.retryButton = button('重试', () => void this.load(), 'button small'); this.notice.append(this.noticeText, this.retryButton);
     this.pending = element('section', 'wf-board-pending'); this.pending.hidden = true; this.pending.setAttribute('aria-label', '待处理审批与澄清'); const pendingHeading = element('div', 'wf-board-pending-heading'); this.pendingTitle = element('h2', '', '待处理'); pendingHeading.append(element('span', 'wf-board-pending-dot'), this.pendingTitle); this.pendingList = element('div', 'wf-board-pending-list'); this.pending.append(pendingHeading, this.pendingList);
     this.pendingClose = button('×', () => { this.pendingNotices.hide((this.getRequests() || []).map(requestNoticeKey)); this.renderPending(); }, 'wf-board-notice-close');
@@ -82,16 +97,11 @@ export class WorkflowBoard {
     this.pendingRestore = button('', () => { this.pendingNotices.restore((this.getRequests() || []).map(requestNoticeKey)); this.renderPending(); }, 'wf-board-notice-restore');
     pendingHeading.append(this.pendingRestore, this.pendingClose);
     this.empty = element('section', 'wf-board-empty'); this.empty.hidden = true; this.emptyIcon = icon('workflow'); this.emptyTitle = element('h2'); this.emptyText = element('p'); this.emptyCreate = button('新建工作流', () => void this.create(), 'button primary'); this.emptyClear = button('清除搜索与筛选', () => this.clearFilters()); this.empty.append(this.emptyIcon, this.emptyTitle, this.emptyText, this.emptyCreate, this.emptyClear);
-    this.viewport = element('div', 'wf-board-viewport'); this.viewport.setAttribute('aria-label', '按实际状态分组的工作流'); this.columnGrid = element('div', 'wf-board-columns');
-    for (const group of GROUPS) {
-      const column = element('section', 'wf-board-column'); column.dataset.state = group.id; column.setAttribute('aria-label', `${group.title}工作流`);
-      const heading = element('div', 'wf-board-column-heading'), title = element('h2', '', group.title), count = element('span', 'wf-board-column-count', '0'); heading.append(element('span', 'wf-board-state-dot'), title, count);
-      const hint = element('p', 'wf-board-column-hint', group.hint), list = element('div', 'wf-board-cards'), empty = element('p', 'wf-board-column-empty', '暂无工作流'); list.append(empty); column.append(heading, hint, list); this.columnGrid.append(column); this.columns.set(group.id, { column, count, list, empty });
-    }
-    this.inactiveList = element('div', 'wf-board-inactive-list'); this.inactiveList.hidden = true; this.viewport.append(this.columnGrid, this.inactiveList);
+    this.viewport = element('div', 'wf-board-viewport'); this.viewport.setAttribute('aria-label', '全部工作流');
+    this.libraryGrid = element('div', 'wf-board-library-grid'); this.inactiveList = element('div', 'wf-board-inactive-list'); this.inactiveList.hidden = true; this.viewport.append(this.libraryGrid, this.inactiveList);
     this.menu = element('div', 'wf-board-menu'); this.menu.setAttribute('role', 'menu'); this.menu.hidden = true;
-    this.root.append(header, this.tabs, this.pending, toolbar, this.notice, this.empty, this.viewport); this.container.replaceChildren(this.root); (document.body || this.root).append(this.menu);
-    this.search.addEventListener('input', () => { this.closeMenu(false); this.render(); }); this.filter.addEventListener('change', () => { this.closeMenu(false); this.render(); });
+    this.root.append(header, this.tabs, this.pending, toolbar, this.statusBar, this.notice, this.empty, this.viewport); this.container.replaceChildren(this.root); (document.body || this.root).append(this.menu);
+    this.search.addEventListener('input', () => { this.closeMenu(false); this.render(); }); this.filter.addEventListener('change', () => { this.closeMenu(false); this.render(); }); this.sort.addEventListener('change', () => { this.closeMenu(false); this.render(); });
     this.root.addEventListener('click', event => { if (this.openMenu && !this.menu.contains(event.target) && !this.openMenu.trigger.contains(event.target)) this.closeMenu(false); });
     this.root.addEventListener('keydown', event => { if (event.key === 'Escape' && this.openMenu && !this.dialog) { event.preventDefault?.(); this.closeMenu(); } });
     this.viewport.addEventListener('scroll', () => this.closeMenu(false), true);
@@ -136,8 +146,8 @@ export class WorkflowBoard {
     this.renderControls(); this.renderPending();
     const lifecycle = LIFECYCLES.find(item => item.id === this.lifecycle), records = this.workflows.filter(item => workflowLifecycle(item) === this.lifecycle);
     const state = this.lifecycle === 'active' ? this.filter.value || 'all' : 'all', filtered = filterWorkflowBoard(records, this.search.value, state), visible = new Set(filtered.map(item => item.id)), allIds = new Set(this.workflows.map(item => item.id));
-    this.total.textContent = this.loaded ? String(this.workflows.length) : '—'; this.total.title = '全部工作流，包含回收站';
-    this.summary.textContent = !this.loaded ? this.loading ? '正在读取…' : '尚未读取' : `${lifecycle.title}中 ${filtered.length} / ${records.length} 个 · 全部 ${this.workflows.length} 个`;
+    this.total.textContent = this.loaded ? String(this.workflows.filter(item => workflowLifecycle(item) === 'active').length) : '—'; this.total.title = '工作流数量，不含回收站';
+    this.summary.textContent = !this.loaded ? this.loading ? '正在读取…' : '尚未读取' : filtered.length === records.length ? `${records.length} 个${lifecycle.title}` : `显示 ${filtered.length} / ${records.length}`;
     this.filterLabel.hidden = this.lifecycle !== 'active';
     const hasFilter = Boolean(this.search.value || this.filter.value !== 'all'), filters = [];
     if (this.search.value) filters.push(`搜索“${this.search.value}”`);
@@ -145,24 +155,25 @@ export class WorkflowBoard {
     this.filterContext.hidden = !hasFilter; this.clearFilterButton.hidden = !hasFilter; this.filterHint.textContent = clean(`当前筛选：${filters.join(' · ')}`); this.filterHint.title = this.filterHint.textContent;
     this.search.placeholder = `搜索${lifecycle.title}名称或 Skill`;
     for (const [id, row] of this.lifecycleTabs) { row.tab.setAttribute('aria-selected', String(id === this.lifecycle)); row.tab.tabIndex = id === this.lifecycle ? 0 : -1; row.total.textContent = this.loaded ? String(this.workflows.filter(item => workflowLifecycle(item) === id).length) : '—'; }
-    this.columnGrid.hidden = this.lifecycle !== 'active'; this.inactiveList.hidden = this.lifecycle === 'active'; this.columnGrid.classList.toggle('is-filtered', state !== 'all');
-    this.viewport.setAttribute('aria-label', this.lifecycle === 'active' ? '按实际状态分组的工作流' : `${lifecycle.title}工作流`);
+    this.libraryGrid.hidden = this.lifecycle !== 'active'; this.inactiveList.hidden = this.lifecycle === 'active'; this.statusBar.hidden = this.lifecycle !== 'active';
+    this.viewport.setAttribute('aria-label', this.lifecycle === 'active' ? '全部工作流' : '回收站工作流');
+    const searched = filterWorkflowBoard(records, this.search.value);
+    for (const [id, row] of this.statusFilters) { row.count.textContent = this.loaded ? String(id === 'all' ? searched.length : searched.filter(item => workflowBoardDisplayState(item) === id).length) : '—'; row.button.setAttribute('aria-pressed', String(state === id)); }
     for (const [id, row] of this.cards) if (!allIds.has(id)) { if (this.openMenu?.id === id) this.closeMenu(false); row.card.remove(); this.cards.delete(id); }
-    const sorted = [...this.workflows].sort((a, b) => String((workflowLifecycle(b) === 'trashed' ? b.trashedAt || b.archivedAt : b.updatedAt) || '').localeCompare(String((workflowLifecycle(a) === 'trashed' ? a.trashedAt || a.archivedAt : a.updatedAt) || '')) || a.id.localeCompare(b.id));
+    const sorted = sortWorkflowBoard(this.workflows, this.sort.value);
     for (const workflow of sorted) {
       let row = this.cards.get(workflow.id); if (!row) { row = this.createCard(workflow.id); this.cards.set(workflow.id, row); }
-      const parent = workflowLifecycle(workflow) === 'active' ? this.columns.get(workflowBoardState(workflow)).list : this.inactiveList;
+      const parent = workflowLifecycle(workflow) === 'active' ? this.libraryGrid : this.inactiveList;
       if (row.card.parentElement !== parent) { const focused = row.card.contains(document.activeElement), previous = document.activeElement; parent.append(row.card); if (focused) previous.focus({ preventScroll: true }); }
       row.card.hidden = !visible.has(workflow.id); this.updateCard(row, workflow);
     }
-    for (const [id, group] of this.columns) {
-      const count = filtered.filter(item => workflowBoardState(item) === id).length; group.count.textContent = this.loaded ? String(count) : '—'; group.empty.hidden = count > 0; group.empty.textContent = !this.loaded ? this.loading ? '正在读取…' : '尚未读取' : '暂无工作流'; group.column.hidden = state !== 'all' && state !== id;
-      for (const [index, workflow] of sorted.filter(item => workflowLifecycle(item) === 'active' && workflowBoardState(item) === id).entries()) {
-        const card = this.cards.get(workflow.id).card, before = group.list.children[index + 1] || null;
-        if (before !== card) { const focused = card.contains(document.activeElement), previous = document.activeElement; group.list.insertBefore(card, before); if (focused) previous.focus({ preventScroll: true }); }
+    for (const value of ['active', 'trashed']) {
+      const parent = value === 'active' ? this.libraryGrid : this.inactiveList;
+      for (const [index, workflow] of sorted.filter(item => workflowLifecycle(item) === value).entries()) {
+        const card = this.cards.get(workflow.id).card, before = parent.children[index] || null;
+        if (before !== card) { const focused = card.contains(document.activeElement), previous = document.activeElement; parent.insertBefore(card, before); if (focused) previous.focus({ preventScroll: true }); }
       }
     }
-    for (const [index, workflow] of sorted.filter(item => workflowLifecycle(item) !== 'active').entries()) { const card = this.cards.get(workflow.id).card, before = this.inactiveList.children[index] || null; if (before !== card) { const focused = card.contains(document.activeElement), previous = document.activeElement; this.inactiveList.insertBefore(card, before); if (focused) previous.focus({ preventScroll: true }); } }
     const empty = this.loaded && !filtered.length; this.empty.hidden = !empty; this.viewport.hidden = empty;
     this.emptyTitle.textContent = records.length ? '没有匹配的工作流' : this.lifecycle === 'active' ? '暂无工作流' : '回收站为空';
     this.emptyText.textContent = ''; this.emptyText.hidden = true;
@@ -171,31 +182,33 @@ export class WorkflowBoard {
   createCard(id) {
     const card = element('article', 'wf-board-card'); card.dataset.workflowId = id;
     const openButton = button('', () => void this.open(id), 'wf-board-card-open');
-    const heading = element('span', 'wf-board-card-heading'), title = element('span', 'wf-board-card-title'), mode = element('span', 'wf-board-card-mode'); heading.append(title, mode);
+    const heading = element('span', 'wf-board-card-heading'), title = element('span', 'wf-board-card-title'), mode = element('span', 'wf-board-card-mode'), status = element('span', 'wf-board-card-status'); heading.append(title); const labels = element('span', 'wf-board-card-labels'); labels.append(mode, status);
     const structure = element('span', 'wf-board-card-structure'), skills = element('span', 'wf-board-card-skills'), run = element('span', 'wf-board-card-history'), learning = element('span', 'wf-board-card-history'), reason = element('span', 'wf-board-card-reason');
     const timing = element('span', 'wf-board-card-schedule'); timing.append(icon('clock')); const timingText = element('span'); timing.append(timingText);
-    const footer = element('span', 'wf-board-card-footer'), updated = element('span'), open = element('span', '', '打开编辑器 →'); footer.append(updated, open); openButton.append(heading, structure, skills, run, learning, reason, timing, footer);
+    const footer = element('span', 'wf-board-card-footer'), updated = element('span'), open = element('span', '', '打开编辑器 →'); footer.append(updated, open); openButton.append(heading, labels, structure, skills, run, learning, reason, timing, footer);
     const more = button('⋯', event => { event.stopPropagation?.(); this.toggleMenu(id); }, 'wf-board-card-more'); more.setAttribute('aria-haspopup', 'menu'); more.setAttribute('aria-expanded', 'false'); card.append(openButton, more);
-    return { card, openButton, more, title, mode, structure, skills, run, learning, reason, timingText, updated, open };
+    return { card, openButton, more, title, mode, status, structure, skills, run, learning, reason, timing, timingText, updated, open };
   }
   updateCard(row, workflow) {
-    const group = workflowBoardState(workflow), latest = workflow.latestRun, learning = workflow.latestLearning;
+    const group = workflowBoardDisplayState(workflow), latest = workflow.latestRun, learning = workflow.latestLearning;
     const activityTime = value => Math.max(...[value?.startedAt, value?.completedAt].map(at => Number.isFinite(Date.parse(at)) ? Date.parse(at) : 0));
     const recent = [latest, learning].filter(Boolean).sort((a, b) => activityTime(b) - activityTime(a))[0];
-    const lifecycle = workflowLifecycle(workflow); row.card.dataset.state = group; row.card.dataset.lifecycle = lifecycle;
+    const lifecycle = workflowLifecycle(workflow); row.card.dataset.state = group; row.card.dataset.serverState = workflowBoardState(workflow); row.card.dataset.lifecycle = lifecycle;
     row.card.disabled = row.openButton.disabled = this.opening.has(workflow.id); row.openButton.setAttribute('aria-label', clean(`打开工作流：${workflow.title} · ${GROUPS.find(item => item.id === group).title}`));
     row.more.setAttribute('aria-label', clean(`更多操作：${workflow.title}`)); row.more.disabled = !workflowLifecycleActions(workflow).length || Boolean(this.dialog?.pending);
-    row.open.textContent = lifecycle === 'active' ? '打开编辑器 →' : '查看工作流 →';
+    row.open.textContent = lifecycle === 'active' ? '打开 →' : '查看 →';
+    row.status.textContent = manualWait(workflow) ? [latest, learning].some(item => item?.status === 'waiting_review') ? '待审核' : '待人工处理' : GROUPS.find(item => item.id === group).title; row.status.dataset.state = group;
     row.title.textContent = clean(workflow.title || '未命名流程'); row.title.title = clean(workflow.title);
     row.mode.textContent = workflow.mode === 'learn' ? '学习' : workflow.mode === 'execute' ? '执行' : '模式待确认';
     row.structure.textContent = `${count(workflow.nodeCount, '个节点')} · ${count(workflow.edgeCount, '条连线')}`;
     row.skills.textContent = clean(Array.isArray(workflow.skillNames) ? workflow.skillNames.join(' · ') : ''); row.skills.hidden = !row.skills.textContent; row.skills.title = row.skills.textContent;
-    row.run.textContent = latest ? clean(`运行 · ${RUN[latest.status] || '状态待确认'}${time(latest.startedAt) ? ` · ${time(latest.startedAt)}` : ''}`) : '尚无运行记录'; row.run.dataset.status = latest?.status || 'idle';
+    row.run.textContent = latest ? clean(`上次运行 · ${RUN[latest.status] || '状态待确认'}${time(latest.startedAt) ? ` · ${time(latest.startedAt)}` : ''}`) : '尚未运行'; row.run.dataset.status = latest?.status || 'idle';
     row.learning.hidden = !learning; row.learning.textContent = learning ? clean(`学习 · ${LEARNING[learning.status] || '状态待确认'}${typeof learning.bestScore === 'number' ? ` · 最佳 ${learning.bestScore} 分` : ''}`) : ''; row.learning.dataset.status = learning?.status || 'idle';
-    const reason = group === 'draft' ? workflow.readiness?.error : group === 'attention' ? recent?.error || (recent?.status === 'waiting' ? '等待审批或澄清' : recent?.status === 'exhausted' ? '本次学习尚未达到目标' : !STATES.has(workflow.state) ? '摘要状态待确认，请刷新检查。' : '打开工作流查看执行与学习记录') : '';
+    const reason = manualWait(workflow) ? [latest, learning].some(item => item?.status === 'waiting_review') ? '有结果等待审核' : '等待审批或补充信息' : group === 'draft' ? workflow.readiness?.error : group === 'attention' ? recent?.error || (recent?.status === 'waiting' ? '等待审批或澄清' : recent?.status === 'exhausted' ? '本次学习尚未达到目标' : !STATES.has(workflow.state) ? '摘要状态待确认，请刷新检查。' : '打开工作流查看执行与学习记录') : '';
     row.reason.textContent = clean(reason || ''); row.reason.hidden = !reason; row.reason.title = row.reason.textContent;
     row.timingText.textContent = Number.isInteger(workflow.scheduleCount) ? workflow.scheduleCount ? `已启用定时 ${workflow.scheduleCount}${workflow.nextRunAt ? ` · 下次 ${time(workflow.nextRunAt)}` : ' · 暂无下次触发'}` : '暂无已启用定时任务' : '定时信息未采集';
     row.updated.textContent = lifecycle === 'trashed' ? `${time(workflow.trashedAt || workflow.archivedAt) || '时间未记录'} · 已在回收站` : time(workflow.updatedAt) ? `${time(workflow.updatedAt)} 更新` : '更新时间未记录';
+    row.timing.hidden = lifecycle !== 'active' || workflow.scheduleCount === 0;
     if (lifecycle !== 'active') row.timingText.textContent = '关联定时任务已停用；恢复后需手动启用';
   }
   toggleMenu(id) {

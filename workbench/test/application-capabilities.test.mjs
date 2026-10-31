@@ -162,6 +162,8 @@ test('capability tools and internal Skills are discoverable without inventing ex
   assert.deepEqual(interfaces.protocol.conversationIssues.resolutionCommands, ['这个问题解决了', '不用处理了']);
   assert.equal(interfaces.protocol.conversationIssues.resolutionRouting, 'local-command');
   assert.equal(interfaces.features.find(row => row.id === 'execution').status, 'ui-only');
+  const board = interfaces.features.find(row => row.id === 'workflow-board');
+  assert.equal(board.status, 'ui-only'); assert.equal(board.inspect, 'workflows.list'); assert.deepEqual(board.tools, []);
   const inspector = interfaces.features.find(row => row.id === 'workflow-property-inspector');
   assert.equal(inspector.status, 'ui-only'); assert.deepEqual(inspector.tools, []);
   const camera = interfaces.features.find(row => row.id === 'workflow-canvas-view');
