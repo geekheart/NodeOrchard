@@ -189,7 +189,7 @@ function renderShell() {
   const showApplicationChat = route.page === 'conversations' && Boolean(route.id);
   $('global-conversation-root').hidden = !showApplicationChat;
   if (showApplicationChat && state.bootstrapped) {
-    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, attachmentsClient: { api, binaryRequest }, useAttachmentAsInput, conversationId: route.id, getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
+    if (!applicationConversation) { applicationConversation = new ApplicationConversationUI($('global-conversation-root'), { api, attachmentsClient: { api, binaryRequest }, useAttachmentAsInput, conversationId: route.id, onNewConversation: id => conversationHub?.create({ replaceConversationId: id }), getBackend: () => state.backend, getPageDiagnostics: () => appDiagnosticClient.snapshot(), getShortcuts: activeShortcuts }); if (diagnosticCapture) applicationConversation.schedulePoll = () => {}; }
     if (applicationConversationSelection !== route.id) { applicationConversationSelection = route.id; void applicationConversation.selectConversation(route.id).catch(error => notify(`总控会话打开失败：${error.message}`, true)); }
   }
   renderSidebar();

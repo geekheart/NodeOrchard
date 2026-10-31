@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sanitizeDiagnosticText, sanitizeDiagnosticEvidence } from './app-diagnostics.mjs';
 import { conversationTurnGroups, projectConversationIssues } from '../shared/workflow/workflow-conversation-issues.mjs';
+import { conversationReferenceDigest } from './application-conversation-references.mjs';
 
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -13,8 +14,9 @@ const definition = (name, description, inputSchema, effect = 'read-only', roles 
 export const APPLICATION_CONVERSATION_HUB_TOOLS = Object.freeze([
   definition('conversations.list', '总控专用：按工作流读取独立会话目录和有界状态摘要，不合并各会话历史，不创建空会话。', schema({
     lifecycle: { enum: ['active', 'trashed', 'all'] }, search: { type: 'string', maxLength: 128 }, limit: { type: 'integer', minimum: 1, maximum: 200 } })),
-  definition('conversation.inspect', '总控专用：按需读取指定工作流独立会话的有界脱敏消息和待处理元数据；学习/反馈材料、业务代码与检查点不展开。', schema({
-    workflowId: string, limit: { type: 'integer', minimum: 1, maximum: 40 }, beforeTurnId: string }, ['workflowId'])),
+  definition('conversation.inspect', '总控读取工作流聊天：turnId精确读取，可绑定更新时间和sourceDigest；省略则分页。学习/反馈材料、业务代码及检查点不展开。', schema({
+    workflowId: string, limit: { type: 'integer', minimum: 1, maximum: 40 }, beforeTurnId: string, turnId: string,
+    expectedUpdatedAt: { type: 'string', maxLength: 40 }, sourceDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }, ['workflowId'])),
   definition('conversation.delegate', '总控专用：依据本轮人工明确委派，向指定工作流助手派发只读诊断；返回消息身份和进度，不等待模型，不应用、运行、审核或学习。重复 operationId 读回原任务，不重发。', schema({
     workflowId: string, expectedRevision: { type: 'integer', minimum: 1 }, request: { type: 'string', maxLength: 8000 }, operationId: string },
   ['workflowId', 'expectedRevision', 'request', 'operationId']), 'mutation'),
@@ -129,9 +131,24 @@ export class ApplicationConversationHub {
     return { workflows, total: source.length, truncated: source.length > max };
   }
   read(args) {
-    plain(args, ['workflowId', 'limit', 'beforeTurnId']);
+    plain(args, ['workflowId', 'limit', 'beforeTurnId', 'turnId', 'expectedUpdatedAt', 'sourceDigest']);
     if (!identifier(args.workflowId)) fail('工作流 ID 无效。');
     const record = this.app.workflowLibrary.get(args.workflowId), max = limit(args.limit, 20, 40);
+    if (args.turnId !== undefined) {
+      if (!identifier(args.turnId) || args.beforeTurnId !== undefined || args.limit !== undefined
+        || args.expectedUpdatedAt !== undefined && (typeof args.expectedUpdatedAt !== 'string' || args.expectedUpdatedAt.length > 40 || !Number.isFinite(Date.parse(args.expectedUpdatedAt)))
+        || args.sourceDigest !== undefined && (typeof args.sourceDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(args.sourceDigest))) fail('精确消息引用参数无效，不能与分页混用。');
+      const row = this.db.prepare('SELECT value FROM workflow_conversation_turns WHERE workflow_id=? AND id=?').get(args.workflowId, args.turnId);
+      if (!row) fail('此工作流没有对应的引用消息。', 404);
+      const raw = JSON.parse(row.value);
+      if (raw.id !== args.turnId || raw.workflowId !== args.workflowId) fail('引用消息归属不一致。', 409);
+      const turn = turnView(this.project(args.workflowId, [raw])[0], record.document, this.app), sourceDigest = conversationReferenceDigest(turn);
+      if (args.expectedUpdatedAt !== undefined && turn.updatedAt !== args.expectedUpdatedAt || args.sourceDigest !== undefined && sourceDigest !== args.sourceDigest) fail('引用消息已变化，请重新选择或读取当前版本。', 409);
+      return sanitizeDiagnosticEvidence({ workflowId: record.id, title: bounded(record.document.title, 240), lifecycle: record.lifecycle,
+        workflowRevision: record.revision, revision: this.db.prepare('SELECT revision FROM workflow_conversations WHERE workflow_id=?').get(record.id)?.revision || 0,
+        turns: [turn], sourceDigest, pending: [], hasMore: false, nextBeforeTurnId: null, exact: true, operationsIncluded: false, learningEvidenceIncluded: false });
+    }
+    if (args.expectedUpdatedAt !== undefined || args.sourceDigest !== undefined) fail('版本约束需要精确消息身份。');
     let before;
     if (args.beforeTurnId !== undefined) {
       if (!identifier(args.beforeTurnId)) fail('会话翻页身份无效。');

@@ -4,7 +4,7 @@ import { ApplicationConversationUI } from '../public/application-conversation-ui
 
 const deferred = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const snapshot = (id, revision = 1, { title = id, turns = [] } = {}) => ({ conversation: { workflowId: id, title, revision, turns }, pending: [] });
+const snapshot = (id, revision = 1, { title = id, turns = [], ...metadata } = {}) => ({ conversation: { workflowId: id, title, revision, turns, ...metadata }, pending: [] });
 
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.attributes = {}; this.value = ''; this.textContent = ''; }
@@ -31,12 +31,12 @@ class Harness extends ApplicationConversationUI {
   schedulePoll() {}
 }
 
-function fixture(t, api, conversationId = 'supervisor-a') {
+function fixture(t, api, conversationId = 'supervisor-a', options = {}) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'document'), storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: tag => new Element(tag) } });
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem() {} } });
   t.after(() => { previous ? Object.defineProperty(globalThis, 'document', previous) : delete globalThis.document; storage ? Object.defineProperty(globalThis, 'localStorage', storage) : delete globalThis.localStorage; });
-  return new Harness(new Element('div'), { api, conversationId });
+  return new Harness(new Element('div'), { api, conversationId, ...options });
 }
 
 test('constructing a specific supervisor topic reads that case without first loading legacy history', async t => {
@@ -108,4 +108,77 @@ test('legacy history keeps its explicit case identity and invalid case ids canno
   await flush(); assert.deepEqual(calls, ['/api/app-assistant/conversations/global-application']);
   for (const id of ['../other', '', 'id?query=1', 'id/turns', null]) await assert.rejects(ui.selectConversation(id), /编号无效/);
   assert.equal(calls.length, 1); assert.equal(ui.workflowId, 'global-application');
+});
+
+
+test('archived and source-bound read-only supervisor metadata locks sends and proposal application', async t => {
+  const calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return snapshot('supervisor-a', 1, { lifecycle: 'archived', lifecycleRevision: 1 }); });
+  await flush(); assert.equal(ui.editor.libraryReadOnly, true); ui.state().draft = '不能在旧会话写入'; await ui.send();
+  const view = ui.proposalView({ id: 'old-proposal', status: 'proposed', assistant: { operations: [{ op: 'remove-node', nodeId: 'node' }] } });
+  assert.equal(view.children.find(item => item.tagName === 'button').disabled, true); assert.equal(calls.some(call => call.options), false);
+  ui.accept(snapshot('supervisor-a', 1, { lifecycle: 'active', lifecycleRevision: 2, readOnly: true })); assert.equal(ui.editor.libraryReadOnly, true);
+  await ui.send(); assert.equal(calls.some(call => call.options), false);
+  ui.accept(snapshot('supervisor-a', 1, { lifecycle: 'active', lifecycleRevision: 3, readOnly: false })); assert.equal(ui.editor.libraryReadOnly, false);
+});
+
+test('an older lifecycle snapshot cannot revive an archived topic or overwrite its title and draft', async t => {
+  const ui = fixture(t, async () => snapshot('supervisor-a', 1)); await flush(); ui.state().draft = '保留的草稿';
+  ui.accept(snapshot('supervisor-a', 1, { title: '归档记录', lifecycle: 'archived', lifecycleRevision: 4 }));
+  const accepted = ui.accept(snapshot('supervisor-a', 9999, { title: '迟到的旧标题', lifecycle: 'active', lifecycleRevision: 3 }));
+  assert.equal(accepted, false); assert.equal(ui.editor.libraryReadOnly, true); assert.equal(ui.editor.doc.title, '归档记录'); assert.equal(ui.state().draft, '保留的草稿');
+});
+
+test('cached topic switches restore each topic read-only state without leaking the previous lock', async t => {
+  const ui = fixture(t, async path => snapshot(path.split('/').at(-1), 1, { lifecycle: path.endsWith('supervisor-a') ? 'archived' : 'active', lifecycleRevision: 1 }));
+  await flush(); assert.equal(ui.editor.libraryReadOnly, true);
+  await ui.selectConversation('supervisor-b'); assert.equal(ui.editor.libraryReadOnly, false);
+  await ui.selectConversation('supervisor-a'); assert.equal(ui.editor.libraryReadOnly, true, 'cached archived topic must remain locked');
+  await ui.selectConversation('supervisor-b'); assert.equal(ui.editor.libraryReadOnly, false, 'cached active topic must unlock');
+});
+
+test('lifecycle events only refresh current topic metadata through GET without writing messages or settings', async t => {
+  const calls = []; let archived = false;
+  const ui = fixture(t, async (path, options) => { calls.push({ path, options }); return snapshot('supervisor-a', 1, { lifecycle: archived ? 'archived' : 'active', lifecycleRevision: archived ? 1 : 0 }); });
+  await flush(); archived = true; ui.onEvent({ type: 'application.conversations.updated', payload: { conversationId: 'supervisor-a' } }); await flush();
+  assert.equal(calls.length, 2); assert(calls.every(call => call.path === '/api/app-assistant/conversations/supervisor-a' && call.options === undefined)); assert.equal(ui.editor.libraryReadOnly, true);
+  ui.onEvent({ type: 'application.conversations.updated', payload: { conversationId: 'supervisor-foreign' } }); await flush(); assert.equal(calls.length, 2);
+});
+
+test('an archival event during a pending GET schedules a fresh read after the old active snapshot returns', async t => {
+  const first = deferred(), calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return calls.length === 1 ? first.promise : snapshot('supervisor-a', 1, { lifecycle: 'archived', lifecycleRevision: 1 }); });
+  ui.onEvent({ type: 'application.conversations.updated', payload: { conversationId: 'supervisor-a', lifecycle: 'archived', lifecycleRevision: 1 } });
+  first.resolve(snapshot('supervisor-a', 1, { lifecycle: 'active', lifecycleRevision: 0 })); await flush(); await flush();
+  assert.equal(calls.length, 2); assert.equal(ui.state().conversation.lifecycle, 'archived'); assert.equal(ui.editor.libraryReadOnly, true);
+});
+
+test('the new-conversation button invokes the owning page callback with the currently selected topic', async t => {
+  const opened = [], ui = fixture(t, async path => snapshot(path.split('/').at(-1)), 'supervisor-a', { onNewConversation: id => opened.push(id) });
+  await flush(); assert.equal(ui.newConversationButton.textContent, '新会话'); ui.newConversationButton.listeners.click();
+  await ui.selectConversation('supervisor-b'); ui.newConversationButton.listeners.click();
+  ui.newConversationButton.disabled = true; ui.newConversationButton.listeners.click(); assert.deepEqual(opened, ['supervisor-a', 'supervisor-b']);
+});
+
+test('an archived cached topic is already locked when selected before its forced verification GET resolves', async t => {
+  const pending = deferred(), calls = []; let firstA = true;
+  const ui = fixture(t, async (path, options) => {
+    calls.push({ path, options });
+    if (path.endsWith('supervisor-a')) { if (firstA) { firstA = false; return snapshot('supervisor-a', 1, { lifecycle: 'active', lifecycleRevision: 0 }); } return pending.promise; }
+    return snapshot('supervisor-b', 1, { lifecycle: 'active', lifecycleRevision: 0 });
+  });
+  await flush(); await ui.selectConversation('supervisor-b');
+  ui.onEvent({ type: 'application.conversations.updated', payload: { conversationId: 'supervisor-a', lifecycle: 'archived', lifecycleRevision: 1, readOnly: false } });
+  assert.equal(ui.workflowId, 'supervisor-b'); assert.equal(ui.editor.libraryReadOnly, false); assert.equal(ui.state('supervisor-a').conversation.lifecycle, 'archived');
+  const switching = ui.selectConversation('supervisor-a');
+  assert.equal(ui.editor.libraryReadOnly, true); assert.equal(ui.state().conversation.lifecycleRevision, 1);
+  ui.state().draft = '归档后不能发送'; await ui.send(); assert.equal(calls.some(call => call.options), false);
+  pending.resolve(snapshot('supervisor-a', 1, { lifecycle: 'archived', lifecycleRevision: 1 })); await switching;
+  assert.equal(ui.editor.libraryReadOnly, true); assert.equal(calls.filter(call => call.path.endsWith('supervisor-a')).length, 2);
+});
+
+test('an older archive SSE cannot overwrite the restored lifecycle revision or relock its composer', async t => {
+  const calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return snapshot('supervisor-a', 1, { lifecycle: 'active', lifecycleRevision: 0 }); });
+  await flush(); ui.accept(snapshot('supervisor-a', 1, { title: '已恢复的主题', lifecycle: 'active', lifecycleRevision: 4, readOnly: false })); ui.state().draft = '恢复后的草稿';
+  ui.onEvent({ type: 'application.conversations.updated', payload: { conversationId: 'supervisor-a', lifecycle: 'archived', lifecycleRevision: 3, readOnly: false } }); await flush();
+  assert.equal(ui.state().conversation.lifecycle, 'active'); assert.equal(ui.state().conversation.lifecycleRevision, 4); assert.equal(ui.editor.libraryReadOnly, false);
+  assert.equal(ui.editor.doc.title, '已恢复的主题'); assert.equal(ui.state().draft, '恢复后的草稿'); assert.equal(calls.length, 1, 'old events do not trigger redundant GETs');
 });

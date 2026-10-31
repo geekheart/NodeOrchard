@@ -43,7 +43,7 @@ test('directory activation reads existing conversations and prefers a recent top
 
 test('an empty directory does not create or open an empty legacy conversation on GET', async t => {
   const f = fixture(t, async () => ({ workflows: [], supervisors: [{ id: 'global-application', legacy: true, turnCount: 0 }] }));
-  await f.ui.activate({}); assert.deepEqual(f.opened, []); assert.match(contents(f.root), /先新建|新建/);
+  await f.ui.activate({}); assert.deepEqual(f.opened, []); assert.match(contents(f.root), /先新建|新建|新会话/);
 });
 
 test('a populated legacy history remains an available default when there are no new topics', async t => {
@@ -146,4 +146,90 @@ test('routing aliases project links to conversation management and mounts shared
   assert.match(app, /history\.replaceState\(null, '', '#\/conversations'\)/);
   assert.match(html, /data-nav="conversations" aria-label="对话管理"/);
   assert.doesNotMatch(html, /data-page="projects"/);
+});
+
+
+test('new conversation uses a default title and archives only the selected active supervisor with its lifecycle revision', async t => {
+  const records = data(); records.supervisors[0] = { ...records.supervisors[0], lifecycle: 'active', lifecycleRevision: 4 };
+  const writes = [], f = fixture(t, async (_path, options) => { if (!options) return records; writes.push(options.body); return { conversation: { id: 'supervisor-fresh' } }; });
+  await f.ui.activate({ id: 'supervisor-new' }); f.ui.titleInput.value = '   ';
+  await f.ui.create();
+  assert.equal(writes[0].title, '新会话'); assert.equal(writes[0].archiveConversationId, 'supervisor-new'); assert.equal(writes[0].expectedArchiveRevision, 4);
+  assert.equal(writes[0].document, undefined); assert.equal(writes[0].context, undefined); assert.equal(writes[0].runId, undefined);
+  assert.deepEqual(f.opened, ['supervisor-fresh']);
+});
+
+test('archived supervisors remain collapsed and readable without entering active counts or filters', async t => {
+  const records = data(); records.archivedSupervisors = [{ id: 'supervisor-old', title: '归档诊断', lifecycle: 'archived', lifecycleRevision: 3, turnCount: 12, lastMessage: '历史聊天仍保留' }];
+  const f = fixture(t, async () => records); await f.ui.activate({ id: 'supervisor-new' });
+  assert.equal(f.ui.archived.tagName, 'details'); assert.notEqual(f.ui.archived.open, true); assert.equal(f.ui.archivedSummary.textContent, '已归档会话 · 1');
+  assert.deepEqual(f.counts, [3]); assert.equal(f.ui.status.textContent, '1 个工作流独立会话 · 2 个总控主题');
+  assert.doesNotMatch(contents(f.ui.supervisorList), /归档诊断|历史聊天仍保留/); assert.match(contents(f.ui.archivedList), /归档诊断|历史聊天仍保留/);
+  const open = flatten(f.ui.archivedList).find(item => item.textContent === '归档诊断'); open.listeners.get('click')(); assert.equal(f.opened.at(-1), 'supervisor-old');
+  f.ui.filterInput.value = 'pending'; f.ui.filterInput.listeners.get('change')(); assert.match(contents(f.ui.archivedList), /归档诊断/);
+});
+
+test('restore sends the archived identity and revision and retries an uncertain result with the same operation', async t => {
+  const records = data(), row = { id: 'supervisor-old', title: '旧诊断', lifecycle: 'archived', lifecycleRevision: 7, turnCount: 2 };
+  records.archivedSupervisors = [row]; let failed = true; const calls = [];
+  const f = fixture(t, async (path, options) => { calls.push({ path, options }); if (!options) return records; if (failed) throw Error('连接中断'); records.archivedSupervisors = []; records.supervisors.push({ ...row, lifecycle: 'active', lifecycleRevision: 8 }); return { conversation: { ...row, lifecycle: 'active', lifecycleRevision: 8 } }; });
+  await f.ui.activate({ id: 'supervisor-new' }); await f.ui.changeLifecycle(row, 'restore'); failed = false;
+  await f.ui.changeLifecycle({ ...row, lifecycleRevision: 999 }, 'restore');
+  const writes = calls.filter(call => call.options); assert.equal(writes.length, 2);
+  assert.equal(writes[0].path, '/api/app-assistant/conversations/supervisor-old/lifecycle'); assert.deepEqual(writes[0].options.body, writes[1].options.body);
+  assert.equal(writes[0].options.body.action, 'restore'); assert.equal(writes[0].options.body.expectedRevision, 7); assert.match(writes[0].options.body.operationId, /^[A-Za-z0-9_-]+$/);
+  assert.equal(calls.filter(call => !call.options).length, 2); assert.equal(f.ui.lifecycleRetry, null);
+  assert.match(contents(f.ui.supervisorList), /旧诊断/); assert.doesNotMatch(contents(f.ui.archivedList), /旧诊断/); assert.equal(f.counts.at(-1), 4);
+});
+
+test('an uncertain new conversation keeps its full original payload when title and selection change before retry', async t => {
+  const records = data(); records.supervisors[0] = { ...records.supervisors[0], lifecycleRevision: 2 }; let failed = true;
+  const writes = [], f = fixture(t, async (_path, options) => { if (!options) return records; writes.push(options.body); if (failed) throw Error('ACK丢失'); return { conversation: { id: 'supervisor-acknowledged' } }; });
+  await f.ui.activate({ id: 'supervisor-new' }); f.ui.titleInput.value = '原待确认主题'; await f.ui.create();
+  f.ui.selected = 'global-application'; f.ui.titleInput.value = '用户后写的新主题'; failed = false; await f.ui.create();
+  assert.deepEqual(writes[1], writes[0], 'uncertain create must not switch title, predecessor, revision or id');
+  assert.equal(f.ui.titleInput.value, '用户后写的新主题', 'acknowledging the old request cannot consume a newer title draft');
+});
+
+test('a creation acknowledged after leaving the page cannot navigate away from the newer page', async t => {
+  let release; const pending = new Promise(resolve => { release = resolve; });
+  const f = fixture(t, async (_path, options) => options ? pending : data());
+  await f.ui.activate({ id: 'supervisor-new' }); const creating = f.ui.create(); f.ui.deactivate();
+  release({ conversation: { id: 'supervisor-late-created' } }); await creating;
+  assert.deepEqual(f.opened, []); assert.equal(f.ui.selected, 'supervisor-late-created');
+});
+
+test('a confirmed 409 create rejection refreshes metadata and waits for a new human click before using the new archive revision', async t => {
+  const records = data(); records.supervisors[0] = { ...records.supervisors[0], lifecycleRevision: 1 };
+  const calls = []; let rejected = true;
+  const f = fixture(t, async (path, options) => {
+    calls.push({ path, options }); if (!options) return structuredClone(records);
+    if (rejected) { rejected = false; records.supervisors[0].lifecycleRevision = 3; throw Object.assign(Error('旧会话版本已变化'), { httpStatus: 409 }); }
+    return { conversation: { id: 'supervisor-new-revision' } };
+  });
+  await f.ui.activate({ id: 'supervisor-new' }); f.ui.titleInput.value = '新的排查'; await f.ui.create();
+  assert.equal(calls.filter(call => call.options).length, 1, 'a rejection must not automatically create again');
+  assert.equal(calls.filter(call => !call.options).length, 2); assert.equal(f.ui.createRequest, null); assert.match(f.ui.status.textContent, /版本已变化/);
+  assert.equal(f.ui.titleInput.value, '新的排查'); assert.deepEqual(f.opened, []);
+  await f.ui.create(); const writes = calls.filter(call => call.options).map(call => call.options.body);
+  assert.equal(writes[0].expectedArchiveRevision, 1); assert.equal(writes[1].expectedArchiveRevision, 3);
+  assert.notEqual(writes[0].clientConversationId, writes[1].clientConversationId); assert.equal(writes[1].archiveConversationId, 'supervisor-new');
+});
+
+test('a confirmed restore CAS rejection refreshes the archived row and only the next human click creates a new operation', async t => {
+  const records = data(), row = { id: 'supervisor-stale', title: '旧现场', lifecycle: 'archived', lifecycleRevision: 1 };
+  records.archivedSupervisors = [row]; const calls = []; let rejected = true;
+  const f = fixture(t, async (path, options) => {
+    calls.push({ path, options }); if (!options) return structuredClone(records);
+    if (rejected) { rejected = false; records.archivedSupervisors = [{ ...row, lifecycleRevision: 3 }]; throw Object.assign(Error('总控会话版本已变化'), { httpStatus: 409 }); }
+    records.archivedSupervisors = []; records.supervisors.push({ ...row, lifecycle: 'active', lifecycleRevision: 4 });
+    return { conversation: { ...row, lifecycle: 'active', lifecycleRevision: 4 } };
+  });
+  await f.ui.activate({ id: 'supervisor-new' }); await f.ui.changeLifecycle(row, 'restore');
+  assert.equal(calls.filter(call => call.options).length, 1); assert.equal(calls.filter(call => !call.options).length, 2);
+  assert.equal(f.ui.lifecycleRetry, null); assert.match(f.ui.status.textContent, /版本已变化/);
+  await f.ui.changeLifecycle(f.ui.data.archivedSupervisors[0], 'restore');
+  const writes = calls.filter(call => call.options).map(call => call.options.body);
+  assert.equal(writes[0].expectedRevision, 1); assert.equal(writes[1].expectedRevision, 3); assert.notEqual(writes[0].operationId, writes[1].operationId);
+  assert.match(contents(f.ui.supervisorList), /旧现场/); assert.doesNotMatch(contents(f.ui.archivedList), /旧现场/);
 });

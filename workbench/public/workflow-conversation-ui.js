@@ -140,7 +140,7 @@ export class WorkflowConversationUI {
       this.toggle(true); this.render(); return this.sendArtifactRevision();
     }
     const state = this.state(); this.clearRetryTarget(state); state.draft = turn.user?.text || ''; state.intent = 'auto';
-    this.fileAttachments?.restore(turn.user?.attachments || [], state);
+    this.fileAttachments?.restore(turn.user?.attachments || [], state); this.restoreMessageExtras?.(turn, state);
     this.focusIssue(turn);
     if (canRetryConversationTurn(turn)) { state.retryOfTurnId = turn.id; state.retryTarget = { text: state.draft.trim(), context: contextKey(this.getContext()) }; }
     this.render(); this.input.focus();
@@ -453,6 +453,7 @@ export class WorkflowConversationUI {
     const section = element('section', 'wf-conversation-turn' + (latest ? ' is-latest' : '')); section.dataset.turnId = turn.id;
     const user = element('article', 'wf-conversation-message is-user'); user.append(element('div', 'wf-conversation-speaker', '你'), element('p', 'wf-conversation-prose', turn.user?.text || ''));
     if (turn.user?.attachments?.length && this.fileAttachments) user.append(this.fileAttachments.messageView(turn.user.attachments));
+    const extras = this.messageExtrasView?.(turn); if (extras) user.append(extras);
     const context = turn.user?.context || {}; const scope = element('p', 'wf-conversation-message-scope', this.describeContext(context).join(' / ')); user.append(scope); section.append(user);
     const assistant = element('article', 'wf-conversation-message is-assistant'), meta = element('div', 'wf-conversation-message-meta'); meta.append(element('span', 'wf-conversation-speaker', 'AI'), element('span', 'wf-conversation-turn-state', turnStatus(turn))); assistant.append(meta);
     const text = turn.assistant?.text || turn.error?.message || (typeof turn.error === 'string' ? turn.error : '') || (['thinking', 'queued'].includes(turn.status) ? '正在生成回复…' : '已记录'); assistant.append(element('p', 'wf-conversation-prose', text));
@@ -653,7 +654,7 @@ export class WorkflowConversationUI {
     }
     const context = retry?.context || clone(this.getContext()), retryOfTurnId = retry?.retryOfTurnId || (!retry ? this.retryTargetFor(text, context, state) : undefined),
       replyToTurnId = retry?.replyToTurnId || (!retry && !attachments.length ? this.issueReplyTargetFor(text, context, state) : undefined), focusedIssueId = state.issueReplyTarget?.turnId || null;
-    const request = retry || { text, intent: state.intent, context, page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID(), ...(attachments.length ? { attachments } : {}), ...(retryOfTurnId ? { retryOfTurnId } : {}), ...(replyToTurnId ? { replyToTurnId } : {}) }, messageEdit = state.messageEdit;
+    const request = retry || { text, intent: state.intent, context, ...(this.messageExtras?.(state) || {}), page: this.getPageDiagnostics?.() || {}, clientMessageId: crypto.randomUUID(), ...(attachments.length ? { attachments } : {}), ...(retryOfTurnId ? { retryOfTurnId } : {}), ...(replyToTurnId ? { replyToTurnId } : {}) }, messageEdit = state.messageEdit;
     if (!request.document) request.document = clone(this.currentDocument());
     if (!request.revisionRequest) this.fileAttachments?.trackRequest(state, request);
     state.sending = true; state.error = ''; state.retry = null; this.render();
@@ -662,7 +663,7 @@ export class WorkflowConversationUI {
       const snapshot = await this.api(`/api/workflow-conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { ...request, document } });
       if (generation !== this.documentGeneration || this.detachedWorkflows?.has(id)) return;
       const sameIssue = (state.issueReplyTarget?.turnId || null) === focusedIssueId; this.accept(snapshot, id);
-      this.fileAttachments?.consumeRequest(state, request);
+      this.fileAttachments?.consumeRequest(state, request); this.consumeMessageExtras?.(state, request);
       if (request.revisionRequest && state.revisionHandoff?.clientMessageId === request.clientMessageId) { state.revisionHandoff = null; state.revisionHandoffStatus = ''; }
       if (!request.revisionRequest && state.messageEdit === messageEdit && state.draft.trim() === text && (state.retryOfTurnId || null) === (request.retryOfTurnId || null) && sameIssue) { state.draft = ''; this.clearRetryTarget(state); }
       if (request.replyToTurnId && sameIssue && !canDismissConversationTurn(state.conversation.turns.find(turn => turn.id === request.replyToTurnId))) this.clearIssueTarget(state);

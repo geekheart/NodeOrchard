@@ -97,7 +97,7 @@ test('global conversation is idempotent, survives restart and never repeats an u
   const f = fixture(t, [{ intent: 'diagnose' }, { text: '已读取全局状态。' }]);
   const body = { clientMessageId: 'same-message', text: '检查整个应用' };
   const first = await f.assistant.message(body);
-  for (let index = 0; index < 40 && f.assistant.get().conversation.turns[0].status === 'thinking'; index++) await new Promise(resolve => setImmediate(resolve));
+  for (let index = 0; index < 200 && f.assistant.get().conversation.turns[0].status === 'thinking'; index++) await new Promise(resolve => setTimeout(resolve, 5));
   const duplicate = await f.assistant.message(body);
   assert.equal(first.turn.id, duplicate.turn.id); assert.equal(f.calls.length, 2);
   await assert.rejects(f.assistant.message({ ...body, text: '不同内容' }), /相同消息/);

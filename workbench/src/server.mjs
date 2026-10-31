@@ -108,17 +108,25 @@ export function createWorkbenchServer(config, application = new Application(conf
         if ([...requestURL.searchParams.keys()].some(key => !allowed.includes(key) || requestURL.searchParams.getAll(key).length !== 1)) return json(res, 400, { error: '会话目录查询参数无效。' });
         const args = Object.fromEntries(requestURL.searchParams);
         if (args.limit !== undefined) args.limit = Number(args.limit);
-        return json(res, 200, { ...application.applicationAssistant.hub.list({ lifecycle: 'active', ...args }), supervisors: application.applicationAssistant.listConversations() });
+        return json(res, 200, { ...application.applicationAssistant.hub.list({ lifecycle: 'active', ...args }), supervisors: application.applicationAssistant.listConversations(), archivedSupervisors: application.applicationAssistant.listConversations({ lifecycle: 'archived' }) });
+      }
+      if (req.method === 'GET' && path === '/api/app-assistant/references') {
+        const entries = [...requestURL.searchParams];
+        if (entries.some(([key]) => !['workflowId', 'beforeTurnId'].includes(key)) || new Set(entries.map(([key]) => key)).size !== entries.length) return json(res, 400, { error: '聊天引用筛选参数无效。' });
+        const owner = application.applicationAssistant, permissionScope = await owner.permissions.bind({ role: 'supervisor' });
+        const result = await owner.references.options(Object.fromEntries(entries), { permissionScope });
+        await owner.permissions.current(permissionScope); return json(res, 200, result);
       }
       if (path === '/api/app-assistant/conversations' && requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
       if (req.method === 'GET' && path === '/api/app-assistant/conversations') return json(res, 200, { supervisors: application.applicationAssistant.listConversations() });
       if (req.method === 'POST' && path === '/api/app-assistant/conversations') return json(res, 201, application.applicationAssistant.createConversation(await readJson(req, 4096)));
-      const supervisorConversation = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)(?:\/(messages|turns\/([A-Za-z0-9_-]+)\/action))?$/);
+      const supervisorConversation = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)(?:\/(messages|lifecycle|turns\/([A-Za-z0-9_-]+)\/action))?$/);
       if (supervisorConversation) {
         if (requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
         const [, id, operation, turnId] = supervisorConversation;
         if (req.method === 'GET' && !operation) return json(res, 200, application.applicationAssistant.get(id));
         if (req.method === 'POST' && operation === 'messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000), id));
+        if (req.method === 'POST' && operation === 'lifecycle') return json(res, 200, application.applicationAssistant.lifecycle.change(id, await readJson(req, 4096)));
         if (req.method === 'POST' && turnId) return json(res, 200, await application.applicationAssistant.action(turnId, await readJson(req, 4096), id));
       }
       if (req.method === 'POST' && path === '/api/app-assistant/messages') return json(res, 202, await application.applicationAssistant.message(await readJson(req, 100000)));
@@ -454,6 +462,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/app-diagnostic-client.js': ['app-diagnostic-client.js', 'text/javascript'],
         '/application-conversation-ui.js': ['application-conversation-ui.js', 'text/javascript'],
         '/maintenance-task-ui.js': ['maintenance-task-ui.js', 'text/javascript'],
+        '/conversation-references-ui.js': ['conversation-references-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
         '/source-repair-ui.js': ['source-repair-ui.js', 'text/javascript'],
         '/shortcut-settings-ui.js': ['shortcut-settings-ui.js', 'text/javascript'],

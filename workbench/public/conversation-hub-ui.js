@@ -40,13 +40,14 @@ export class ConversationHubUI {
     this.refreshButton = button('刷新目录', () => void this.refresh()); this.toolbar.append(search, this.filterInput, this.refreshButton);
     this.status = node('p', 'helper'); this.status.setAttribute('role', 'status'); this.status.setAttribute('aria-live', 'polite');
     this.supervisorSection = node('section', 'conversation-hub-section'); const supervisorHeading = node('div', 'section-heading'); supervisorHeading.append(node('h2', '', '总控会话'));
-    this.createForm = node('form', 'conversation-hub-create'); this.titleInput = node('input'); this.titleInput.maxLength = 120; this.titleInput.placeholder = '会话主题'; this.titleInput.setAttribute('aria-label', '总控会话主题'); this.titleInput.required = true;
-    this.createButton = node('button', 'button primary', '新建总控会话'); this.createButton.type = 'submit'; this.createForm.append(this.titleInput, this.createButton); this.createForm.addEventListener('submit', event => { event.preventDefault(); void this.create(); });
+    this.createForm = node('form', 'conversation-hub-create'); this.titleInput = node('input'); this.titleInput.maxLength = 120; this.titleInput.placeholder = '会话主题'; this.titleInput.setAttribute('aria-label', '总控会话主题'); this.titleInput.required = false;
+    this.createButton = node('button', 'button primary', '新会话'); this.createButton.type = 'submit'; this.createForm.append(this.titleInput, this.createButton); this.createForm.addEventListener('submit', event => { event.preventDefault(); void this.create(); });
     this.supervisorList = node('div', 'conversation-hub-list'); this.supervisorList.setAttribute('aria-label', '总控会话列表'); this.supervisorSection.append(supervisorHeading, this.createForm, this.supervisorList);
     this.workflowSection = node('section', 'conversation-hub-section'); const workflowHeading = node('div', 'section-heading'); workflowHeading.append(node('h2', '', '工作流独立会话'));
     this.workflowList = node('div', 'conversation-hub-list'); this.workflowList.setAttribute('aria-label', '工作流独立会话列表'); this.workflowSection.append(workflowHeading, this.workflowList);
     this.history = node('details', 'conversation-hub-history'); this.historySummary = node('summary', '', '历史任务'); this.historyList = node('div', 'conversation-hub-history-list'); this.history.append(this.historySummary, this.historyList);
-    this.root.replaceChildren(this.toolbar, this.status, this.supervisorSection, this.workflowSection, this.history);
+    this.archived = node('details', 'conversation-hub-history'); this.archivedSummary = node('summary', '', '已归档会话'); this.archivedList = node('div', 'conversation-hub-list'); this.archivedList.setAttribute('aria-label', '已归档总控会话'); this.archived.append(this.archivedSummary, this.archivedList);
+    this.root.replaceChildren(this.toolbar, this.status, this.supervisorSection, this.workflowSection, this.archived, this.history);
   }
   async activate(route = {}) { this.active = true; this.selected = route.id || null; this.render(); await this.refresh({ chooseDefault: !route.id }); }
   deactivate() { this.active = false; clearTimeout(this.timer); this.timer = null; }
@@ -65,19 +66,30 @@ export class ConversationHubUI {
     } catch (error) { this.error = `目录读取失败：${error.message}`; }
     finally { this.loading = false; this.render(); if (this.refreshAgain && this.active) { this.refreshAgain = false; void this.refresh(); } }
   }
-  async create() {
+  async create({ replaceConversationId = this.selected } = {}) {
     if (this.readOnly || this.creating) return;
-    const title = this.titleInput.value.trim(); if (!title || title.length > 120) return;
-    if (!this.createRequest || this.createRequest.title !== title) this.createRequest = { clientConversationId: crypto.randomUUID(), title };
+    const title = this.titleInput.value.trim() || '新会话'; if (title.length > 120) return;
+    if (!this.createRequest) {
+      const previous = this.data?.supervisors.find(item => item.id === replaceConversationId && visibleConversation(item));
+      this.createRequest = { clientConversationId: crypto.randomUUID(), title, ...(previous ? { archiveConversationId: previous.id, expectedArchiveRevision: previous.lifecycleRevision || 0 } : {}) };
+    }
     this.creating = true; this.error = ''; this.render();
     try {
       const result = await this.api('/api/app-assistant/conversations', { method: 'POST', body: { ...this.createRequest } });
       const id = result?.conversation?.id; if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) throw new Error('新会话身份未确认，请按原主题重试。');
-      this.titleInput.value = ''; this.createRequest = null; this.selected = id;
+      if ((this.titleInput.value.trim() || '新会话') === this.createRequest.title) this.titleInput.value = ''; this.createRequest = null; this.selected = id;
       if (this.active) this.openSupervisor(id);
       await this.refresh();
-    } catch (error) { this.error = `会话创建未确认：${error.message}`; }
+    } catch (error) { const rejected = [400, 401, 403, 404, 409].includes(error.httpStatus); if (rejected) { this.createRequest = null; await this.refresh(); } this.error = `${rejected ? '会话创建被拒绝' : '会话创建未确认'}：${error.message}`; }
     finally { this.creating = false; this.render(); }
+  }
+  async changeLifecycle(row, action) {
+    if (this.readOnly || this.lifecyclePending) return;
+    const request = this.lifecycleRetry?.id === row.id && this.lifecycleRetry.action === action ? this.lifecycleRetry : { id: row.id, action, operationId: crypto.randomUUID(), expectedRevision: row.lifecycleRevision || 0 };
+    this.lifecyclePending = true; this.error = ''; this.render();
+    try { await this.api(`/api/app-assistant/conversations/${encodeURIComponent(row.id)}/lifecycle`, { method: 'POST', body: { action: request.action, operationId: request.operationId, expectedRevision: request.expectedRevision } }); this.lifecycleRetry = null; await this.refresh(); }
+    catch (error) { const rejected = [400, 401, 403, 404, 409].includes(error.httpStatus); this.lifecycleRetry = rejected ? null : request; if (rejected) await this.refresh(); this.error = `${rejected ? '会话操作被拒绝' : '会话状态未确认'}：${error.message}`; }
+    finally { this.lifecyclePending = false; this.render(); }
   }
   onEvent(event) {
     if (!this.active || !/^(?:workflow\.|application\.conversation|application\.conversations)/.test(event?.type || '')) return;
@@ -96,6 +108,7 @@ export class ConversationHubUI {
     card.append(heading, meta);
     const message = excerpt(item.lastMessage); if (message) card.append(node('p', 'conversation-hub-excerpt', message));
     if (workflow) card.append(link(`#/workflows/${encodeURIComponent(row.workflowId)}`, '进入独立会话 →', 'conversation-hub-open'));
+    else { const action = row.lifecycle === 'archived' ? 'restore' : 'archive'; const control = button(action === 'restore' ? '恢复会话' : '归档会话', () => void this.changeLifecycle(row, action), 'wf-conversation-link'); control.disabled = this.readOnly || this.lifecyclePending || Boolean(row.active); card.append(control); }
     return card;
   }
   renderLists() {
@@ -103,6 +116,9 @@ export class ConversationHubUI {
     const supervisors = filterHubConversations(data.supervisors, options), workflows = filterHubConversations(data.workflows, options);
     this.supervisorList.replaceChildren(...(supervisors.length ? supervisors.map(row => this.card(row)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的总控会话。' : '暂无总控会话。' : '正在读取总控会话…')]));
     this.workflowList.replaceChildren(...(workflows.length ? workflows.map(row => this.card(row, true)) : [node('p', 'conversation-hub-empty', this.data ? this.query || this.filter !== 'all' ? '没有符合条件的工作流会话。' : '暂无工作流会话。' : '正在读取工作流会话…')]));
+    const archived = (data.archivedSupervisors || []).filter(row => !this.query || [row.title, row.lastMessage].some(value => String(value || '').toLocaleLowerCase().includes(this.query.toLocaleLowerCase())));
+    this.archivedSummary.textContent = `已归档会话 · ${(data.archivedSupervisors || []).length}`;
+    this.archivedList.replaceChildren(...(archived.length ? archived.map(row => this.card(row)) : [node('p', 'helper', '暂无已归档会话。')]));
     this.renderHistory();
   }
   renderHistory() {
@@ -114,7 +130,7 @@ export class ConversationHubUI {
   }
   render() {
     this.refreshButton.disabled = this.loading; this.refreshButton.textContent = this.loading ? '正在读取…' : '刷新目录';
-    this.titleInput.disabled = this.readOnly || this.creating; this.createButton.disabled = this.readOnly || this.creating; this.createButton.textContent = this.creating ? '创建中…' : '新建总控会话';
+    this.titleInput.disabled = this.readOnly || this.creating; this.createButton.disabled = this.readOnly || this.creating; this.createButton.textContent = this.creating ? '创建中…' : '新会话';
     this.status.textContent = this.error || (this.loading ? '正在同步会话目录…' : this.data ? `${this.data.workflows.length} 个工作流独立会话 · ${this.data.supervisors.length} 个总控主题` : '会话目录尚未读取。'); this.status.className = this.error ? 'error-text' : 'helper';
     this.renderLists();
   }

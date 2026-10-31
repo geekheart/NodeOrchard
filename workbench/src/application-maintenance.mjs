@@ -87,7 +87,7 @@ export class ApplicationMaintenance {
       ...(task.lastExperimentId ? { lastExperiment: this.experimentView(this.readExperiment(task.lastExperimentId)) } : {}),
       ...(task.permissionRequested ? { permissionRequest: { permission: 'supervisor.sourceRepair', enabled: sourceEnabled, settingsUrl: '#/settings',
         reason: clean(task.permissionReason || '此步骤需要修改工作台源码，当前没有源码写权限。', 600) } } : {}),
-      canContinue: flags.workflowRead === true && flags.appLogs === true && (['ready', 'waiting_continue', 'failed', 'candidate_verified', 'verified'].includes(task.status) || task.status === 'waiting_permission' && sourceEnabled),
+      canContinue: (!this.owner.lifecycle || this.owner.lifecycle.project(task.conversationId).lifecycle === 'active' && !this.owner.lifecycle.project(task.conversationId).readOnly) && flags.workflowRead === true && flags.appLogs === true && (['ready', 'waiting_continue', 'failed', 'candidate_verified', 'verified'].includes(task.status) || task.status === 'waiting_permission' && sourceEnabled),
       canStop: task.status !== 'stopped', originalWorkflowModified: false, originalWorkflowExecuted: false,
       evidenceCount: task.evidence?.length || 0, recentEvidence: (task.evidence || []).slice(-6).map(({ tool, status, at, finding }) => ({ tool, status, at, finding })),
       segment: task.segment || 1, createdAt: task.createdAt, updatedAt: task.updatedAt };
@@ -118,6 +118,7 @@ export class ApplicationMaintenance {
     const scope = await this.owner.permissions.current(context.permissionScope);
     if (scope.role !== 'supervisor' || !stop && (!scope.permissions.workflowRead || !scope.permissions.appLogs)) fail('当前总控没有维护读取权限。', 403);
     if (task) {
+      if (mutation && !stop) this.owner.lifecycle?.assertWritable(task.conversationId);
       if (scope.workflowBound && (!task.workflowId || task.workflowId !== scope.workflowId)) fail('此维护任务不属于来源工作流。', 403);
       if (task.workflowId) this.owner.permissions.workflow(task.workflowId, scope);
       if (mutation && context.sourceConversationId !== task.conversationId) fail('请在原总控主题继续该维护任务。', 403);
@@ -125,7 +126,8 @@ export class ApplicationMaintenance {
     }
     return scope;
   }
-  source(context) {
+  source(context, { allowArchived = false } = {}) {
+    if (!allowArchived) this.owner.lifecycle?.assertWritable(context.sourceConversationId);
     if (!identifier(context.sourceConversationId) || !identifier(context.diagnosticTurnId)) fail('维护操作缺少真实会话来源。', 403);
     const turn = this.owner.readTurn(context.diagnosticTurnId, context.sourceConversationId);
     if (turn.user?.intent !== 'diagnose' || context.maintenanceAuthorized !== true) fail('只有当前人工排错请求可启动或推进维护。', 403);
@@ -169,9 +171,9 @@ export class ApplicationMaintenance {
       this.db.prepare('INSERT INTO assistant_maintenance_tasks VALUES(?,?,?,?)').run(task.id, task.conversationId, source.id, JSON.stringify(task));
       this.emit(task); return { task: this.project(task) };
     }
-    const task = this.target(context, args.taskId); await this.scope(context, task, { mutation: args.action !== 'inspect' });
+    const task = this.target(context, args.taskId); await this.scope(context, task, { mutation: args.action !== 'inspect', stop: args.action === 'stop' });
     if (args.action === 'inspect') return { task: this.project(task) };
-    this.source(context);
+    this.source(context, { allowArchived: args.action === 'stop' });
     if (args.expectedRevision !== task.revision) fail('维护任务版本已变化，请先读取最新状态。', 409);
     if (args.action === 'stop') return { task: await this.stop(task.id, context.sourceConversationId) };
     if (args.action === 'bind-target') {

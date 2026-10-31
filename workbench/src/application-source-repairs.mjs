@@ -23,6 +23,7 @@ const PROTECTED = new Set([
   ...['application-maintenance', 'application-maintenance-reproduction'].flatMap(name => [`workbench/src/${name}.mjs`, `workbench/test/${name}.test.mjs`]),
   'workbench/public/maintenance-task-ui.js', 'workbench/test/maintenance-task-ui.test.mjs',
   'workbench/test/application-maintenance-http.test.mjs',
+  ...['application-conversation-lifecycle', 'application-conversation-references'].flatMap(name => [`workbench/src/${name}.mjs`, `workbench/test/${name}.test.mjs`]),
 ]);
 const own = (value, key) => Object.hasOwn(value, key);
 const hash = value => 'sha256:' + createHash('sha256').update(value).digest('hex');
