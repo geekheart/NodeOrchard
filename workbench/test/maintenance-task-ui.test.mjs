@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { authorizeSourceRepairMutation } from '../src/application-source-tools.mjs';
 import { renderMaintenanceTask } from '../public/maintenance-task-ui.js';
 import { ApplicationConversationUI } from '../public/application-conversation-ui.js';
 import { WorkflowConversationUI } from '../public/workflow-conversation-ui.js';
@@ -77,6 +78,7 @@ test('continue sends a new classified human message in the owning topic without 
   const post = calls.find(call => call.options?.method === 'POST');
   assert.equal(post.path, '/api/app-assistant/conversations/supervisor-a/messages');
   assert.deepEqual(post.options.body.context, { maintenanceTaskId: value.id }); assert.equal(post.options.body.intent, 'auto');
+  assert.doesNotThrow(() => authorizeSourceRepairMutation('app.source.patch', { role: 'supervisor', text: post.options.body.text }), 'explicit human continuation must satisfy the existing repair request gate after manual permission enablement');
   assert.match(post.options.body.clientMessageId, /^[A-Za-z0-9_-]+$/); assert.match(post.options.body.text, /仅在当前权限内推进，保留原工作流/);
   assert.equal(ui.state().draft, '保留这句未发送的话'); assert.deepEqual(ui.state().attachmentDrafts, [attachment]);
   assert.equal(post.options.body.attachments, undefined); assert.equal(calls.some(call => call.path.includes('assistant-permissions')), false);

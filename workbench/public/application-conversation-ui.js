@@ -64,7 +64,7 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
     if (state.sending || !state.loaded || this.editor.libraryReadOnly || state.conversation.turns.some(turn => ['thinking', 'queued'].includes(turn.status))) return false;
     const retry = state.retry?.context?.maintenanceTaskId === task.id ? state.retry : null;
     const request = retry || { clientMessageId: crypto.randomUUID(), intent: 'auto',
-      text: `继续维护并修复任务 ${task.id}；仅在当前权限内推进，保留原工作流`, context: { maintenanceTaskId: task.id }, page: this.getPageDiagnostics?.() || {} };
+      text: `继续修复维护任务 ${task.id}；仅在当前权限内推进，保留原工作流`, context: { maintenanceTaskId: task.id }, page: this.getPageDiagnostics?.() || {} };
     await this.send(request); return !state.retry;
   }
   async stopMaintenanceTask(value, turnId) {
