@@ -37,10 +37,13 @@ export async function prepareRuntimeLaunchers(baseEnv, { signal, platform = proc
       const home = join(directory, entry.id, 'home'), config = join(home, 'config'), cache = join(home, 'cache');
       await mkdir(config, { recursive: true, mode: 0o700 });
       await mkdir(cache, { recursive: true, mode: 0o700 });
+      const freecadTemp = join(home, 'tmp');
+      if (entry.id === 'freecad') await mkdir(freecadTemp, { mode: 0o700 });
       const source = entry.candidates.find(candidate => candidate.path === entry.selectedPath)?.source;
       if (!['path', 'macos-app'].includes(source)) throw fail('CODE_ENVIRONMENT', '软件命令来源未确认。');
       const content = '#!/bin/sh\n' + [['HOME', home], ['XDG_CONFIG_HOME', config], ['XDG_CACHE_HOME', cache],
-        ...(entry.id === 'freecad' ? [['QT_QPA_PLATFORM', 'offscreen']] : [])]
+        ...(entry.id === 'freecad' ? [['QT_QPA_PLATFORM', 'offscreen'], ['FREECAD_USER_HOME', home],
+          ['FREECAD_USER_DATA', config], ['FREECAD_USER_TEMP', freecadTemp]] : [])]
         .map(([key, value]) => 'export ' + key + '=' + quote(value)).join('\n')
         + '\nexec ' + quote(entry.selectedPath) + ' "$@"\n';
       for (const command of ALIASES[entry.id]) {

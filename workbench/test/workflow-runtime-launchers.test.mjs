@@ -19,7 +19,7 @@ async function fixture(t) {
 }
 async function fakeCli(path) {
   await mkdir(join(path, '..'), { recursive: true });
-  await writeFile(path, '#!' + process.execPath + '\nconsole.log(JSON.stringify({args:process.argv.slice(2),script:process.argv[1],home:process.env.HOME,config:process.env.XDG_CONFIG_HOME,cache:process.env.XDG_CACHE_HOME,qt:process.env.QT_QPA_PLATFORM??null,secret:process.env.RUNTIME_LAUNCHER_PRIVATE_SECRET??null}));\n');
+  await writeFile(path, '#!' + process.execPath + '\nconsole.log(JSON.stringify({args:process.argv.slice(2),script:process.argv[1],home:process.env.HOME,config:process.env.XDG_CONFIG_HOME,cache:process.env.XDG_CACHE_HOME,qt:process.env.QT_QPA_PLATFORM??null,freecadHome:process.env.FREECAD_USER_HOME,freecadData:process.env.FREECAD_USER_DATA,freecadTemp:process.env.FREECAD_USER_TEMP,secret:process.env.RUNTIME_LAUNCHER_PRIVATE_SECRET??null}));\n');
   await chmod(path, 0o700); return path;
 }
 
@@ -62,6 +62,8 @@ test('FreeCADCmd fallback has a private offscreen profile while absence and othe
   try {
     const result = JSON.parse((await execute('FreeCADCmd', ['--version'], { env: lease.env })).stdout);
     assert.equal(result.qt, 'offscreen'); assert.ok(result.home.startsWith(lease.directory));
+    assert.equal(result.freecadHome, result.home); assert.equal(result.freecadData, result.config);
+    assert.ok(result.freecadTemp.startsWith(lease.directory)); assert.equal((await stat(result.freecadTemp)).isDirectory(), true);
   } finally { await lease.cleanup(); }
   const plain = await prepareRuntimeLaunchers({ PATH: f.path }, { ...f.options, platform: 'linux' });
   assert.equal(plain.directory, null); assert.deepEqual(plain.env, { PATH: f.path });
