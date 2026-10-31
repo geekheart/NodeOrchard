@@ -198,7 +198,7 @@ function controller(client, route = { page: 'workflows', id: 'target' }, editorS
   const calls = { activate: 0, runtime: 0, render: 0 }, editor = { ...editorState, activate: () => calls.activate++, runtime: { activate: async () => calls.runtime++ } };
   const location = { hash: route.id ? `#/workflows/${route.id}` : '#/workflows' };
   const dependencies = {
-    state, workflowLibraryClient: client, workflowEditor: editor, ensureWorkflowEditor() {},
+    state, workflowLibraryClient: client, workflowEditor: editor, pendingAttachmentInput: null, ensureWorkflowEditor() {},
     renderShell: () => calls.render++, $: id => nodes.get(id),
     element: (tag, className, textContent) => ({ tag, className, textContent }),
     button: (textContent, onclick) => ({ tag: 'button', textContent, onclick }),

@@ -592,34 +592,30 @@ async function loadSkillDetail(name) {
 async function loadStatistics(force = false) { const days = $('statistics-period').value; if (state.statsPending.has(days) || state.stats.has(days) && !force) return; state.statsPending.add(days); renderStatistics(); try { state.stats.set(days, await api(`/api/statistics?days=${days}`)); } catch (error) { state.stats.set(days, { error: error.message }); } finally { state.statsPending.delete(days); if (state.route.page === 'statistics') renderStatistics(); } }
 async function loadRouteData() {
   const load = ++routeLoad, route = { ...state.route };
-  if (route.page === 'board' || route.page === 'workflows') {
+  if (route.page === 'board') { ensureWorkflowBoard(); await workflowBoard.load(); return; }
+  if (route.page === 'workflows') {
     try {
       ensureWorkflowEditor(); await workflowLibraryClient.initialize();
       if (load !== routeLoad || state.route.page !== route.page || state.route.id !== route.id) return;
-      if (route.page === 'board') {
-        await workflowLibraryClient.flushPending();
-        if (load === routeLoad && state.route.page === 'board') { ensureWorkflowBoard(); await workflowBoard.load(); }
-      } else {
-        const canResume = workflowEditor.documentLoaded !== false && workflowEditor.libraryReadOnly !== true;
-        const id = route.id || (canResume ? workflowLibraryClient.currentId : null);
-        if (!id) { workflowLibraryClient.unload(); workflowLoading(); workflowEditor.activate(); renderShell(); return; }
-        if (!route.id) { navigate(`#/workflows/${encodeURIComponent(id)}`); return; }
-        const opened = await workflowLibraryClient.open(id);
-        if (load === routeLoad && state.route.page === 'workflows' && state.route.id === id) {
-          if (!opened || !workflowLibraryClient.currentId) {
-            if (!workflowLibraryClient.currentId) {
-              history.replaceState(null, '', '#/workflows'); state.route = readRoute();
-              workflowLoading(); workflowEditor.activate(); renderShell(); return;
-            }
-            workflowLoading('工作流打开被状态变化中断，请重试；本地草稿已保留。', true); return;
+      const canResume = workflowEditor.documentLoaded !== false && workflowEditor.libraryReadOnly !== true;
+      const id = route.id || (canResume ? workflowLibraryClient.currentId : null);
+      if (!id) { workflowLibraryClient.unload(); workflowLoading(); workflowEditor.activate(); renderShell(); return; }
+      if (!route.id) { navigate(`#/workflows/${encodeURIComponent(id)}`); return; }
+      const opened = await workflowLibraryClient.open(id);
+      if (load === routeLoad && state.route.page === 'workflows' && state.route.id === id) {
+        if (!opened || !workflowLibraryClient.currentId) {
+          if (!workflowLibraryClient.currentId) {
+            history.replaceState(null, '', '#/workflows'); state.route = readRoute();
+            workflowLoading(); workflowEditor.activate(); renderShell(); return;
           }
-          if (workflowLibraryClient.currentId !== id) {
-            history.replaceState(null, '', `#/workflows/${encodeURIComponent(workflowLibraryClient.currentId)}`); state.route = readRoute();
-          }
-          workflowLoading(); workflowEditor.activate(); await workflowEditor.runtime.activate(); renderShell();
-          if (pendingAttachmentInput?.workflowId === id && workflowEditor.doc?.id === id) {
-            const attachment = pendingAttachmentInput; pendingAttachmentInput = null; openAttachmentInput(workflowEditor, attachment);
-          }
+          workflowLoading('工作流打开被状态变化中断，请重试；本地草稿已保留。', true); return;
+        }
+        if (workflowLibraryClient.currentId !== id) {
+          history.replaceState(null, '', `#/workflows/${encodeURIComponent(workflowLibraryClient.currentId)}`); state.route = readRoute();
+        }
+        workflowLoading(); workflowEditor.activate(); await workflowEditor.runtime.activate(); renderShell();
+        if (pendingAttachmentInput?.workflowId === id && workflowEditor.doc?.id === id) {
+          const attachment = pendingAttachmentInput; pendingAttachmentInput = null; openAttachmentInput(workflowEditor, attachment);
         }
       }
     } catch (error) {
