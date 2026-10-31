@@ -40,6 +40,31 @@ test('unconfirmed no-tools policy prevents any learning model submission', async
   assert.equal(app.submitted.length, 0); assert.deepEqual(app.interrupted, ['local-1']);
 });
 
+test('an explicit native Codex missing-access-token preparation failure is actionable and never submits a prompt', async t => {
+  const { app, model } = fixture(t, { purpose: 'assistant' }), logs = [], calls = [];
+  app.logger = { write: (...args) => logs.push(args) };
+  app.adapter.request = async method => { calls.push(method); throw Object.assign(new Error('Codex auth is missing access_token. Run `hermes auth add openai-codex --type oauth` to re-authenticate. token=PRIVATE_NATIVE_AUTH'), { code: -32603 }); };
+  await assert.rejects(model.generate('Classify this private task.'), error => {
+    assert.equal(error.code, 'MODEL_AUTH_REQUIRED'); assert.equal(error.phase, 'prepare-model');
+    assert.match(error.message, /Hermes Codex.*登录/); assert.match(error.message, /hermes auth add openai-codex --type oauth/);
+    assert.doesNotMatch(error.message, /PRIVATE_NATIVE_AUTH|access_token\./); return true;
+  });
+  assert.deepEqual(calls, ['workbench.assistant.prepare']); assert.equal(app.submitted.length, 0);
+  const metric = JSON.parse(app.store.db.prepare('SELECT value FROM application_model_calls WHERE session_id=?').get('local-1').value);
+  assert.equal(metric.errorCode, 'MODEL_AUTH_REQUIRED'); assert.equal(metric.status, 'error'); assert.equal(metric.submittedAt, null);
+  assert.doesNotMatch(JSON.stringify([metric, logs]), /PRIVATE_NATIVE_AUTH|auth add|access_token/);
+});
+
+test('generic native preparation errors are not guessed to be Codex authentication failures', async t => {
+  const { app, model } = fixture(t, { purpose: 'assistant' });
+  for (const message of ['Internal server error', 'Missing access_token for another provider', 'Codex auth is missing access_token_suffix']) {
+    app.adapter.request = async () => { throw Object.assign(new Error(message), { code: 500 }); };
+    await assert.rejects(model.generate('Classify.'), error => error.code === 500 && error.message === message);
+  }
+  assert.equal(app.submitted.length, 0);
+  for (const row of app.store.db.prepare('SELECT value FROM application_model_calls').all()) assert.equal(JSON.parse(row.value).errorCode, 'MODEL_ERROR');
+});
+
 test('learning models require explicit denial of memory writes before submitting any prompt', async t => {
   const { app, model } = fixture(t);
   for (const value of [undefined, true, null]) {

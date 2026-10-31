@@ -20,7 +20,7 @@ const invalid = () => { throw error('ASSISTANT_INTENT_ARGUMENTS', '任务分类�
 const notify = (callback, value) => { try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* Observers do not control classification. */ } };
 const timeout = () => error('ASSISTANT_INTENT_TIMEOUT', '任务分类达到等待上限，未继续生成或执行。', 504);
 const cancelled = () => error('ASSISTANT_INTENT_CANCELLED', '任务分类已停止，未继续生成或执行。', 409);
-const UPSTREAM_CODES = new Set(['MODEL_ERROR', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_ABORTED', 'MODEL_TIMEOUT',
+const UPSTREAM_CODES = new Set(['MODEL_ERROR', 'MODEL_AUTH_REQUIRED', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_ABORTED', 'MODEL_TIMEOUT',
   'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT', 'MODEL_TOTAL_TIMEOUT', 'ASSISTANT_TURN_TIMEOUT']);
 
 function plain(value, allowed) {
@@ -127,6 +127,7 @@ export class AssistantIntentClassifier {
       log(code === 'ASSISTANT_INTENT_FAILED' || UPSTREAM_CODES.has(code) ? 'error' : 'warn', 'assistant.intent.failed', code === 'ASSISTANT_INTENT_CANCELLED' ? 'cancelled' : 'error', code);
       if (code === 'ASSISTANT_INTENT_TIMEOUT') throw timeout();
       if (code === 'ASSISTANT_INTENT_CANCELLED') throw cancelled();
+      if (code === 'MODEL_AUTH_REQUIRED') throw error(code, 'Hermes Codex 订阅登录未完成或已失效。请用户手动运行 hermes auth add openai-codex --type oauth 完成登录后重试。', 409);
       if (UPSTREAM_CODES.has(code)) throw error(code, 'Hermes 或模型提供商返回错误，任务分类未完成。');
       if (cause?.code === code) throw cause;
       throw error(code, '任务分类调用失败，未选择默认处理方式。');

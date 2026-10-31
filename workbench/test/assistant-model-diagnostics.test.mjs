@@ -57,6 +57,15 @@ test('a finished workflow candidate is reported as proposed rather than an unkno
   assert.equal(result.calls[0].complete, true);
 });
 
+test('diagnostics retain the safe Codex authentication code without native error text or credentials', async t => {
+  const { diagnostics, db } = fixture(t);
+  db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'error',
+    startedAt: start, submittedAt: null, completedAt: end, errorCode: 'MODEL_AUTH_REQUIRED', error: 'PRIVATE_ACCESS_TOKEN' }));
+  const result = await diagnostics.inspect({ workflowId: 'workflow-one', turn: turn() });
+  assert.equal(result.calls[0].errorCode, 'MODEL_AUTH_REQUIRED'); assert.equal(result.calls[0].submittedAt, null);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ACCESS_TOKEN/);
+});
+
 test('persistent model records carry authoritative timeouts, character counts and usage without private content', async t => {
   const { diagnostics, db } = fixture(t);
   db.prepare('INSERT INTO application_model_calls VALUES(?,?)').run('session-three', JSON.stringify({ version: 1, status: 'complete',

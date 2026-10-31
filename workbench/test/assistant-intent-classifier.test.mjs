@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { AssistantIntentClassifier, ASSISTANT_INTENT_LIMITS } from '../src/assistant-intent-classifier.mjs';
+import { LearningModel } from '../src/workflows/learning-model.mjs';
 
 const ready = () => new Promise(resolve => setImmediate(resolve));
 const message = '无输入，帮我完成AI获取github每日热门前10项目，并生成一张图看完github前十项目的海报';
@@ -167,9 +170,37 @@ test('provider failures and observer failures remain isolated and never expose b
 });
 
 test('upstream errors retain their safe identity instead of becoming a local classification deadline', async () => {
-  for (const code of ['MODEL_ERROR', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_TIMEOUT', 'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT']) {
+  for (const code of ['MODEL_ERROR', 'MODEL_AUTH_REQUIRED', 'MODEL_DISCONNECTED', 'MODEL_CLOSED', 'MODEL_TIMEOUT', 'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT']) {
     const f = fixture(async () => { throw Object.assign(Error('PRIVATE_PROVIDER_BODY password=PRIVATE_PASSWORD'), { code }); });
     await assert.rejects(f.classifier.classify({ text: message, role: 'workflow' }), value => value.code === code && !value.message.includes('PRIVATE_'));
     assert.equal(f.calls.length, 1); assert.equal(f.logs.at(-1)[2].code, code); assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE_/);
+  }
+});
+
+test('real protected model preparation carries the narrow Codex login prerequisite through classification without a submit or retry', async t => {
+  for (const [nativeMessage, expectedCode] of [
+    ['Codex auth is missing access_token. Run `hermes auth add openai-codex --type oauth` to re-authenticate. token=PRIVATE_NATIVE_CREDENTIAL', 'MODEL_AUTH_REQUIRED'],
+    ['Internal server error password=PRIVATE_NATIVE_CREDENTIAL', 'ASSISTANT_INTENT_FAILED'],
+  ]) {
+    const app = new EventEmitter(), db = new DatabaseSync(':memory:'), methods = [], logs = [];
+    let submissions = 0, histories = 0;
+    app.store = { db }; app.logger = { write: (...args) => logs.push(args) };
+    app.captureModelRoute = async () => ({ provider: 'openai-codex', model: 'fixture-model' });
+    app.createSession = async () => ({ id: 'auth-session', runtimeSessionId: 'native-auth-session' });
+    app.adapter = { request: async method => { methods.push(method); throw Object.assign(new Error(nativeMessage), { code: -32603 }); } };
+    app.interrupt = async () => {}; app.submit = async () => { submissions++; }; app.history = async () => { histories++; };
+    const model = new LearningModel(app, { purpose: 'assistant' }); app.assistantModel = model;
+    t.after(async () => { await model.close(); db.close(); });
+    await assert.rejects(new AssistantIntentClassifier(app).classify({ text: '请诊断当前问题', role: 'supervisor' }), error => {
+      assert.equal(error.code, expectedCode); assert.doesNotMatch(error.message, /PRIVATE_NATIVE_CREDENTIAL|Internal server error/);
+      if (expectedCode === 'MODEL_AUTH_REQUIRED') {
+        assert.match(error.message, /Hermes Codex.*登录/); assert.match(error.message, /请用户手动运行 hermes auth add openai-codex --type oauth/);
+      }
+      return true;
+    });
+    assert.deepEqual(methods, ['workbench.assistant.prepare']); assert.equal(submissions, 0); assert.equal(histories, 0);
+    const metrics = JSON.parse(db.prepare('SELECT value FROM application_model_calls WHERE session_id=?').get('auth-session').value);
+    assert.equal(metrics.errorCode, expectedCode === 'MODEL_AUTH_REQUIRED' ? expectedCode : 'MODEL_ERROR'); assert.equal(metrics.submittedAt, null);
+    assert.equal(logs.at(-1)[2].code, expectedCode); assert.doesNotMatch(JSON.stringify([logs, metrics]), /PRIVATE_NATIVE_CREDENTIAL|auth add|access_token/);
   }
 });

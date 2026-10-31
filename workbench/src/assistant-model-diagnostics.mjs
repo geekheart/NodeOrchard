@@ -8,7 +8,7 @@ const OWNER_ENDED = new Set(['complete', 'completed', 'error', 'failed', 'interr
 const STAGES = new Set(['create-session', 'prepare-model', 'prepare-images', 'submit-model', 'model-response', 'model-output', 'read-result']);
 const TIMEOUTS = new Set(['first-response', 'output-idle', 'duration', 'total', 'absolute', 'legacy-timeout']);
 const ERRORS = new Set(['MODEL_TIMEOUT', 'MODEL_FIRST_RESPONSE_TIMEOUT', 'MODEL_OUTPUT_IDLE_TIMEOUT', 'MODEL_DURATION_TIMEOUT',
-  'MODEL_ABORTED', 'MODEL_CLOSED', 'MODEL_DISCONNECTED', 'MODEL_ERROR', 'ABORT_ERR', 'MODEL_FAILED', 'BACKEND_UNAVAILABLE', 'MODEL_RESPONSE_FAILED']);
+  'MODEL_ABORTED', 'MODEL_CLOSED', 'MODEL_DISCONNECTED', 'MODEL_ERROR', 'MODEL_AUTH_REQUIRED', 'ABORT_ERR', 'MODEL_FAILED', 'BACKEND_UNAVAILABLE', 'MODEL_RESPONSE_FAILED']);
 const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
 const object = value => value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const array = value => Array.isArray(value) ? value : [];

@@ -5,6 +5,12 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { redact } from '../hermes-adapter.mjs';
 
 const fail = message => new Error(message);
+const MODEL_AUTH_MESSAGE = 'Hermes Codex 订阅登录未完成或已失效。请用户手动运行 hermes auth add openai-codex --type oauth 完成登录后重试。';
+const preparationError = cause => {
+  const message = cause && Object.getOwnPropertyDescriptor(cause, 'message')?.value;
+  return typeof message === 'string' && /^Codex auth is missing access_token(?:\.(?:\s|$)|$)/.test(message)
+    ? Object.assign(fail(MODEL_AUTH_MESSAGE), { code: 'MODEL_AUTH_REQUIRED', httpStatus: 409 }) : cause;
+};
 // null is an intentional unlimited wait, not zero or an absent measurement.
 // An explicitly bounded controller may still narrow its own requests.
 const modelWaitLimit = (configured, requested) => requested == null ? configured
@@ -370,6 +376,7 @@ export class LearningModel {
   }
   finish(state, error, interrupt = false, value) {
     if (state.done) return;
+    if (error && state.phase === 'prepare-model') error = preparationError(error);
     if (error && state.startedAtMs !== undefined) {
       error.phase ??= state.phase; error.phaseLabel ??= state.phaseLabel;
       error.elapsedMs ??= Math.max(0, Date.now() - state.startedAtMs);
@@ -378,7 +385,7 @@ export class LearningModel {
     state.completedAtMs = Date.now();
     state.callStatus = !error ? 'complete' : error.code === 'MODEL_TIMEOUT' ? 'timeout'
       : ['MODEL_ABORTED', 'MODEL_CLOSED'].includes(error.code) ? 'interrupted' : 'error';
-    state.errorCode = !error ? null : ['MODEL_TIMEOUT', 'MODEL_ABORTED', 'MODEL_CLOSED', 'MODEL_DISCONNECTED'].includes(error.code) ? error.code : 'MODEL_ERROR';
+    state.errorCode = !error ? null : ['MODEL_TIMEOUT', 'MODEL_ABORTED', 'MODEL_CLOSED', 'MODEL_DISCONNECTED', 'MODEL_AUTH_REQUIRED'].includes(error.code) ? error.code : 'MODEL_ERROR';
     this.persistMetrics(state);
     if (error && this.purpose === 'assistant' && state.startedAtMs !== undefined) error.metrics = this.metrics(state);
     this.active.delete(state.id); this.pending.delete(state);
