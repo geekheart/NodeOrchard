@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { planWorkflow } from '../../shared/workflow/workflow-plan.mjs';
 import { validateScheduleTiming, nextScheduleOccurrence } from '../../shared/workflow/workflow-schedule-time.mjs';
 import { validateWorkflowInput } from './workflow-runs.mjs';
-import { redact } from '../hermes-adapter.mjs';
+import { HermesAdapter, redact } from '../hermes-adapter.mjs';
 import { withWorkflowInputDefaults } from '../../shared/workflow/workflow-inputs.mjs';
+import { HermesWorkflowScheduler } from './hermes-workflow-scheduler.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -21,23 +22,118 @@ function object(value, keys, label) {
 }
 
 export class WorkflowSchedules {
-  constructor(app, { now = () => Date.now(), pollMs = 1000, autoStart = true } = {}) {
+  constructor(app, { now = () => Date.now(), pollMs = 1000, autoStart = true, engine } = {}) {
     if (typeof now !== 'function' || !Number.isInteger(pollMs) || pollMs < 10 || pollMs > 60000 || typeof autoStart !== 'boolean') fail('无效的定时管理器选项。');
     this.app = app;
     this.db = app.store.db;
     this.now = now;
     this.closed = false;
     this.pending = new Map();
+    this.nativeDispatches = new Set();
     this.db.exec('CREATE TABLE IF NOT EXISTS workflow_schedules (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL)');
     this.readRow = this.db.prepare('SELECT value,revision FROM workflow_schedules WHERE id=?');
     this.writeRow = this.db.prepare('UPDATE workflow_schedules SET value=?,revision=? WHERE id=? AND revision=?');
     this.recover();
     this.onEvent = event => this.handleEvent(event);
     app.on('event', this.onEvent);
-    if (autoStart) {
-      this.timer = setInterval(() => { void Promise.resolve().then(() => this.tick()).catch(() => {}); }, pollMs);
-      this.timer.unref?.();
+    this.engine = engine === undefined ? app.workflowSchedulerFactory ? app.workflowSchedulerFactory(app, { pollMs })
+      : app.adapter instanceof HermesAdapter ? new HermesWorkflowScheduler(app.config, { pollMs }) : null : engine;
+    this.nativeRequired = Boolean(this.engine) || app.adapter instanceof HermesAdapter;
+    if (this.engine) {
+      this.db.exec('CREATE TABLE IF NOT EXISTS workflow_schedule_native_receipts (execution_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL, definition_key TEXT NOT NULL, value TEXT NOT NULL)');
+      this.onNativeFire = receipt => {
+        const dispatched = this.admitNative(receipt);
+        this.nativeDispatches.add(dispatched);
+        void dispatched.catch(error => this.nativeFailure(error)).finally(() => this.nativeDispatches.delete(dispatched));
+      };
+      this.onNativeAdvance = receipt => this.advanceNative(receipt);
+      this.onNativeState = state => { if (state.status === 'unavailable') this.nativeFailure(new Error(state.error || '原生定时不可用。')); };
+      this.engine.on('fire', this.onNativeFire); this.engine.on('advance', this.onNativeAdvance); this.engine.on('state', this.onNativeState);
+      if (autoStart && this.list().some(row => row.enabled)) this.syncNative();
     }
+  }
+
+  status() { return this.engine?.status?.() || { engine: this.nativeRequired ? 'hermes-native' : 'test-adapter', status: this.nativeRequired ? 'unavailable' : 'manual' }; }
+  nativeKey(schedule) {
+    return createHash('sha256').update(JSON.stringify([schedule.id, schedule.name, schedule.document, schedule.input,
+      schedule.timing, schedule.enabled, schedule.outputDirectory ?? null])).digest('hex');
+  }
+  nativeDefinitions() {
+    return this.list().map(row => ({ id: row.id, name: row.name, key: this.nativeKey(row), timing: row.timing,
+      enabled: row.enabled, nextRunAt: row.nextRunAt }));
+  }
+  nativeFailure(error) {
+    if (this.closed) return;
+    this.nativeError = message(error);
+    try { this.app.logEvents?.write('error', 'workflow.schedule.native.unavailable', { component: 'workflow-schedules', code: 'HERMES_CRON_UNAVAILABLE' }); } catch {}
+    try { this.app.publish('workflow.scheduler', null, { engine: 'hermes-native', status: 'unavailable', error: this.nativeError }); } catch {}
+  }
+  syncNative() {
+    if (!this.engine || this.closed) return;
+    // Ordered full snapshots prevent an old enable from racing a newer pause.
+    const definitions = this.nativeDefinitions();
+    const sync = () => this.closed ? undefined : this.engine.sync(definitions);
+    this.nativeSync = (this.nativeSync || Promise.resolve()).catch(() => {}).then(sync);
+    void this.nativeSync.catch(error => this.nativeFailure(error));
+    return this.nativeSync;
+  }
+  acknowledgeNative(receipt, result) {
+    return Promise.resolve(this.engine?.finish(receipt, result)).then(ack => {
+      if (this.closed || !ack || !Number.isFinite(Date.parse(ack.nextRunAt))) return;
+      const current = this.read(receipt.scheduleId);
+      if (current?.enabled && current.timing.kind === 'daily' && current.lastTrigger?.nativeExecutionId === receipt.executionId
+        && this.nativeKey(current) === receipt.key && Date.parse(ack.nextRunAt) > Date.parse(current.nextRunAt)) {
+        this.save({ ...current, nextRunAt: iso(Date.parse(ack.nextRunAt)) }, current.revision);
+      }
+    }).catch(error => this.nativeFailure(error));
+  }
+  admitNative(receipt) {
+    const rejected = () => this.acknowledgeNative(receipt, { status: 'cancelled', error: '定时配置或生命周期已变化；未重放。' });
+    if (this.closed || !receipt || !UUID.test(receipt.scheduleId || '') || !/^[a-f0-9]{32}$/.test(receipt.executionId || '')
+      || !/^[a-f0-9]{64}$/.test(receipt.key || '') || !Number.isFinite(Date.parse(receipt.scheduledAt))) return rejected();
+    const schedule = this.read(receipt.scheduleId);
+    if (!schedule || !schedule.enabled || this.nativeKey(schedule) !== receipt.key || this.pending.has(schedule.id)
+      || Date.parse(schedule.nextRunAt) !== Date.parse(receipt.scheduledAt)) return rejected();
+    const existing = this.db.prepare('SELECT execution_id FROM workflow_schedule_native_receipts WHERE execution_id=?').get(receipt.executionId);
+    if (existing) return rejected();
+    this.db.prepare('INSERT INTO workflow_schedule_native_receipts(execution_id,schedule_id,definition_key,value) VALUES(?,?,?,?)')
+      .run(receipt.executionId, schedule.id, receipt.key, JSON.stringify(receipt));
+    const timestamp = this.clock(), missed = timestamp - Date.parse(receipt.scheduledAt) > LATE_MS;
+    let waiting = null;
+    if (schedule.lastTrigger?.runId) {
+      try { const run = this.app.workflows.get(schedule.lastTrigger.runId);
+        if (run.status === 'waiting_review' || Object.values(run.nodes || {}).some(node => node.status === 'waiting_review')) waiting = run;
+      } catch {}
+    }
+    const next = schedule.timing.kind === 'once' ? { enabled: false, nextRunAt: null }
+      : { nextRunAt: Number.isFinite(Date.parse(receipt.nextRunAt)) && Date.parse(receipt.nextRunAt) > Date.parse(receipt.scheduledAt) ? iso(Date.parse(receipt.nextRunAt)) : null };
+    if (schedule.timing.kind === 'daily' && next.nextRunAt === null) return rejected();
+    const skipped = missed ? 'missed' : waiting ? 'waiting_review' : null;
+    const reason = missed ? '已错过触发时间；已跳过，未补跑。' : waiting ? '上一次任务仍待人工审核，已跳过本次定时触发。' : '';
+    const claimed = this.save({ ...schedule, ...next, lastTrigger: {
+      ...this.trigger(schedule.nextRunAt, skipped || 'claimed', reason), nativeJobId: receipt.jobId, nativeExecutionId: receipt.executionId,
+      ...(waiting ? { runId: waiting.id, runStatus: waiting.status } : {}),
+    } }, schedule.revision);
+    if (!claimed) return rejected();
+    if (skipped) return this.acknowledgeNative(receipt, { status: skipped, error: reason });
+    const token = { scheduledAt: schedule.nextRunAt, cancelled: false, admitted: false, nativeReceipt: receipt };
+    this.pending.set(schedule.id, token);
+    return this.dispatch(clone(claimed), token).then(() => {
+      if (this.closed) return;
+      const final = this.read(schedule.id)?.lastTrigger;
+      return this.acknowledgeNative(receipt, { status: token.cancelled ? 'cancelled' : final?.status || 'error',
+        error: final?.error || '', runId: final?.runId || null });
+    });
+  }
+  advanceNative(receipt) {
+    if (this.closed || !receipt) return;
+    const schedule = this.read(receipt.scheduleId);
+    if (!schedule || !schedule.enabled || this.nativeKey(schedule) !== receipt.key
+      || Date.parse(schedule.nextRunAt) !== Date.parse(receipt.scheduledAt)) return;
+    const next = receipt.nextRunAt === null ? null : Date.parse(receipt.nextRunAt);
+    if (next !== null && !Number.isFinite(next)) return;
+    this.save({ ...schedule, ...(schedule.timing.kind === 'once' ? { enabled: false } : {}),
+      nextRunAt: next === null ? null : iso(next), lastTrigger: this.trigger(schedule.nextRunAt, 'missed', 'Hermes 原生调度已跳过错过的触发；未补跑。') }, schedule.revision);
   }
 
   clock() {
@@ -108,6 +204,7 @@ export class WorkflowSchedules {
     const schedule = { id: randomUUID(), ...config, revision: 1, createdAt: now, updatedAt: now, lastTrigger: null };
     this.db.prepare('INSERT INTO workflow_schedules(id,revision,value) VALUES(?,?,?)').run(schedule.id, 1, JSON.stringify(schedule));
     this.app.publish('workflow.schedule', null, { schedule: clone(schedule) });
+    this.syncNative();
     return clone(schedule);
   }
 
@@ -126,6 +223,7 @@ export class WorkflowSchedules {
     for (const [id, token] of this.pending) {
       if (!token.admitted && this.read(id)?.workflowId === workflowId) token.cancelled = true;
     }
+    this.syncNative();
   }
 
   update(id, body) {
@@ -134,6 +232,7 @@ export class WorkflowSchedules {
     previous = this.cancelPending(id, previous);
     const saved = this.save({ ...previous, ...config }, previous.revision);
     if (!saved) fail('定时任务已变化，请刷新后重试。', 409);
+    this.syncNative();
     return clone(saved);
   }
 
@@ -148,6 +247,7 @@ export class WorkflowSchedules {
     previous = this.cancelPending(id, previous, enabled ? '定时任务已重新启用' : '定时任务已暂停');
     const saved = this.save({ ...previous, enabled, nextRunAt: next === null ? null : iso(next) }, previous.revision);
     if (!saved) fail('定时任务已变化，请刷新后重试。', 409);
+    this.syncNative();
     return clone(saved);
   }
 
@@ -157,6 +257,7 @@ export class WorkflowSchedules {
     this.db.prepare('DELETE FROM workflow_schedules WHERE id=?').run(id);
     const payload = { deleted: true, id, workflowId: previous.workflowId };
     this.app.publish('workflow.schedule', null, payload);
+    this.syncNative();
     return payload;
   }
 
@@ -249,6 +350,13 @@ export class WorkflowSchedules {
 
   tick() {
     if (this.closed) return Promise.resolve();
+    if (this.nativeRequired) {
+      if (!this.engine) return Promise.reject(new Error('Hermes 原生定时不可用；未降级到应用调度。'));
+      return Promise.resolve(this.nativeSync).then(() => this.engine.poll())
+        .then(() => Promise.allSettled([...this.nativeDispatches])).then(() => undefined);
+    }
+    // Explicit non-Hermes test adapters can drive a deterministic clock. The
+    // installed Hermes path above never enters this fixture-only implementation.
     const work = [];
     const now = this.clock();
     for (const row of this.db.prepare("SELECT value FROM workflow_schedules WHERE json_extract(value,'$.enabled')=1 AND json_extract(value,'$.nextRunAt') IS NOT NULL ORDER BY json_extract(value,'$.nextRunAt'),id").all()) {
@@ -292,10 +400,11 @@ export class WorkflowSchedules {
   close() {
     if (this.closed) return;
     this.closed = true;
-    clearInterval(this.timer);
     this.app.off('event', this.onEvent);
     for (const token of this.pending.values()) if (!token.admitted) token.cancelled = true;
-    // Do not wait for network/model acknowledgements. WorkflowRuns owns admitted
-    // runs and its shutdown; an unacknowledged durable claim is never replayed.
+    if (this.engine) {
+      this.engine.off('fire', this.onNativeFire); this.engine.off('advance', this.onNativeAdvance); this.engine.off('state', this.onNativeState);
+      return Promise.resolve(this.nativeSync).catch(() => {}).then(() => this.engine.close());
+    }
   }
 }

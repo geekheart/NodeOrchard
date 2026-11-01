@@ -148,7 +148,8 @@ export class WorkflowSchedulesUI {
     this.workflowLabel.textContent = clean(`当前工作流：${this.editor.doc?.title || '未命名流程'}`); this.modeNotice.textContent = reason; this.modeNotice.hidden = !reason;
     const needsHermes = [this.editor.doc, ...this.schedules().map(item => item.document)].some(document => document?.nodes?.some(item => item.type === 'skill'));
     const backend = this.runtime.getBackend?.() || {}; this.backendHint.hidden = !needsHermes || backend.state === 'ready' && backend.authenticated !== false;
-    this.backendHint.textContent = 'Hermes 未就绪，含 Skill 的定时任务无法启动。';
+    this.backendHint.textContent = this.scheduler?.status === 'unavailable' ? 'Hermes 原生定时不可用；任务尚未确认注册，请刷新检查。' : 'Hermes 未就绪，含 Skill 的定时任务无法启动。';
+    if (this.scheduler?.status === 'unavailable') this.backendHint.hidden = false;
     this.formTitle.textContent = this.editingId ? '编辑定时任务' : '新建定时任务';
     this.snapshotNote.textContent = clean(this.editingId ? `保存更新会采用当前草稿替换此任务的固定流程快照与输入。${record && snapshotSignature(record.document) !== snapshotSignature(this.editor.doc) ? '已保存快照与当前草稿不同。' : ''}` : '保存后启用，使用当前草稿与输入的固定快照。');
     this.once.parentElement.hidden = this.kind.value !== 'once'; this.daily.parentElement.hidden = this.kind.value !== 'daily';
@@ -169,6 +170,7 @@ export class WorkflowSchedulesUI {
     try {
       const result = await this.api(`/api/workflow-schedules?workflowId=${encodeURIComponent(workflowId)}`);
       if (request !== this.listRequest || workflowId !== this.workflowId) return;
+      this.scheduler = result.scheduler;
       const records = result.schedules || [], ids = new Set(records.map(item => item.id));
       for (const record of records) if ((this.revisions.get(record.id) || 0) <= revision) this.storeSchedule(record);
       for (const record of this.schedules()) if (!ids.has(record.id) && (this.revisions.get(record.id) || 0) <= revision) this.removeSchedule(record.id);
