@@ -14,7 +14,7 @@ Skill 前言用 `required-toolsets: ["image_gen"]` 声明依赖，节点保存 `
 
 目录区分真实可用与启用状态；缓存的工具名称不证明已就绪。浏览器必须有导航／执行工具，只有密码库工具不算就绪。可先保存尚未就绪的 Skill，但运行前拒绝缺失能力，不先消费模型调用。
 
-每个实际尝试检查目录并绑定请求集合、工具名称和能力版本。版本摘要包含公开图片提供商／模型选择、工具状态及参数结构，不含凭据。准备回执须精确一致，重建与工具调用复核；人工重做遇到版本漂移时要求新建运行，不静默换提供商。旧 Skill 未声明依赖时保留原 Hermes 已启用工具，不自动增加工具；助手无工具、学习只读记忆与无工具声明继续生效。
+每个实际尝试检查目录并绑定请求集合、工具名称和能力版本。版本摘要包含公开图片提供商／模型选择、工具状态及参数结构，不含凭据。准备回执须精确一致，重建与工具调用复核；人工重做遇到版本漂移时要求新建运行，不静默换提供商。旧 Skill 未声明依赖时保留原 Hermes 已启用工具，不自动增加工具；本机 MCP／桌面仍经过当前尝试的宿主授权。独立助手的模型控制会话保持无原生工具，只通过应用 dispatcher 调用获准能力；学习只读记忆与无工具声明继续生效。
 
 ## 图片与审核
 
@@ -26,22 +26,36 @@ Skill 前言用 `required-toolsets: ["image_gen"]` 声明依赖，节点保存 `
 
 ## 软件接入
 
-Figma 等软件复用 Hermes 已配置的 MCP，例如 `mcp-figma`，配置后工具及依赖动态进入目录。Codex 自己的插件连接不会自动成为 Hermes 连接；工作台不冒充已安装适配器，不自动添加服务器或输入凭据。
+Figma、Blender 等软件复用 Hermes 已配置的 MCP，例如 `mcp-figma`。Codex 自己的插件连接不会自动成为 Hermes 连接。工作流执行、独立助手和总控复用同一个宿主工具通道；总控原生进程无需直接连接本机或私网。
 
-Computer Use 仍需 Hermes 原生驱动和系统权限；缺失时显示未就绪。声明 `computer_use` 的 Skill 在同一工作台执行器管理的工作流之间使用独立单槽串行；不锁住用户或其它程序的桌面操作。目标软件的认证和审批继续由 Hermes／软件管理。
+| 应用工具 | 调用方式与范围 |
+| --- | --- |
+| `mcp.servers` | 读取已配置服务、真实工具名称、参数、就绪状态及目录 `revision`；不向模型返回凭据或任意进程启动命令 |
+| `mcp.call` | 指定 `server`、`tool`、`arguments`、`expectedRevision` 和稳定 `operationId`；只调用登记服务，文件参数按当前工作目录校验，写入／执行类工具逐次人工确认 |
+| `desktop.status` | 查询兼容驱动、系统授权及人工允许的应用；查询本身不截屏、不申请系统权限 |
+| `desktop.call` | 指定应用和动作；先 `capture` 获取画面、元素和 `captureId`，再引用当前截图点击、输入等；修改动作逐次人工确认 |
+| `connections.list`／`connections.manage` | 仅总控查询原生连接目录，并按目录版本发起连接、重连、安装目录 MCP、启用或 OAuth 授权；配置／授权卡留在当前主题，用户填写凭据和确认 |
 
-新增适配复用目录、能力版本、尝试绑定、工具回执与产物机制，补真实依赖、目标／操作范围及必要的并发限制。未连接、仅协议回归通过和真实软件验收分别说明。
+MCP 的 stdio 与 HTTP 传输继续由 Hermes 管理；本机／私网只按已保存服务器身份进入宿主通道，工作台管理端口、云元数据等受保护端点保持拒绝，不提供任意 URL 或全网段连接接口。服务自报只读仅是分类依据；第三方服务及任意代码执行型 MCP 仍受其自身权限和可信配置约束。参数路径校验不是 OS 沙箱，不能保证未知外部工具的代码、脚本或间接文件访问不会越界。
+
+Computer Use 需要 Hermes 兼容驱动，以及用户在 macOS 手动授予屏幕录制和辅助功能权限；缺失时显示未就绪，AI 不代开系统授权。设置中的 `desktopApps` 默认为空，只接受准确应用 Bundle ID；敏感应用、脚本控制台等仍由驱动拒绝。先看当前目标再执行，过期画面、窗口变化或越界目标须重新截图，不能把拿到 `captureId` 当作永久控制权限。桌面修改仍可能影响软件内部状态，驱动和应用白名单不等于任意 GUI 操作的完整 OS 隔离。
+
+两种角色均有独立的 `mcpTools`、`desktopControl`，总控另有 `connectionManage`。全新配置默认 `mcpTools`／`connectionManage` 开启、`desktopControl` 关闭；旧配置缺字段只读投影关闭，保留原持久内容，用户手动保存后才改变。桌面观察沿用 `capture` 权限和应用白名单，桌面修改另需 `desktopControl`。连接管理不向助手提供修改这些权限或源码自修复开关的入口。
+
+工作流 Skill 保留 Hermes 原生工具名称，但 `mcp__*`／`computer_use` 经 `workbench.local-tools.call` 回到宿主，绑定运行、节点尝试、固定工具集合及随机令牌；结束后令牌失效。总控通过同一应用工具调用，不直接执行原生 MCP／Computer Use／`manage_connections`。写操作审批绑定当前对话或运行、轮次和准确请求；停止、归档、撤权或重启使未完成授权失效，结果未知不自动重发。声明 `computer_use` 的 Skill 继续使用工作流执行器的单槽串行，不能阻止用户或其它程序改变桌面。
+
+新增适配复用目录、能力版本、尝试绑定、工具回执与产物机制，补真实依赖、目标／操作范围及必要的并发限制。未连接、仅协议回归通过和真实软件验收分别说明；工具目录出现不代表当前系统授权、目标软件或业务产物已经验收。
 
 ## 接口与人工入口
 
 - `GET /api/skill-integrations`：无凭据的工具、图片提供商、采集时间及能力版本。短缓存合并重复读取，断连、重连及修改后失效。
 - `POST /api/skills`：人工创建，传名称、描述、正文、`requiredToolsets` 和稳定 `operationId`。
 - `POST /api/skill-integrations/image-provider`：人工选择，传 `provider`、`expectedProvider`、`operationId`，原生保存后读回。
-- 助手用 `workbench.inspect(section="integrations")` 查询状态，`node.describe("skill")` 查询契约，没有创建或配置写工具。
+- 助手用 `workbench.inspect(section="integrations")` 查询状态，`node.describe("skill")` 查询契约；外部调用使用上表接口，业务 Skill 创建／删除与图片提供商仍是人工入口。
 
 写操作持久记录幂等回执；同内容重试读原结果，结果未知不自动重放。图片服务按原选择比较更新。日志只记录操作身份、状态、耗时和错误类型，不记录正文、图片提示词或认证。
 
-Python 使用 `workbench.tools.catalog`、`workbench.skill.create`、`workbench.image.provider`，不向模型广告这些 RPC。Skill 准备仍走 `workbench.skill.prepare`，结束通过 `workbench.skill.finish` 返回可信产物。业务执行始终禁止 `skill_manage`；显式工具集绑定还禁止连接管理，旧工作流不擅自重写原生工具策略。
+Python 使用 `workbench.tools.catalog`、`workbench.skill.create`、`workbench.image.provider`，不向模型广告这些 RPC。`workbench.local-tools.catalog`／`.mcp`／`.desktop` 提供宿主执行通道，`workbench.connections.*` 桥接原生连接及人工授权卡；不向浏览器透传任意 RPC。Skill 准备仍走 `workbench.skill.prepare`，结束通过 `workbench.skill.finish` 返回可信产物。业务执行始终禁止 `skill_manage` 和连接管理；需要新连接时由总控发起人工卡，不在工作流中修改全局连接配置。
 
 ## 来源与删除
 

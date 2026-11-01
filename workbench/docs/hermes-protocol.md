@@ -13,11 +13,23 @@
 
 普通总控主题绑定持久 Hermes session，原生 Agent 负责工具调用循环、Skills、记忆和压缩；应用工具经绑定轮次的 stdio 回调进入原 dispatcher。独立助手、学习控制和来源绑定的只读总控诊断继续使用各自受限策略，不因总控改造取得原生工具。配置／认证快照和只读技能来源由宿主准备，原始 Hermes 私有资料保持原位；详细身份、恢复及执行限制见[总控原生会话](supervisor-native.md)。
 
+总控连接管理经 `workbench.connections.inspect`／`.manage`／`.respond` 复用 Hermes 原生目录、连接处理及授权卡；不将原生 `manage_connections` 直接开放给隔离 Agent。模型只发起管理请求，用户在绑定主题的卡片确认、登录或填写凭据，敏感字段不进入模型回执。工作流不能管理连接。
+
+工作流与两类助手通过同一宿主工具通道调用本机／私网 MCP 和桌面驱动：`workbench.local-tools.catalog`／`.mcp`／`.desktop` 只接受已登记服务或获准应用及宿主绑定范围。工作流内 `mcp__*`／`computer_use` 保留原生工具循环，通过服务端 JSON-RPC `workbench.local-tools.call` 回调；运行、节点尝试、随机令牌、工具集合和调用身份均由宿主校验，结束后失效。总控使用对应应用工具，原生直接和延迟 MCP／桌面入口不旁路执行。两条入口都重新核对人工权限、目录、版本及当前操作审批，见[软件接入](skill-integrations.md#软件接入)。
+
 顶部模型入口通过受限的 `workbench.model.set` 调用 Hermes 原生 `switch_model(is_global=true)` 和 `persist_model_selection`，更新 Hermes 全局默认选择。提供商必须由模型目录明确标记为 `authenticated=true`；模型可从建议清单选择或手动填写 ID，由 Hermes 核验。遇到费用、数据策略等选择提示时拒绝在工作台代为确认，用户须在 Hermes 原生界面处理后刷新。只有 RPC 结果及重新读取的目录均与请求的提供商、模型完全一致，工作台才确认切换成功。
 
 会话创建、工作流运行准入和学习批次准备时分别固定主提供商与模型；运行内的 Skill、修改尝试与子流程，以及学习批次内的样例、评价、诊断与改写沿用固定选择。默认模型切换不改写已有记录。固定的是主提供商与模型，Hermes 的认证及 fallback 仍由其自身配置管理。`WORKBENCH_HERMES_MODEL` 和旧本地 `defaultModel` 均不覆盖 Hermes 默认选择。
 
 当前接口已核验 Hermes 0.21.4，不代表所有 Hermes 版本均已验证。安装及独立对话验证步骤见 [使用说明](user-guide.md#启动)。
+
+## 工作流原生定时
+
+既有 `POST /api/workflow-schedules` 及更新、暂停、删除界面保持；SQLite 保存工作流和输入的冻结定义。生产 Hermes 适配器使用 `python/workflow_scheduler.py` 专用 stdio 进程，按任务时区使用独立私有 cron profile。它复用 Hermes 的 `cron.jobs` 存储、`compute_next_run`、`get_due_jobs`、`claim_job_for_fire` 和 `cron.executions` 账本；单次映射原生 once，每日映射原生 cron。Node 不另做生产到期扫描，也不启动模型判断是否该执行。
+
+原生 fire 回执绑定定时 ID、定义哈希、原生 job／execution ID、计划时刻和下一时刻，宿主先持久核对，再进入既有 `WorkflowRuns`。文件与 Skill 预检、工作流归属、归档暂停、忙碌跳过及人工审核沿用原准入；定义或生命周期变化后的迟到 fire 不运行。原生账本的 `workflow-admitted` 只表示触发已交给工作流，业务成功与产物仍以工作流运行及审核记录为准。
+
+这不是系统开机 daemon：工作台服务必须运行、电脑必须唤醒且可执行。关闭或睡眠期间错过的触发跳过；中断后的未确认 claim 保留 unknown，不重放。现有界面继续只提供单次／每日，不把 Hermes 支持其它时间表达式等同于界面已开放。每日任务遵循原时区语义：不存在的本地时间跳过，重复分钟只选首次；原生引擎故障明确报告不可用，不降级成应用计时器。原生专用 profile 不修改用户原 Hermes cron 配置或业务工作流快照。
 
 ## 代理继承
 
@@ -66,6 +78,9 @@ Skill 工具扩展提供 `workbench.tools.catalog`、`workbench.skills.catalog`�
 | `GET /api/skills/:name` | 确认名称属于技能清单后读取 `learning.detail`，要求 `kind=skill` |
 | `GET /api/skills?view=management` | 增加固定只读工作台模板／内部助手说明，不作为可执行节点 |
 | `POST /api/skills/:name/delete` | 人工、CSRF、版本和引用核对；生成包受控归档，学习版本保留删除标记 |
+| `POST /api/app-assistant/conversations/:id/connections/:operationId` | 绑定总控主题的人工连接授权卡回复；检查当前连接管理权限，不把凭据交给模型 |
+| `POST /api/tool-approvals/:owner/:approvalId` | 对准确版本工具请求仅允许本次或拒绝；重新检查当前角色、轮次／运行及权限，重启未完成审批不恢复执行 |
+| `GET/POST /api/workflow-schedules` 及既有单项操作 | 读取／保存冻结定义并同步到 Hermes 原生 cron；真正到期由原生 claim 回调原工作流准入 |
 | `POST /api/workflow-runs` | 接收 `{document,input}`，校验并准备全链，启动首个能力后返回运行快照；不等待整链或长代码进程结束 |
 | `GET /api/workflow-runs?workflowId=…` | 从本地 SQLite 读取最近 20 次运行，可按工作流筛选 |
 | `GET /api/workflow-runs/:id` | 读取流程、Skill 元数据、逐节点 I/O、runtime 与日志快照 |

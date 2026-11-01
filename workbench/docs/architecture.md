@@ -38,6 +38,8 @@ flowchart LR
 | `src/config.mjs`、`workspace-layout.mjs` | 路径配置、工作环境初始化、一次性偏好兼容 | 搬移历史产物或改写审核 |
 | `src/hermes-adapter.mjs`、`hermes-system-proxy.mjs` | Hermes 子进程及协议；在启动前将获准的 macOS 静态系统代理投影到子进程环境 | 修改系统／Hermes 配置、执行 PAC、提供助手代理写入入口 |
 | 总控原生会话、profile、sandbox 与出站代理模块 | 普通主题持久 Hermes Agent、原生工具循环、应用工具 stdio 桥接、私有状态和进程树隔离 | 修改原 Hermes 配置、绕过应用权限、原生读写用户工作流或自动重放动作；见[总控原生会话](supervisor-native.md) |
+| 原生连接、共享本机工具与审批模块 | 总控的 Hermes 连接人工卡；两类助手与工作流的已配置 MCP／目标桌面调用；准确请求的人工审批及回执 | AI 修改权限、任意地址／进程、重放未知操作；外部 MCP／GUI 不等价 OS 隔离，见[软件接入](skill-integrations.md#软件接入) |
+| `workflow-schedules.mjs`、`hermes-workflow-scheduler.mjs`、`python/workflow_scheduler.py` | 冻结定时定义、Hermes 原生 cron 到期／claim／执行账本、回调既有工作流准入 | 系统开机 daemon、唤醒睡眠电脑、模型判断时刻或补跑旧触发；见[原生定时](hermes-protocol.md#工作流原生定时) |
 | `src/hermes-models.mjs`、`python/hermes_models.py` | Hermes 受限模型目录、原生全局选择与保存、严格读回确认 | 本地模型覆盖、认证文件或独立回退配置 |
 | `shared/workflow/workflow-capability-contract.mjs`、`src/application-capabilities.mjs` | 共享真实能力契约、当前可用性、节点与运行时说明 | 以提示词代替处理器、虚构依赖就绪或扩大执行权限 |
 | `src/workflows/` | 计划执行、文件、审核、对话提案、定时与学习编排 | 前端布局、直接替用户批准图片 |
@@ -101,6 +103,8 @@ Hermes 统一管理模型、提供商、认证、端点与 fallback。顶部入�
 
 普通总控主题绑定持久 Hermes 原生会话，Agent 自行管理工具循环、上下文压缩、私有记忆和 Skill；同一原生循环先确认 AI 意图，再通过当前权限提供应用工具。独立工作流助手和来源绑定的只读总控诊断继续使用原受限编排。原生 gateway 以专用 profile 在验证过的 OS 沙箱中运行，文件／子进程和网络都受强制约束；工作台工具通过 stdio 调用原 schema 和 dispatcher，源码修改仍由宿主端实验性受控工具执行。配置继承、只读快照、出站代理与缺依赖行为见[总控原生会话](supervisor-native.md)。
 
+`application-connections.mjs` 将总控请求绑定到当前主题／人工轮次，经 `connection_gateway.py` 调用 Hermes 原生连接管理并投影人工授权卡。`application-runtime-tools.mjs` 将工作流原生工具回调和两类助手工具路由到 `local-tool-broker.mjs`／`python/local_tools.py`，共用权限、工具版本、目录和操作回执；`application-tool-approvals.mjs` 负责准确请求的一次人工批准，界面点击不自动补发旧操作。总控隔离进程的原始 MCP、Computer Use 和连接管理不能绕过该通道；外部服务执行不属于原生 Agent 的 Seatbelt 进程树，不能把第三方代码或 GUI 能力宣传成同等 OS 隔离。
+
 会话目录是已有工作流与会话记录的只读投影，包含尚无消息的工作流，不为展示目录创建空会话。管理页默认仅查询活动工作流，客户端也在计数和筛选前排除回收站及旧归档记录；恢复工作流后重新读取原会话。管理页先展示有界摘要；总控按需读取目标会话或提交只读诊断委派。子助手沿用目标工作流权限，委派不会继承总控的跨工作流权限，也不会执行运行、审核、学习或应用流程修改。
 
 会话身份贯穿消息幂等、回复／重试关联、检查点、并发控制、事件投递及界面状态。总控生命周期独立保存归档元数据，新建并归档当前主题在同一事务提交，归档只读且支持显式恢复；忙碌或未知操作拒绝归档，恢复不解除来源升级的只读身份。工作流聊天引用只保存已校验的工作流／消息身份、版本哈希及读取指针，正文沿用精确只读查询按需取得；引用不合并历史或授予操作权限。跨主题的事项和迟到响应不能替换当前会话，主题切换不清除原记录。旧项目路由保留兼容入口，普通任务仍通过历史任务入口查看。详细规则见[全局对话管理](application-assistant-capabilities.md#总控归档与工作流聊天引用)。
@@ -148,6 +152,8 @@ AI 方案的预应用与并发检查仍用完整 `documentFingerprint()`；仅�
 
 对话入口在服务端绑定独立工作流或总控身份，工具目录与 dispatcher 共用角色、对象归属及目录准入。独立会话固定工作流与工作文件夹，总控按人工配置开放跨工作流管理和软件日志；模型提供的 ID 不改变身份。“设置 → 助手权限”通过独立的版本化设置接口保存，助手工具和未来 MCP 均没有修改入口。权限变更逐次校验，旧检查点不提升权限；具体规则见 [会话权限与人工设置](application-assistant-capabilities.md#会话权限与人工设置)。
 
+本机工具权限按角色保存 `mcpTools`／`desktopControl`，总控另有 `connectionManage`，桌面目标用 `desktopApps` 明确列举。新安装开放 MCP／总控连接管理，桌面关闭、目标为空；旧记录缺字段只读投影关闭，不自动写回。桌面驱动仍需人工系统授权及每次修改审批，源码自修复保持独立默认关闭。
+
 `application-software-inspector.mjs`使用基础PATH与固定macOS应用路径发现建模／媒体CLI，可在临时HOME运行固定版本检查。实际代码执行另由 `workflows/workflow-runtime-launchers.mjs`复用发现器，按次在原PATH末尾追加私有命令入口并exec真实CLI；完成或取消后清理。基础环境和控制身份校验位于叶子 `workflow-code-environment.mjs`，诊断器与执行器共用，避免依赖环。`application-code-inspector.mjs`固定子进程做纯AST检查，真实worker共用 `python/workflow_code_validation.py`，保持多行字符串；本地依赖准备不改变AI意图或新增模型往返。
 
 `application-conversation-hub.mjs`持久保存独立会话的总控升级身份；按来源轮次唯一、操作内容绑定和启动前占位保证不重复发送。总控子消息使用不可由普通HTTP输入伪造的只读入口，权限scope另加来源业务对象／文件夹限制，保留人工开放的全局软件日志与源码只读。原聊天可读取该子任务的阶段和短结论，不能取得其它业务会话、子工具原始结果或写权限；未知启动和重启不重发，见[软件与脚本诊断](application-diagnostics.md#软件与脚本诊断)。
@@ -162,7 +168,7 @@ AI 方案的预应用与并发检查仍用完整 `documentFingerprint()`；仅�
 
 新增或变更用户功能时，同步修改能力目录、受影响的工具 schema／dispatch、必要说明与同接口回归。业务代码候选进入现有工作流提案、应用、执行及产物链；源码写保护不被候选路径绕过，代码进程也不构成 OS 沙箱。新增写操作显式约束对象、版本、幂等和读回验证。具体维护步骤见 [能力维护指南](application-assistant-capabilities.md)。
 
-目前没有对外 MCP server。后续 MCP 适配器复用上述 schema、dispatcher 和校验，仅承担协议转换，不复制另一套权限实现。
+目前支持作为客户端调用 Hermes 已配置的 MCP，仍没有对外 NodeOrchard MCP server。后续对外适配器复用上述 schema、dispatcher 和校验，仅承担协议转换，不复制另一套权限实现。
 
 模型等待默认由原生结果、错误及用户停止结束。分类、模型控制器和对话编排均以 `null` 表示无本地期限；工具次数、权限、版本、业务节点执行时限及不重放规则保持。历史期限仍按当时记录解释，详见[上下文、进度与中断](application-diagnostics.md#上下文进度与中断)。
 
