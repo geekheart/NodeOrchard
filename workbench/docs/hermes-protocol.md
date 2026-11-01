@@ -3,13 +3,15 @@
 ## 进程与连接
 
 1. 启动应用服务，默认监听 `127.0.0.1:4318`；此时不启动模型推理。
-2. 用户先独立安装并配置 Hermes，验证正常对话后，再在工作台点击连接。服务使用配置的 Hermes Python 启动 `python/workflow_gateway.py`；该入口加载现有 Hermes gateway，并加入工作台自己的 Skill 快照和模型选择 RPC，不修改 Hermes 安装。
+2. 用户先独立安装并配置 Hermes，验证正常对话后，再在工作台点击连接。工作流执行与受限控制会话使用 `python/workflow_gateway.py`；普通总控使用独立的 `python/supervisor_gateway.py`。两者加载既有 Hermes 实现，不修改 Hermes 安装；总控先验证 OS 隔离及受控出站代理，再启动专用 profile。
 3. 工作目录为本工程；`HERMES_PYTHON_SRC_ROOT` 和 `PYTHONPATH` 指向实际 Hermes 安装。协议走 stdin/stdout，诊断 stderr 单独接收。
 4. 收到 `gateway.ready` 后调用 `client.capabilities({server_requests:true})`。
 5. 核对 `approvals.mode` 为 `manual` 或 `smart`，通过 `model.options(explicit_only=true,include_unconfigured=false)` 读取当前选择及已配置提供商。浏览器只获得提供商、模型标识和认证状态；端点、密钥等完整配置不返回前端或写入日志。认证、端点解析及 fallback 由 Hermes 管理，工作台不限定 `openai-codex`。
 6. 应用退出时中断仍在运行的本应用会话，关闭 stdio 并等待自己启动的进程退出。
 
 模型请求均由 Hermes 发出，工作台没有第二条模型调用链。本地内置工具与代码进程不启动模型，也不要求先连接 Hermes；Python worker 使用配置的可用 Python 解释器。后续如果引入 Pi 或其他模型运行时，应增加完整 Agent 适配器，而不是只替换一个模型 URL。
+
+普通总控主题绑定持久 Hermes session，原生 Agent 负责工具调用循环、Skills、记忆和压缩；应用工具经绑定轮次的 stdio 回调进入原 dispatcher。独立助手、学习控制和来源绑定的只读总控诊断继续使用各自受限策略，不因总控改造取得原生工具。配置／认证快照和只读技能来源由宿主准备，原始 Hermes 私有资料保持原位；详细身份、恢复及执行限制见[总控原生会话](supervisor-native.md)。
 
 顶部模型入口通过受限的 `workbench.model.set` 调用 Hermes 原生 `switch_model(is_global=true)` 和 `persist_model_selection`，更新 Hermes 全局默认选择。提供商必须由模型目录明确标记为 `authenticated=true`；模型可从建议清单选择或手动填写 ID，由 Hermes 核验。遇到费用、数据策略等选择提示时拒绝在工作台代为确认，用户须在 Hermes 原生界面处理后刷新。只有 RPC 结果及重新读取的目录均与请求的提供商、模型完全一致，工作台才确认切换成功。
 
@@ -20,6 +22,8 @@
 ## 代理继承
 
 每次启动 Hermes 子进程前，工作台先合并当前进程与显式子进程环境。只要其中存在 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 或对应小写键，就完整保留显式代理选择，包括空值，不再用系统代理补齐。此规则不改模型、提供商或认证配置。
+
+上述规则描述工作流 gateway。原生总控使用宿主管理的出站代理：原生进程只可连接该代理，不能直接使用系统代理或访问本机工作台。宿主可沿已有代理配置访问公网目标，但仍须拒绝本机／私有目的、验证解析后的地址并防止绕路；网络能力不是任意本机服务访问权，见[原生隔离](supervisor-native.md#进程文件与网络隔离)。
 
 没有显式代理键时，仅在 macOS 有界、只读查询系统静态 HTTP／HTTPS 代理，将已启用且地址、端口有效的项投影到 Hermes 子进程环境。已有 `NO_PROXY`／`no_proxy` 保留；缺省时转换系统 `ExceptionsList` 中有效的主机、域名与 CIDR 项，并包含本机回环地址，复杂通配与简单主机排除规则不转换。其它平台、读取失败或没有有效静态项目时保留原环境；PAC-only、自动发现和 SOCKS-only 不被猜测转换，也不下载或执行 PAC。系统或环境代理变化对下一次 Hermes 子进程启动生效。
 
@@ -33,7 +37,7 @@
 - `storedSessionId`：Hermes 持久会话 ID，用于重启后恢复。
 - `runtimeSessionId`：当前 Hermes 子进程中的会话 ID，每次恢复可能改变。
 
-SQLite 只保存应用元数据和运行结果。对话历史通过 `session.history` 从 Hermes 读取。第一条消息前 Hermes 可能还没有持久会话；空会话在进程重启后按已记录的主提供商与模型重新创建，不伪称已恢复一段不存在的历史。未记录模型的旧空会话拒绝重建。恢复有历史的会话时核对 Hermes 实际返回的模型与已记录选择；工作流及学习托管历史使用只读延迟恢复。
+普通 Hermes 任务与总控原生会话的历史由 Hermes 持久管理，工作台保存应用元数据及页面消息投影；旧应用助手正文继续保留在原记录中。原生历史通过 `session.history` 读取。第一条消息前 Hermes 可能还没有持久会话；空会话在进程重启后按已记录的主提供商与模型重新创建，不伪称已恢复一段不存在的历史。未记录模型的旧空会话拒绝重建。恢复有历史的会话时核对 Hermes 实际返回的模型与已记录选择；工作流及学习托管历史使用只读延迟恢复。
 
 旧工作流运行或学习批次缺少主模型时，仅在关联会话能够确认唯一提供商与模型的情况下补回；无法确认则拒绝继续模型步骤，保留已有产物和审核结果，不采用当前默认模型猜测恢复。
 
