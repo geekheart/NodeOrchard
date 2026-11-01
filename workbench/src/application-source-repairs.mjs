@@ -13,6 +13,9 @@ const SOURCE = /^workbench\/(?:src|public|shared|python|test|assistant-skills|do
 const ROOT_FILES = new Set(['README.md', 'CONTEXT.md', 'AGENTS.md', 'workbench/README.md', 'workbench/package.json']);
 const EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.md', '.css', '.html', '.json', '.txt', '.yaml', '.yml']);
 const PROTECTED = new Set([
+  ...['supervisor-sandbox', 'supervisor-egress', 'supervisor-profile', 'supervisor-sessions', 'supervisor-artifacts', 'application-supervisor-native'].flatMap(name => [`workbench/src/${name}.mjs`, `workbench/test/${name}.test.mjs`]),
+  'workbench/python/supervisor_gateway.py', 'workbench/python/supervisor_profile.py', 'workbench/test/supervisor_gateway_test.py',
+  'workbench/src/route-policy.mjs', 'workbench/public/application-conversation-ui.js', 'workbench/public/workflow-conversation-ui.js',
   'agents.md', 'context.md', 'workbench/package.json', 'workbench/package-lock.json',
   ...['application.mjs', 'server.mjs', 'main.mjs', 'store.mjs', 'config.mjs', 'assistant-permission-settings.mjs', 'application-assistant-permissions.mjs',
     'application-assistant.mjs', 'application-conversation-hub.mjs', 'assistant-diagnostic-turn.mjs', 'assistant-model-experiment.mjs', 'application-runtime-sources.mjs', 'application-source-tools.mjs', 'application-source-repairs.mjs'].map(name => 'workbench/src/' + name),

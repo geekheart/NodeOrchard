@@ -37,6 +37,20 @@ test('source read/list are bounded and patch uses the observed hash with an immu
   assert.equal((await service.history({ limit: 5 })).repairs.length, 1);
 });
 
+test('even enabled source repair cannot rewrite the native supervisor isolation and authorization chain', async t => {
+  const paths = ['workbench/src/supervisor-sandbox.mjs', 'workbench/src/supervisor-egress.mjs', 'workbench/src/supervisor-profile.mjs',
+    'workbench/src/supervisor-sessions.mjs', 'workbench/src/application-supervisor-native.mjs', 'workbench/python/supervisor_gateway.py', 'workbench/python/supervisor_profile.py'];
+  const f = await fixture(t, { readGitState: async () => ({ tracked: paths, dirty: [] }) });
+  await mkdir(join(f.root, 'workbench/python'), { recursive: true });
+  const content = '# protected runtime fixture\n';
+  for (const [index, path] of paths.entries()) {
+    await writeFile(join(f.root, path), content);
+    await assert.rejects(f.service.patch({ operationId: 'native-guard-' + index, summary: 'Attempt to weaken own runtime',
+      changes: [{ path, expectedHash: hash(content), edits: [{ oldText: 'protected', newText: 'unrestricted' }] }] }, f.context), error => error.code === 'SOURCE_PATH_PROTECTED');
+    assert.equal(await readFile(join(f.root, path), 'utf8'), content);
+  }
+});
+
 test('source read pages survive the real assistant transcript without a second hidden truncation', async t => {
   const f = await fixture(t), path = 'workbench/src/feature.mjs';
   const content = Array.from({ length: 80 }, (_, index) => `line${index + 1}: ` + 'x'.repeat(110)).join('\n');

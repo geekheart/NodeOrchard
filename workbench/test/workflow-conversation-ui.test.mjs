@@ -501,6 +501,15 @@ test('progress display projects stage metadata without exposing checkpoint tool 
   assert.equal(JSON.stringify(view).includes('abcdefghijklmnop'), false);
 });
 
+test('native supervisor progress shows measured model requests rather than the number of persistent sessions', t => {
+  pendingDOM(t);
+  const turn = { status: 'complete', assistant: { progress: { runtime: 'hermes', modelCalls: 1, modelRequests: 6, toolCalls: 5, elapsedMs: 10 } } };
+  const labels = value => pendingDOMDescendants(WorkflowConversationUI.prototype.diagnosticProgressView(value)).map(node => node.textContent).join('\n');
+  assert.match(labels(turn), /模型请求 6 次/); assert.doesNotMatch(labels(turn), /模型 1 次/);
+  turn.assistant.progress.modelRequests = null;
+  assert.match(labels(turn), /模型请求数未记录/);
+});
+
 test('conversation scope captures the chosen node attempt and only attached artifacts for that node', () => {
   const { document, run, artifact } = fixture(); run.artifacts = [{ id: 'unrelated', sha256: 'b'.repeat(64), nodeId: 'another-node' }];
   assert.deepEqual(conversationContext(document, run, 'trim', { artifactIds: [artifact.id, 'unrelated', artifact.id] }), { runId: run.id, nodeId: 'trim', attempt: 2, attemptId: 'attempt-two', artifactIds: [artifact.id], artifactHashes: [{ id: artifact.id, sha256: artifact.sha256 }] });

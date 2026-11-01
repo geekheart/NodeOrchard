@@ -69,6 +69,7 @@ export class ApplicationAssistant {
     }
     this.maintenance = new ApplicationMaintenance(app, this);
     this.lifecycle = new ApplicationConversationLifecycle(app, this); this.references = new ApplicationConversationReferences(app, this);
+    this.native = app.supervisorRuntimeFactory?.(app, this) || null;
   }
   tools(scope) { const all = this.capabilities.tools(); return scope ? this.permissions.tools(all, scope) : all; }
   save(turn) { this.db.prepare('UPDATE application_conversation_turns SET value=? WHERE id=?').run(JSON.stringify(turn), turn.id); }
@@ -107,7 +108,7 @@ export class ApplicationAssistant {
       if (task) turn.assistant.maintenanceTask = this.maintenance.project(task);
       return turn;
     }));
-    return { conversationId, conversation: { ...metadata, workflowId: conversationId, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [] };
+    return { conversationId, conversation: { ...metadata, workflowId: conversationId, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [], nativeRequests: this.native?.requests(conversationId) || [] };
   }
   listConversations({ lifecycle = 'active' } = {}) {
     if (!['active', 'archived', 'all'].includes(lifecycle)) fail('总控会话筛选范围无效。');
@@ -251,11 +252,21 @@ export class ApplicationAssistant {
           } },
           onProgress: (message, progress) => { if (!this.closed && !controller.signal.aborted) {
             turn.assistant.text = message; if (progress) turn.assistant.progress = structuredClone(progress);
-            turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId);
+            turn.updatedAt = new Date(Math.max(Date.now(), Date.parse(turn.updatedAt) + 1)).toISOString(); this.save(turn); this.emit(conversationId);
           } },
           onCheckpoint: checkpoint => { if (!this.closed) { turn.assistant.checkpoint = structuredClone(checkpoint);
             turn.assistant.evidence = structuredClone(checkpoint.evidence || []); turn.updatedAt = new Date().toISOString(); this.save(turn); this.emit(conversationId); } } };
         const deadlineAt = this.maxDurationMs === null ? undefined : Date.parse(turn.createdAt) + this.maxDurationMs;
+        if (this.native && !readOnly) {
+          const result = await this.native.run({ conversationId, turnId: turn.id, text: input.text, context, page: bounded(input.page || {}),
+            history: previousTurns, attachments: refs, conversationReferences, signal: controller.signal, ...hooks,
+            onArtifacts: artifacts => { if (!this.closed && !controller.signal.aborted) { turn.assistant.nativeArtifacts = structuredClone(artifacts);
+              turn.updatedAt = new Date(Math.max(Date.now(), Date.parse(turn.updatedAt) + 1)).toISOString(); this.save(turn); this.emit(conversationId); } },
+            onIntent: intent => { if (!this.closed) { turn.user.intent = intent; this.save(turn); } } });
+          check(controller.signal); if (this.closed) return;
+          turn.assistant = { ...turn.assistant, ...result }; turn.status = result.operations?.length ? 'proposed' : 'complete'; finishDiagnostic(turn.assistant, 'complete');
+          return;
+        }
         const decision = await this.classify({ role: 'supervisor', ...(readOnly ? { readOnly: true, workflowBound: true } : {}), text: input.text, context, history, signal: controller.signal,
           deadlineAt, startedAt: turn.createdAt, ...hooks });
         check(controller.signal); turn.user.intent = decision.intent; this.save(turn);
@@ -800,5 +811,5 @@ export class ApplicationAssistant {
     }));
     return { versions, browser: await this.app.diagnosticBrowser?.capabilities() };
   }
-  async close() { if (this.closed) return; this.closed = true; for (const controller of this.active.values()) controller.abort(); await this.maintenance.close(); this.active.clear(); this.activeConversations.clear(); }
+  async close() { if (this.closed) return; this.closed = true; for (const controller of this.active.values()) controller.abort(); await this.native?.close(); await this.maintenance.close(); this.active.clear(); this.activeConversations.clear(); }
 }

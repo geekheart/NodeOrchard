@@ -182,3 +182,92 @@ test('an older archive SSE cannot overwrite the restored lifecycle revision or r
   assert.equal(ui.state().conversation.lifecycle, 'active'); assert.equal(ui.state().conversation.lifecycleRevision, 4); assert.equal(ui.editor.libraryReadOnly, false);
   assert.equal(ui.editor.doc.title, '已恢复的主题'); assert.equal(ui.state().draft, '恢复后的草稿'); assert.equal(calls.length, 1, 'old events do not trigger redundant GETs');
 });
+
+const thinking = [{ id: 'native-turn', status: 'thinking', user: { text: '隔离原生任务' }, assistant: { text: '等待人工处理' } }];
+const nativeSnapshot = (id = 'supervisor-a', requests = [], { revision = 2, nativeRequestsRevision = 1, turns = thinking, ...metadata } = {}) => ({ ...snapshot(id, revision, { turns, ...metadata }), nativeRequests: requests, nativeRequestsRevision });
+const approval = (id = 'request-one') => ({ id, turnId: 'native-turn', method: 'approval', params: { command: '<img src=x onerror=alert(1)>', description: '批准这次执行', choices: ['once', 'deny'] } });
+const descendants = (node, tag) => [node, ...node.children.flatMap(child => descendants(child, tag))].filter(child => child.tagName === tag);
+
+test('native request snapshots and SSE update the owning topic without merging pending chat issues', async t => {
+  const ui = fixture(t, async path => nativeSnapshot(path.split('/').at(-1), path.endsWith('supervisor-a') ? [approval()] : [])); await flush();
+  assert.equal(ui.state().nativeRequests.length, 1); assert.deepEqual(ui.state().pending, []); assert.equal(ui.nativeRequestsHost.hidden, false);
+  const card = ui.nativeRequestsHost.children[0]; assert.equal(card.attributes['aria-label'], '执行审批');
+  assert.equal(descendants(card, 'pre')[0].textContent, '<img src=x onerror=alert(1)>'); assert.equal(descendants(card, 'img').length, 0);
+  await ui.selectConversation('supervisor-b'); ui.renderNativeRequests(); assert.equal(ui.nativeRequestsHost.hidden, true);
+  ui.onEvent({ type: 'application.conversation', payload: nativeSnapshot('supervisor-a', [], { revision: 3, nativeRequestsRevision: 2 }) });
+  assert.equal(ui.state('supervisor-a').nativeRequests.length, 0); assert.equal(ui.workflowId, 'supervisor-b');
+});
+
+test('native approval submits only the exact request once and disables controls until the response arrives', async t => {
+  const reply = deferred(), calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return options ? reply.promise : nativeSnapshot('supervisor-a', [approval()]); }); await flush();
+  const card = ui.nativeRequestsHost.children[0], allow = descendants(card, 'button').find(control => control.textContent === '仅允许这一次');
+  allow.listeners.click(); allow.listeners.click(); await flush();
+  const posts = calls.filter(call => call.options);
+  assert.deepEqual(posts, [{ path: '/api/app-assistant/conversations/supervisor-a/requests/request-one', options: { method: 'POST', body: { choice: 'once' } } }]);
+  assert(descendants(card, 'button').every(control => control.disabled));
+  reply.resolve(nativeSnapshot('supervisor-a', [], { revision: 3, nativeRequestsRevision: 2 })); await flush();
+  assert.equal(ui.nativeRequestsHost.hidden, true);
+  ui.accept(nativeSnapshot('supervisor-a', [approval()], { revision: 3, nativeRequestsRevision: 1 }));
+  assert.equal(ui.nativeRequestsHost.hidden, true, 'a stale request snapshot cannot revive an acknowledged approval');
+});
+
+test('native requests are disabled on archived topics and after their bound turn ends', async t => {
+  const calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return nativeSnapshot('supervisor-a', [approval()]); }); await flush();
+  ui.accept(nativeSnapshot('supervisor-a', [approval()], { lifecycle: 'archived', lifecycleRevision: 1 }));
+  let controls = descendants(ui.nativeRequestsHost, 'button'); assert(controls.every(control => control.disabled)); controls[0].listeners.click();
+  assert.equal(await ui.replyNativeRequest('supervisor-a', 'request-one', { choice: 'once' }), false);
+  ui.accept(nativeSnapshot('supervisor-a', [approval()], { revision: 3, lifecycle: 'active', lifecycleRevision: 2, turns: [{ ...thinking[0], status: 'complete' }] }));
+  controls = descendants(ui.nativeRequestsHost, 'button'); assert(controls.every(control => control.disabled));
+  assert.equal(await ui.replyNativeRequest('supervisor-a', 'request-one', { choice: 'deny' }), false); assert.equal(calls.some(call => call.options), false);
+});
+
+test('native clarification retains unsent answers across streaming renders and sends question-id answers', async t => {
+  const calls = [], clarification = { id: 'clarify-one', turnId: 'native-turn', method: 'clarify', params: { questions: [{ qid: 'format', question: '输出格式', choices: ['GIF', 'PNG'] }, { qid: 'style', question: '展示风格' }] } };
+  const ui = fixture(t, async (path, options) => { calls.push({ path, options }); return nativeSnapshot('supervisor-a', options ? [] : [clarification], { revision: options ? 4 : 2, nativeRequestsRevision: options ? 2 : 1 }); }); await flush();
+  const card = ui.nativeRequestsHost.children[0], answers = descendants(card, 'textarea'), choices = descendants(card, 'input'); choices[0].checked = true; answers[1].value = '机械结构展开';
+  ui.accept(nativeSnapshot('supervisor-a', [clarification], { revision: 3 }));
+  assert.equal(ui.nativeRequestsHost.children[0], card); assert.equal(descendants(card, 'textarea')[1].value, '机械结构展开');
+  const form = descendants(card, 'form')[0]; form.listeners.submit({ preventDefault() {}, stopPropagation() {} }); await flush();
+  assert.deepEqual(calls.find(call => call.options), { path: '/api/app-assistant/conversations/supervisor-a/requests/clarify-one', options: { method: 'POST', body: { answers: { format: 'GIF', style: '机械结构展开' } } } });
+});
+
+test('incomplete clarification cannot submit and a failed single-question reply preserves its draft', async t => {
+  const calls = [], clarification = { id: 'clarify-single', turnId: 'native-turn', method: 'clarify', params: { question: '请补充输出要求' } };
+  const ui = fixture(t, async (path, options) => { calls.push({ path, options }); if (options) throw Error('网络未确认'); return nativeSnapshot('supervisor-a', [clarification]); }); await flush();
+  const card = ui.nativeRequestsHost.children[0], form = descendants(card, 'form')[0], answer = descendants(card, 'textarea')[0];
+  form.listeners.submit({ preventDefault() {} }); assert.equal(calls.some(call => call.options), false);
+  answer.value = '保留原尺寸'; form.listeners.submit({ preventDefault() {} }); await flush();
+  assert.deepEqual(calls.find(call => call.options).options.body, { answer: '保留原尺寸' });
+  assert.equal(ui.state().error, '网络未确认'); assert.equal(answer.value, '保留原尺寸'); assert.equal(ui.nativeRequestsHost.children[0], card); assert.equal(descendants(card, 'button')[0].disabled, false);
+});
+
+test('a late native reply updates only its origin topic and cannot clear the selected topic draft', async t => {
+  const reply = deferred(), calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return options ? reply.promise : nativeSnapshot(path.split('/').at(-1), path.endsWith('supervisor-a') ? [approval()] : []); }); await flush();
+  const pending = ui.replyNativeRequest('supervisor-a', 'request-one', { choice: 'deny' }); await ui.selectConversation('supervisor-b'); ui.state().draft = '另一个主题的草稿';
+  reply.resolve(nativeSnapshot('supervisor-a', [], { revision: 4, nativeRequestsRevision: 2 })); await pending;
+  assert.equal(ui.workflowId, 'supervisor-b'); assert.equal(ui.state().draft, '另一个主题的草稿'); assert.equal(ui.state('supervisor-a').nativeRequests.length, 0);
+  assert.equal(calls.filter(call => call.options).length, 1);
+});
+
+function nativeArtifact(turnId = 'native-turn', conversationId = 'supervisor-a', extra = {}) {
+  const id = 'artifact-' + 'a'.repeat(64);
+  return { id, name: '生成海报.png', mimeType: 'image/png', size: 128, sha256: 'b'.repeat(64), url: `/api/app-assistant/conversations/${conversationId}/turns/${turnId}/artifacts/${id}`, ...extra };
+}
+
+test('native image deliveries render inline and download from the exact owning turn even when archived', async t => {
+  const ui = fixture(t, async () => snapshot('supervisor-a', 1, { lifecycle: 'archived', lifecycleRevision: 1 })); await flush();
+  const turn = { id: 'native-turn', assistant: { nativeArtifacts: [nativeArtifact()] } }, view = ui.nativeArtifactsView(turn);
+  const image = descendants(view, 'img')[0], links = descendants(view, 'a');
+  assert.equal(image.attributes.src, nativeArtifact().url); assert.equal(image.attributes.loading, 'lazy'); assert.equal(image.attributes.alt, '生成海报.png');
+  assert.equal(links.find(link => link.textContent === '下载').attributes.download, '生成海报.png');
+  assert.equal(ui.editor.libraryReadOnly, true, 'archive locks mutations without hiding delivered files');
+});
+
+test('native delivery rendering rejects remote URLs, forged bindings and unsafe image MIME types', async t => {
+  const ui = fixture(t, async () => snapshot('supervisor-a')); await flush();
+  const turn = { id: 'native-turn', assistant: { nativeArtifacts: [nativeArtifact('native-turn', 'supervisor-other'), nativeArtifact('other-turn'), nativeArtifact('native-turn', 'supervisor-a', { url: 'https://example.invalid/file' })] } };
+  assert.equal(ui.nativeArtifactsView(turn), null);
+  turn.assistant.nativeArtifacts = [nativeArtifact('native-turn', 'supervisor-a', { name: '<img src=x onerror=alert(1)>.svg', mimeType: 'image/svg+xml' })];
+  const view = ui.nativeArtifactsView(turn); assert.equal(descendants(view, 'img').length, 0); assert.equal(descendants(view, 'figcaption')[0].textContent, '<img src=x onerror=alert(1)>.svg');
+  assert.equal(descendants(view, 'a').length, 1);
+});

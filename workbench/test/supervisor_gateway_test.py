@@ -1,6 +1,8 @@
 """Isolated protocol tests: no Hermes imports, user state, model or network."""
 import importlib.util
 import base64
+import ast
+import copy
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -317,10 +319,15 @@ class NativeSupervisorTests(unittest.TestCase):
             with patch.dict(gateway.os.environ, {"HERMES_HOME": str(home)}):
                 self.agent.action = lambda: self.bridge.invoke("nodeorchard_browser_capture", {}, task_id="stored-a")
                 output = self.agent.run_conversation("Inspect the page")
-            result = json.loads(output)
+            self.assertIsInstance(output, dict)
+            self.assertIs(output["_multimodal"], True)
+            self.assertEqual(output["content"][0], {"type": "text", "text": output["text_summary"]})
+            self.assertEqual(output["content"][1], {"type": "image_url", "image_url": {"url": "data:image/gif;base64," + image["data"]}})
+            result = json.loads(output["text_summary"])
             self.assertNotIn("_nodeorchard_images", result)
-            self.assertNotIn(image["data"], output)
-            self.assertNotIn("/host/private", output)
+            self.assertNotIn(image["data"], output["text_summary"])
+            self.assertNotIn(image["data"], output["content"][0]["text"])
+            self.assertNotIn("/host/private", output["text_summary"])
             self.assertEqual(result["value"]["id"], "capture-fixture")
             self.assertEqual(len(result["images"]), 1)
             path = Path(result["images"][0])
@@ -332,6 +339,51 @@ class NativeSupervisorTests(unittest.TestCase):
             self.assertIn("vision_analyze", result["readWith"])
             # A private file path still requires an actual visual tool read.
             self.assertIn("再判断画面", result["readWith"])
+
+    def test_capture_envelope_passes_installed_hermes_registry_and_native_vision_or_text_fallback(self):
+        # Load only the installed source's pure contract functions. No Hermes
+        # imports, configuration, providers or model calls run in this test.
+        root = Path(gateway.os.environ.get("HERMES_PYTHON_SRC_ROOT", Path.home() / ".hermes" / "hermes-agent"))
+        paths = [root / "tools/registry.py", root / "agent/tool_dispatch_helpers.py", root / "agent/vision_message_prep.py"]
+        if not all(path.is_file() for path in paths):
+            self.skipTest("Installed Hermes pure contract sources unavailable")
+        namespace = {"Any": object, "json": json, "logger": SimpleNamespace(debug=lambda *args: None, warning=lambda *args: None)}
+
+        def load(path, names):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            selected = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name in names:
+                    function = copy.deepcopy(node)
+                    function.decorator_list = []
+                    selected[node.name] = function
+            self.assertEqual(set(selected), set(names), "Hermes contract surface changed")
+            executable = ast.fix_missing_locations(ast.Module(body=[selected[name] for name in names], type_ignores=[]))
+            exec(compile(executable, str(path), "exec"), namespace)
+
+        load(paths[0], ["_normalize_handler_result"])
+        load(paths[1], ["_is_multimodal_tool_result", "_is_text_part", "_multimodal_text_summary"])
+        load(paths[2], ["_provider_model_key", "_tool_result_content_for_active_model"])
+        image = {"mimeType": "image/gif", "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}
+        with TemporaryDirectory() as temporary, patch.dict(gateway.os.environ, {"HERMES_HOME": str(Path(temporary).resolve())}):
+            envelope = gateway._capture_images({"value": {"id": "capture-fixture"}, "_nodeorchard_images": [image]}, "browser.capture")
+            self.assertIs(namespace["_normalize_handler_result"]("nodeorchard_browser_capture", envelope), envelope)
+            self.assertTrue(namespace["_is_multimodal_tool_result"](envelope))
+            self.assertEqual(namespace["_multimodal_text_summary"](envelope), envelope["text_summary"])
+            for vision, provider_accepts in [(True, True), (True, False), (False, False)]:
+                with self.subTest(vision=vision, provider_accepts=provider_accepts):
+                    agent = SimpleNamespace(provider="fixture", model="fixture-vision", _no_list_tool_content_models=set(),
+                        _content_has_image_parts=lambda content: any(part.get("type") == "image_url" for part in content),
+                        _model_supports_vision=lambda: vision, _provider_supports_vision_tool_messages=lambda: provider_accepts)
+                    actual = namespace["_tool_result_content_for_active_model"](agent, "nodeorchard_browser_capture", envelope)
+                    if vision and provider_accepts:
+                        self.assertIs(actual, envelope["content"])
+                        self.assertEqual(actual[1]["image_url"]["url"], "data:image/gif;base64," + image["data"])
+                    else:
+                        self.assertEqual(actual, envelope["text_summary"])
+                        self.assertNotIn(image["data"], actual)
+                        self.assertTrue(Path(json.loads(actual)["images"][0]).is_file())
+                        self.assertIn("vision_analyze", actual)
 
     def test_private_capture_channel_is_rejected_for_other_tools_without_writing_or_leaking_bytes(self):
         image = {"mimeType": "image/gif", "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}

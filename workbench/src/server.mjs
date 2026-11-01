@@ -120,6 +120,23 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (path === '/api/app-assistant/conversations' && requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
       if (req.method === 'GET' && path === '/api/app-assistant/conversations') return json(res, 200, { supervisors: application.applicationAssistant.listConversations() });
       if (req.method === 'POST' && path === '/api/app-assistant/conversations') return json(res, 201, application.applicationAssistant.createConversation(await readJson(req, 4096)));
+      const supervisorArtifact = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/artifacts\/(artifact-[a-f0-9]{64})$/);
+      if (supervisorArtifact && req.method === 'GET') {
+        if (requestURL.search) return json(res, 400, { error: '总控产物不接受查询参数。' });
+        const native = application.applicationAssistant.native;
+        if (!native) return json(res, 404, { error: '总控产物读取不可用。' });
+        const file = await native.artifacts.read(supervisorArtifact[1], supervisorArtifact[2], supervisorArtifact[3]);
+        res.writeHead(200, { 'Content-Type': file.mimeType, 'Content-Length': file.bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox; default-src 'none'", 'Content-Disposition': (file.mimeType.startsWith('image/') ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encodeURIComponent(file.name).replace(/['()*]/g, char => '%' + char.charCodeAt(0).toString(16).toUpperCase()) });
+        return res.end(file.bytes);
+      }
+      const supervisorRequest = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)\/requests\/([A-Za-z0-9_-]+)$/);
+      if (supervisorRequest && req.method === 'POST') {
+        if (requestURL.search) return json(res, 400, { error: '原生交互不接受查询参数。' });
+        const native = application.applicationAssistant.native;
+        if (!native) return json(res, 409, { error: '此连接不提供原生总控交互。' });
+        return json(res, 200, await native.reply(supervisorRequest[1], supervisorRequest[2], await readJson(req, 16384)));
+      }
       const supervisorConversation = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)(?:\/(messages|lifecycle|turns\/([A-Za-z0-9_-]+)\/action))?$/);
       if (supervisorConversation) {
         if (requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });

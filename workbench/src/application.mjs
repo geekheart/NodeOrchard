@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { NativeSupervisor } from './application-supervisor-native.mjs';
 import { mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve, join, dirname } from 'node:path';
 import { HermesAdapter, redact } from './hermes-adapter.mjs';
@@ -81,10 +82,15 @@ function observeAssistantReasoning(adapter) {
 }
 
 export class Application extends EventEmitter {
-  constructor(config, adapter = new HermesAdapter(config)) {
+  constructor(config, adapter = new HermesAdapter(config), { supervisorRuntimeFactory } = {}) {
     super();
     this.config = config;
     this.adapter = adapter;
+    // Non-Hermes adapters explicitly provide their own implementation at this
+    // seam. The installed application always uses the native Hermes runtime.
+    this.supervisorRuntimeFactory = supervisorRuntimeFactory === undefined
+      ? adapter instanceof HermesAdapter ? (app, owner) => new NativeSupervisor(app, owner) : null
+      : supervisorRuntimeFactory;
     this.models = new HermesModels(adapter);
     this.store = new Store(config.dataDir);
     try { this.logger = new ApplicationLog(this.store.db, { level: config.logLevel || 'info' }); }

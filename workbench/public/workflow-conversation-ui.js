@@ -438,7 +438,9 @@ export class WorkflowConversationUI {
     line.append(clock); box.append(line);
     const metrics = element('p', 'wf-conversation-message-scope'), total = element('span', '', duration(progress.totalElapsedMs));
     if (progress.active && progress.turnStartedAt) { total.dataset.diagnosticClock = 'total'; total.dataset.startedAt = progress.turnStartedAt; total.dataset.elapsedMs = String(progress.totalElapsedMs); }
-    metrics.append(element('span', '', '本轮已用 '), total, element('span', '', ` · 模型 ${progress.modelCalls} 次 · 工具 ${progress.toolCalls} 项`)); box.append(metrics);
+    const native = turn.assistant.progress?.runtime === 'hermes', requests = turn.assistant.progress?.modelRequests;
+    const model = native ? Number.isSafeInteger(requests) && requests >= 0 ? `模型请求 ${requests} 次` : '模型请求数未记录' : `模型 ${progress.modelCalls} 次`;
+    metrics.append(element('span', '', '本轮已用 '), total, element('span', '', ` · ${model} · 工具 ${progress.toolCalls} 项`)); box.append(metrics);
     if (progress.steps.length) {
       const details = element('details', 'wf-conversation-diagnostic-steps');
       details.append(element('summary', '', `诊断进度 · 已完成 ${progress.completed} 项${progress.failed ? ` · 未完成 ${progress.failed} 项` : ''}`));

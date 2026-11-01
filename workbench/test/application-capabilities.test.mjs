@@ -35,6 +35,35 @@ test('validated diagnosis intent loads its Skill even when the user does not use
   assert(!result.loadedSkills.some(skill => skill.name === 'repair-application'));
 });
 
+test('native supervisor discovery is limited to configured ordinary topics and keeps isolation a required execution gate', async t => {
+  const f = application(t);
+  const feature = scope => f.capabilities.features(scope).find(row => row.id === 'supervisor-native');
+  assert.equal(feature().status, 'unavailable');
+  f.app.supervisorRuntimeFactory = () => { throw new Error('Discovery must not launch a native process'); };
+  const supervisor = await f.assistant.permissions.bind({ role: 'supervisor' });
+  const native = feature(supervisor);
+  assert.equal(native.status, 'available'); assert.equal(native.channel, 'native-session'); assert.equal(native.conversationScope, 'ordinary-topic');
+  assert.deepEqual(native.tools, []); assert.deepEqual(native.requires, ['verified-os-isolation', 'public-only-egress-proxy']); assert.equal(native.unavailableResult, 'unavailable');
+  for (const scope of [await f.assistant.permissions.bind({ role: 'workflow', workflowId: 'workflow-a' }),
+    await f.assistant.permissions.bind({ role: 'supervisor', readOnly: true }), { ...supervisor, workflowBound: true }]) assert.equal(feature(scope).status, 'unavailable');
+  const interfaces = await f.capabilities.read('app.capabilities', { section: 'interfaces' }, { permissionScope: supervisor });
+  assert.equal(interfaces.protocol.current, 'native-session-and-broker'); assert.equal(interfaces.protocol.externalMcpServerAvailable, false);
+  const overview = await f.capabilities.read('app.capabilities', { section: 'overview' }, { permissionScope: { ...supervisor, readOnly: true } });
+  assert.equal(overview.features.find(row => row.id === 'supervisor-native').status, 'unavailable');
+  assert.equal(f.capabilities.features(supervisor).find(row => row.id === 'application-source-editing').status, 'unavailable');
+});
+
+test('native private Skill authoring does not advertise business Skill publishing or host terminal permissions', async t => {
+  const f = application(t), features = f.capabilities.features();
+  const authoring = features.find(row => row.id === 'skill-authoring');
+  assert.equal(authoring.status, 'ui-only'); assert.deepEqual(authoring.tools, []);
+  assert.match(authoring.note, /skill_manage.*私有Skill/); assert.match(authoring.note, /不发布或改写工作台业务Skill库/);
+  const routing = features.find(row => row.id === 'conversation-intent-routing');
+  assert.match(routing.note, /独立助手.*轻量分类/); assert.match(routing.note, /同一持久Hermes原生工具循环/);
+  const permissions = features.find(row => row.id === 'assistant-permissions');
+  assert.match(permissions.note, /OS隔离/); assert.match(permissions.note, /没有权限设置写工具/);
+});
+
 test('real code diagnostics use the assistant dispatcher and keep independent workflow ownership', async t => {
   const f = application(t), document = { id: 'workflow-a', mode: 'execute', nodes: [{ id: 'python-node', type: 'tool',
     config: { executionMode: 'code', language: 'python', code: 'script = "import os\\n    print(1)"\nreturn input' } }] };

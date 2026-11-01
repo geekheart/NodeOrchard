@@ -97,9 +97,13 @@ def _image_bytes(images):
     return checked
 
 
-def image_parts(images):
+def _image_content(checked):
     return [{"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")}}
-            for mime, data in _image_bytes(images)]
+            for mime, data in checked]
+
+
+def image_parts(images):
+    return _image_content(_image_bytes(images))
 
 
 def _capture_images(result, original_tool):
@@ -135,8 +139,9 @@ def _capture_images(result, original_tool):
         raise
     public = {key: value for key, value in result.items() if key != "_nodeorchard_images"}
     public["images"] = [str(path) for path in created]
-    public["readWith"] = "这些是诊断截图的私有副本。先用 read_file 或 vision_analyze 读取图像，再判断画面；文件路径和截图回执本身不证明图像内容。"
-    return public
+    public["readWith"] = "图像内容由 Hermes 按当前模型和提供商的支持情况传递。若仅收到文字摘要，先用 read_file 或 vision_analyze 读取 images 中的私有副本，再判断画面；文件路径和截图回执本身不证明图像内容。"
+    summary = json.dumps(public, ensure_ascii=False, allow_nan=False)
+    return {"_multimodal": True, "content": [{"type": "text", "text": summary}, *_image_content(checked)], "text_summary": summary}
 
 
 class NativeSupervisorGateway:
@@ -346,7 +351,11 @@ class NativeSupervisorGateway:
             with self.lock:
                 if not binding["active"] or binding["turn_id"] != payload["turn_id"]:
                     return json.dumps({"error": "Capture result belongs to an ended native turn.", "code": "supervisor_tool_cancelled"})
-            result = _capture_images(result, payload["tool"])
+            # This is Hermes' native multimodal tool-result envelope. Its own
+            # provider adapter chooses image parts or the safe text fallback.
+            # Other application data remains JSON text, never an implicit image
+            # envelope selected by a workflow/tool-result payload.
+            return _capture_images(result, payload["tool"])
         return json.dumps(result, ensure_ascii=False, allow_nan=False)
 
     def _route_block(self, binding, name):
