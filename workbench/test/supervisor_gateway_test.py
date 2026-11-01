@@ -393,9 +393,19 @@ class NativeSupervisorTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             home = Path(temporary).resolve()
             with patch.dict(gateway.os.environ, {"HERMES_HOME": str(home)}):
-                with self.assertRaisesRegex(gateway.SupervisorPolicyError, "only admitted for browser.capture"):
+                with self.assertRaisesRegex(gateway.SupervisorPolicyError, "trusted capture or MCP broker tool"):
                     self.agent.run_conversation("Inspect")
             self.assertEqual(list(home.iterdir()), [])
+
+    def test_host_desktop_and_mcp_images_use_the_native_capture_envelope(self):
+        image = {"mimeType": "image/gif", "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}
+        for tool in ("desktop.call", "mcp.call"):
+            with self.subTest(tool=tool), TemporaryDirectory() as temporary:
+                with patch.dict(gateway.os.environ, {"HERMES_HOME": str(Path(temporary).resolve())}):
+                    result = gateway._capture_images({"captureId": "capture", "_nodeorchard_images": [image]}, tool)
+                self.assertTrue(result["_multimodal"])
+                self.assertEqual(result["content"][1]["image_url"]["url"], "data:image/gif;base64," + image["data"])
+                self.assertNotIn(image["data"], result["text_summary"])
 
     def test_capture_channel_reuses_signature_count_size_and_total_budgets_before_writing_files(self):
         image = {"mimeType": "image/gif", "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}

@@ -1,15 +1,15 @@
 import { resolve } from 'node:path';
 
 export const ASSISTANT_PERMISSION_KEYS = Object.freeze({
-  workflow: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture']),
-  supervisor: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture', 'crossWorkflowRead', 'manageWorkflows', 'appLogs', 'sourceRead', 'sourceRepair', 'modelExperiment']),
+  workflow: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture', 'mcpTools', 'desktopControl']),
+  supervisor: Object.freeze(['workflowRead', 'workflowEdit', 'customNodes', 'workspaceRead', 'capture', 'mcpTools', 'desktopControl', 'connectionManage', 'crossWorkflowRead', 'manageWorkflows', 'appLogs', 'sourceRead', 'sourceRepair', 'modelExperiment']),
 });
 const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(message), { httpStatus }); };
-const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment']);
-const OPTIONAL_NEW_KEYS = new Set(['sourceRead', 'modelExperiment']);
+const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment', 'desktopControl']);
+const OPTIONAL_NEW_KEYS = new Set(['sourceRead', 'modelExperiment', 'mcpTools', 'desktopControl', 'connectionManage']);
 export const MODEL_EXPERIMENT_DEFAULT_LIMITS = Object.freeze({ maxInputCharacters: 50000 });
 const defaults = () => ({ ...Object.fromEntries(Object.entries(ASSISTANT_PERMISSION_KEYS).map(([role, keys]) => [role, Object.fromEntries(keys.map(key => [key, !DISABLED_DEFAULTS.has(key)]))])),
-  modelExperimentLimits: { ...MODEL_EXPERIMENT_DEFAULT_LIMITS } });
+  modelExperimentLimits: { ...MODEL_EXPERIMENT_DEFAULT_LIMITS }, desktopApps: [] });
 
 // This store is deliberately absent from the assistant tool dispatcher. Only
 // the authenticated settings form's HTTP handler can call save().
@@ -28,20 +28,24 @@ export class AssistantPermissionSettings {
       for (const key of DISABLED_DEFAULTS) if (!Object.hasOwn(value.supervisor, key)) value.supervisor = { ...value.supervisor, [key]: false };
     }
     if (!Object.hasOwn(value, 'modelExperimentLimits')) value.modelExperimentLimits = { ...MODEL_EXPERIMENT_DEFAULT_LIMITS };
+    for (const role of ['workflow', 'supervisor']) for (const key of ['mcpTools', 'desktopControl', ...(role === 'supervisor' ? ['connectionManage'] : [])]) {
+      if (!Object.hasOwn(value[role] || {}, key)) value[role] = { ...value[role], [key]: false };
+    }
+    if (!Object.hasOwn(value, 'desktopApps')) value.desktopApps = [];
     return { revision: row.revision, ...value, protection: 'human-only',
       workspaceRoot: resolve(this.app.config.workspaceRoot, this.app.preferences?.defaultWorkspace || '.'),
       immutable: { unrestrictedSourceWrite: false, shell: false, permissionWrite: false, workflowCrossScope: false } };
   }
   save(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)
-      || Object.keys(input).some(key => !['expectedRevision', 'workflow', 'supervisor', 'modelExperimentLimits'].includes(key))) fail('权限配置包含未知字段。');
+      || Object.keys(input).some(key => !['expectedRevision', 'workflow', 'supervisor', 'modelExperimentLimits', 'desktopApps'].includes(key))) fail('权限配置包含未知字段。');
     if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) fail('权限配置版本无效。');
     const value = {}, current = this.get();
     for (const [role, keys] of Object.entries(ASSISTANT_PERMISSION_KEYS)) {
       const row = input[role];
       if (!row || typeof row !== 'object' || Array.isArray(row)
         || Object.keys(row).some(key => !keys.includes(key)) || keys.some(key => typeof row[key] !== 'boolean'
-          && !(role === 'supervisor' && OPTIONAL_NEW_KEYS.has(key) && !Object.hasOwn(row, key)))) fail('请提交完整的助手权限配置。');
+          && !(OPTIONAL_NEW_KEYS.has(key) && !Object.hasOwn(row, key)))) fail('请提交完整的助手权限配置。');
       value[role] = Object.fromEntries(keys.map(key => [key, Object.hasOwn(row, key) ? row[key] : current[role][key] === true]));
     }
     const limits = Object.hasOwn(input, 'modelExperimentLimits') ? input.modelExperimentLimits : current.modelExperimentLimits;
@@ -49,6 +53,9 @@ export class AssistantPermissionSettings {
       || !Object.hasOwn(limits, 'maxInputCharacters') || !Number.isSafeInteger(limits.maxInputCharacters)
       || limits.maxInputCharacters < 1000 || limits.maxInputCharacters > 100000) fail('模型实验输入上限必须为 1000–100000 字符的整数。');
     value.modelExperimentLimits = { maxInputCharacters: limits.maxInputCharacters };
+    const desktopApps = Object.hasOwn(input, 'desktopApps') ? input.desktopApps : current.desktopApps;
+    if (!Array.isArray(desktopApps) || desktopApps.length > 32 || desktopApps.some(app => typeof app !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{2,159}$/.test(app))) fail('桌面应用须为最多32个准确的应用 Bundle ID。');
+    value.desktopApps = [...new Set(desktopApps)];
     const result = this.db.prepare('UPDATE assistant_permission_settings SET revision=revision+1,value=? WHERE id=1 AND revision=?')
       .run(JSON.stringify(value), input.expectedRevision);
     if (!result.changes) fail('权限配置已被其他页面修改，请重新读取后保存。', 409);

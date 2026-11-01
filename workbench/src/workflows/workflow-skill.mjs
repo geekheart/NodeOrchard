@@ -104,13 +104,16 @@ export async function prepareSkillRun(app, session, skill, options) {
   }
   const baseName = candidate ? skill.baseName : skill.name;
   const capabilities = await requiredCapabilities(app, skillNode.config.requiredToolsets, expectedCapabilities);
-  const prepared = await app.adapter.request('workbench.skill.prepare', {
+  const localBinding = await app.runtimeTools?.bindAttempt({ session, runId, nodeId, snapshotId, capabilities });
+  let prepared;
+  try { prepared = await app.adapter.request('workbench.skill.prepare', {
     session_id: sessionId, skill: baseName, revision, run_id: snapshotId,
     input: preparedInput, output_type: outputType,
     ...(candidate ? { candidate_content: skill.content, source_revision: skill.baseRevision } : {}),
     ...(isolated ? { memory_scope_id: memoryScopeId } : {}),
     ...(capabilities ? { required_toolsets: capabilities.requiredToolsets, capability_revision: capabilities.revision } : {}),
-  });
+    ...(localBinding ? { local_tool_token: localBinding.token } : {}),
+  }); } catch (error) { localBinding?.release(); throw error; }
   if (typeof prepared?.text !== 'string' || !prepared.text.trim()
       || prepared.skill?.name !== baseName || prepared.skill?.revision !== revision
       || (candidate && prepared.skill?.sourceRevision !== skill.baseRevision)
@@ -162,6 +165,7 @@ export async function prepareSkillRun(app, session, skill, options) {
       return { text: result.text };
     },
     cleanup: async () => {
+      localBinding?.release();
       const result = await app.adapter.request('workbench.skill.finish', {
         session_id: sessionId, run_id: snapshotId,
       });

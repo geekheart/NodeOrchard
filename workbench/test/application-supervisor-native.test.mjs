@@ -272,7 +272,7 @@ test('transport replacement resumes durable history and ignores late frames from
 });
 
 test('native application callbacks require routing, current turn identity and host permissions', async t => {
-  const f = await fixture(t); let result;
+  const f = await fixture(t); let result; const evidence = [];
   f.onSubmit = async (adapter, { session_id: sid }) => {
     const before = await adapter.tool(sid, 'workflows.list'); assert.match(before.error, /先通过/);
     const forged = await adapter.tool(sid, 'conversation.route', { intent: 'diagnose' }, { capability_token: 'invalid-token' });
@@ -283,8 +283,10 @@ test('native application callbacks require routing, current turn identity and ho
     assert.match(denied.error, /没有开放/);
     adapter.complete(sid);
   };
-  await f.run();
+  await f.run({ onEvidence: value => evidence.push(structuredClone(value)) });
   assert(result && typeof result === 'object' && !result.error);
+  assert.equal(evidence.at(-1).at(-1).tool, 'workflows.list');
+  assert(evidence.at(-1).at(-1).collectedAt);
   const prepared = f.adapters[0].calls.find(row => row.method === 'workbench.supervisor.prepare').args;
   assert(!prepared.tools.some(tool => tool.name === 'app.source.patch'));
   assert.equal(f.app.assistantPermissionSettings.get().supervisor.sourceRepair, false);

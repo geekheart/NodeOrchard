@@ -308,11 +308,12 @@ class _ReadOnlyMemorySnapshot:
 
 
 class WorkflowGateway:
-    def __init__(self, server, skill_commands, model_tools, tool_executor, *, workspace_root=None, integrations=None):
+    def __init__(self, server, skill_commands, model_tools, tool_executor, *, workspace_root=None, integrations=None, local_tools=None):
         self.server, self.sc = server, skill_commands
         self.model_tools, self.tool_executor = model_tools, tool_executor
-        from workflow_integrations import WorkflowIntegrations
-        self.integrations = integrations or WorkflowIntegrations(model_tools)
+        from workflow_local_tools import WorkflowLocalIntegrations
+        self.integrations = integrations or WorkflowLocalIntegrations(model_tools)
+        self.local_tools = local_tools
         declared = workspace_root or os.environ.get("WORKBENCH_GATEWAY_WORKSPACE_ROOT") or os.environ.get("WORKBENCH_WORKSPACE_ROOT")
         self.workspace_root = Path(declared).expanduser().resolve() if declared else None
         self.runs = {}
@@ -403,6 +404,7 @@ class WorkflowGateway:
 
     def _bind_integrations(self, agent, run):
         from workflow_integrations import external_tool
+        from workflow_local_tools import is_local_tool, replace_desktop_definitions
         identities = self.guarded_agents.get(agent)
         if identities is not None:
             run['identities'].update(identities)
@@ -411,11 +413,19 @@ class WorkflowGateway:
             # Old Skills inherit the native configured tools; this bridge adds
             # no authority and must not silently remove their existing tools.
             run['native_image_allowed'] = 'image_generate' in agent.valid_tool_names
+            if not run.get('local_tool_token') or run['finished']:
+                agent.tools = [row for row in agent.tools if not is_local_tool(row.get('function', {}).get('name'))]
+                agent.valid_tool_names = {name for name in agent.valid_tool_names if not is_local_tool(name)}
+            else:
+                agent.tools = replace_desktop_definitions(agent.tools)
             return
         ids, names = self.integrations.required(run.get('required_toolsets', []), run.get('capability_revision')) if not run['finished'] else ([], [])
         if not run['finished'] and (ids != run.get('required_toolsets', []) or names != run.get('tool_names', [])):
             raise WorkflowPolicyError('Required native tool identities changed; prepare a new attempt.')
-        definitions = self.integrations.definitions(ids, names) if ids else []
+        definitions = replace_desktop_definitions(self.integrations.definitions(ids, names)) if ids else []
+        if not run.get('local_tool_token'):
+            definitions = [row for row in definitions if not is_local_tool(row.get('function', {}).get('name'))]
+            names = [name for name in names if not is_local_tool(name)]
         agent.tools = [row for row in agent.tools if not external_tool(row.get('function', {}).get('name'))] + definitions
         agent.valid_tool_names = {name for name in agent.valid_tool_names if not external_tool(name)} | set(names)
         if not getattr(agent, '_workbench_integration_turn_guard', False):
@@ -481,6 +491,12 @@ class WorkflowGateway:
                 return json.dumps({"error": _READ_ONLY_MEMORY_MESSAGE, "code": "workbench_learning_memory_blocked"})
             if self._integration_block(identities, name, bound.arguments['function_args']):
                 return json.dumps({'error': 'Native integration tool was not declared for this attempt.', 'code': 'workbench_integration_tool_blocked'})
+            from workflow_local_tools import connection_management, is_local_tool, local_tool_call
+            run = next((run for identity in identities if (run := self._run_for(identity))), None)
+            if connection_management(name, bound.arguments['function_args']):
+                return json.dumps({'error': 'Workflow attempts cannot manage connections; ask the supervisor to prepare the human authorization card.', 'code': 'workbench_connection_management_blocked'})
+            if local_tool_call(name, bound.arguments['function_args']) and (not run or run['finished'] or not run.get('local_tool_token') or self.local_tools is None):
+                return json.dumps({'error': 'Local tools require the current host-admitted workflow attempt.', 'code': 'workbench_local_tool_blocked'})
             if any(self._is_guarded(identity) for identity in identities):
                 if name == "skill_manage":
                     return json.dumps({"error": _BLOCK_MESSAGE, "code": "workbench_skill_mutation_blocked"})
@@ -489,7 +505,8 @@ class WorkflowGateway:
                     tool_args = bound.arguments["function_args"] or {}
                     if run and tool_args.get("name") in run["aliases"]:
                         return self._frozen_view(run, tool_args.get("file_path"))
-            run = next((run for identity in identities if (run := self._run_for(identity))), None)
+            if is_local_tool(name):
+                return self.local_tools.call(run, name, bound.arguments['function_args'], getattr(ids, 'tool_call_id', None))
             result = execute(*args, **kwargs)
             if name == 'image_generate' and run and not run['finished']:
                 with self.lock:
@@ -546,6 +563,12 @@ class WorkflowGateway:
                 return _READ_ONLY_MEMORY_MESSAGE, ref.args
             if self._integration_block((identity,), ref.name, ref.args):
                 return 'Native integration tool was not declared for this attempt.', ref.args
+            from workflow_local_tools import connection_management, local_tool_call
+            run = self._run_for(identity)
+            if connection_management(ref.name, ref.args):
+                return 'Workflow attempts cannot manage connections; use the supervisor authorization card.', ref.args
+            if local_tool_call(ref.name, ref.args) and (not run or run['finished'] or not run.get('local_tool_token') or self.local_tools is None):
+                return 'Local tools require the current host-admitted workflow attempt.', ref.args
             if (identities is not None or self._is_guarded(identity)) and ref.name == "skill_manage":
                 return _BLOCK_MESSAGE, ref.args
             return pre_tool(agent, ref)
@@ -568,6 +591,17 @@ class WorkflowGateway:
                 return json.dumps({"error": _READ_ONLY_MEMORY_MESSAGE, "code": "workbench_learning_memory_blocked"})
             if self._integration_block(identities, bound.arguments['function_name'], bound.arguments['function_args']):
                 return json.dumps({'error': 'Native integration tool was not declared for this attempt.', 'code': 'workbench_integration_tool_blocked'})
+            from workflow_local_tools import connection_management, local_tool_call, DESKTOP_SCHEMA
+            name, tool_args = bound.arguments['function_name'], bound.arguments['function_args']
+            run = next((run for identity in identities if (run := self._run_for(identity))), None)
+            if connection_management(name, tool_args):
+                return json.dumps({'error': 'Workflow attempts cannot manage connections; use the supervisor authorization card.', 'code': 'workbench_connection_management_blocked'})
+            if local_tool_call(name, tool_args) and (not run or run['finished'] or not run.get('local_tool_token') or self.local_tools is None):
+                return json.dumps({'error': 'Local tools require the current host-admitted workflow attempt.', 'code': 'workbench_local_tool_blocked'})
+            if run and name == 'tool_describe' and isinstance(tool_args, dict) and tool_args.get('name', tool_args.get('tool_name')) == 'computer_use':
+                if run['finished'] or not run.get('local_tool_token'):
+                    return json.dumps({'error': 'Local tools require the current host-admitted workflow attempt.', 'code': 'workbench_local_tool_blocked'})
+                return json.dumps({'name': 'computer_use', 'parameters': DESKTOP_SCHEMA}, ensure_ascii=False)
             return handle(*args, **kwargs)
 
         self.model_tools.handle_function_call = guarded_handle
@@ -621,8 +655,8 @@ class WorkflowGateway:
             self.guarded_agents[agent] = identities
         identities.update({sid, session.get("session_key"), getattr(agent, "session_id", None)} - {None, ""})
         self.guarded_sessions.update(identities)
-        agent.tools = [tool for tool in agent.tools if tool.get("function", {}).get("name") != "skill_manage"]
-        agent.valid_tool_names.discard("skill_manage")
+        agent.tools = [tool for tool in agent.tools if tool.get("function", {}).get("name") not in {"skill_manage", "manage_connections"}]
+        agent.valid_tool_names.difference_update({"skill_manage", "manage_connections"})
         agent._skill_nudge_interval = 0
         agent._iters_since_skill = 0
         if not getattr(agent, "_workbench_skill_review_guard", False):
@@ -1051,7 +1085,7 @@ class WorkflowGateway:
         return path
 
     def _validate(self, params):
-        if not isinstance(params, dict) or set(params) - {"session_id", "skill", "revision", "run_id", "input", "output_type", "candidate_content", "source_revision", "memory_scope_id", "required_toolsets", "capability_revision"}:
+        if not isinstance(params, dict) or set(params) - {"session_id", "skill", "revision", "run_id", "input", "output_type", "candidate_content", "source_revision", "memory_scope_id", "required_toolsets", "capability_revision", "local_tool_token"}:
             raise WorkflowPolicyError("Unexpected workflow prepare parameters.")
         if not isinstance(params.get("session_id"), str) or not params["session_id"]:
             raise WorkflowPolicyError("A live session_id is required.")
@@ -1079,6 +1113,13 @@ class WorkflowGateway:
                 raise ValueError()
         except (ValueError, TypeError, AttributeError) as exc:
             raise WorkflowPolicyError("run_id must be a canonical UUID.") from exc
+        if 'local_tool_token' in params:
+            token = params['local_tool_token']
+            try:
+                if not isinstance(token, str) or str(uuid.UUID(token)) != token:
+                    raise ValueError()
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise WorkflowPolicyError('local_tool_token must be a canonical UUID.') from exc
         if params.get("output_type") not in OUTPUT_TYPES:
             raise WorkflowPolicyError("Unsupported workflow output_type.")
         if "input" not in params:
@@ -1243,6 +1284,7 @@ class WorkflowGateway:
                         'workspace': str(workspace), 'run_id': run_id, 'required_toolsets': required, 'tool_names': tool_names,
                         'integration_scoped': bool(required),
                         'capability_revision': params.get('capability_revision'),
+                        'local_tool_token': params.get('local_tool_token'),
                         "loaded_payload": copy.deepcopy(loaded_payload), "output_type": params["output_type"],
                         "scaffold_session_id": session.get("session_key") or sid,
                         **({"memory_scope_id": scope["scope_id"]} if scope else {}),
@@ -1626,12 +1668,18 @@ def main():
     # is intentionally imported before any Hermes package, as in the native entry.
     import hermes_bootstrap
     hermes_bootstrap.harden_import_path()
-    from tui_gateway import server
+    from tui_gateway import server, server_requests
     from agent import skill_commands, tool_executor
     import model_tools
     from hermes_models import install_model_rpc
     install_model_rpc(server)
-    WorkflowGateway(server, skill_commands, model_tools, tool_executor).install()
+    from connection_gateway import install_connection_rpc
+    from local_tools import LocalTools
+    from workflow_local_tools import WorkflowLocalTools, install_local_tool_request_contract
+    install_connection_rpc(server)
+    LocalTools(server).install()
+    install_local_tool_request_contract()
+    WorkflowGateway(server, skill_commands, model_tools, tool_executor, local_tools=WorkflowLocalTools(server_requests)).install()
     from tui_gateway import entry
     entry.main()
 

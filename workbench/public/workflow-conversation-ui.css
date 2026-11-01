@@ -66,6 +66,9 @@
 .wf-conversation-outcome { margin-top: 9px; color: var(--green); font-size: 11px; line-height: 1.7; }
 .wf-conversation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .wf-conversation-actions > p { flex-basis: 100%; margin: 0 0 3px; }
+.wf-tool-approval-details { margin-top: 6px; font-size: 11px; color: var(--secondary); }
+.wf-tool-approval-details > summary { cursor: pointer; }
+.wf-tool-approval-details > pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .wf-conversation .wf-button { font-size: 11px; padding: 6px 9px; min-height: 29px; }
 .wf-conversation-link { padding: 2px 0; border: 0; background: transparent; font-size: 10px; color: var(--accent); text-align: left; }
 .wf-conversation-link:hover { text-decoration: underline; }

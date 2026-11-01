@@ -174,7 +174,8 @@ export class WorkflowConversationUI {
     const actions = element('div', 'wf-conversation-composer-actions'), secondary = element('div', 'wf-conversation-composer-secondary'); this.runButton = button('运行当前流程', () => void this.startRun(), 'wf-button'); this.sendButton = element('button', 'wf-button primary', '发送'); this.sendButton.type = 'submit'; this.sendButton.setAttribute('aria-label', '发送工作流消息');
     this.fileAttachments.mount({ input: this.input, dropZone: composer }); secondary.append(this.fileAttachments.control, this.runButton); actions.append(secondary, this.sendButton);
     composer.addEventListener('submit', event => { event.preventDefault(); void this.send(); }); composer.addEventListener('keydown', event => event.stopPropagation()); composer.append(this.revisionHandoffHost, this.contextHost, options, this.input, this.fileAttachments.host, actions);
-    panel.append(this.resizeHandle, heading, this.notice, this.pendingHost, this.messages, this.resultHost, composer); this.panel = panel; this.editor.root.querySelector('.wf-body').append(panel);
+    this.toolApprovals = new ToolApprovalsUI(this);
+    panel.append(this.resizeHandle, heading, this.notice, this.pendingHost, this.messages, this.resultHost, this.toolApprovals.host, composer); this.panel = panel; this.editor.root.querySelector('.wf-body').append(panel);
     this.editor.root.classList.add('wf-chat-enabled');
     this.openButton = button('打开工作流对话', () => this.toggle(true), 'wf-button wf-conversation-open');
     if (this.editor.root.querySelector('.wf-header')) setToolbarControl(this.openButton, { label: '打开工作流对话', icon: 'chat' });
@@ -223,6 +224,7 @@ export class WorkflowConversationUI {
       { supervisor: this.isMaintenanceSupervisor(), conversationId: id, workflowId: id });
     const outcomes = snapshot.turn ? [snapshot.turn] : wasLoaded ? conversation.turns.filter(turn => turn.outcome?.status === 'complete' && (previous.get(turn.id)?.status !== 'complete' || previous.get(turn.id)?.completedAt !== turn.outcome.completedAt)) : conversation.turns.slice(-1);
     state.conversation = conversation; state.pending = Array.isArray(snapshot.pending) ? snapshot.pending : state.pending; state.loaded = true;
+    if (Array.isArray(snapshot.toolRequests)) state.toolRequests = snapshot.toolRequests;
     void this.syncOutcomes(outcomes, id);
     if (this.workflowId === id) { this.render(); this.schedulePoll(); } return true;
   }
@@ -412,7 +414,7 @@ export class WorkflowConversationUI {
     if (!this.panel || !this.workflowId) return;
     const followLatest = this.messages.scrollHeight - this.messages.scrollTop - this.messages.clientHeight < 60;
     const state = this.state(), groups = conversationTurnGroups(state.conversation.turns); this.subtitle.textContent = this.editor.nodeLibrary?.nested ? '内部编辑中' : this.editor.libraryReadOnly ? '只读' : this.getBackend()?.state === 'ready' ? '已连接' : '未连接';
-    this.renderNotice(); this.renderPending(groups); this.renderRevisionHandoff(); this.messages.replaceChildren();
+    this.renderNotice(); this.renderPending(groups); this.renderRevisionHandoff(); this.toolApprovals?.render(); this.messages.replaceChildren();
     if (!groups.latest) {
       const empty = element('div', 'wf-conversation-empty'); empty.append(element('p', '', '暂无消息')); this.messages.append(empty);
     } else {
@@ -723,3 +725,4 @@ export class WorkflowConversationUI {
   }
   destroy() { this.destroyed = true; clearTimeout(this.pollTimer); clearTimeout(this.pendingRefreshTimer); clearTimeout(this.progressTimer); this.finishResize?.(); this.fileAttachments?.destroy(); this.panel?.remove(); this.openButton?.remove(); this.editor.root.classList.remove('wf-chat-enabled', 'wf-chat-open'); }
 }
+import { ToolApprovalsUI } from './tool-approvals-ui.js';

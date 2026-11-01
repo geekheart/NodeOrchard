@@ -13,6 +13,8 @@ import { APPLICATION_SUPERVISOR_TOOLS } from '../src/application-supervisor-tool
 import { APPLICATION_CONVERSATION_HUB_TOOLS } from '../src/application-conversation-hub.mjs';
 import { ASSISTANT_MODEL_TOOLS } from '../src/assistant-model-tools.mjs';
 import { APPLICATION_MAINTENANCE_TOOLS } from '../src/application-maintenance.mjs';
+import { APPLICATION_CONNECTION_TOOLS } from '../src/application-connections.mjs';
+import { APPLICATION_RUNTIME_TOOLS } from '../src/application-runtime-tools.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,6 +64,27 @@ test('native private Skill authoring does not advertise business Skill publishin
   assert.match(routing.note, /独立助手.*轻量分类/); assert.match(routing.note, /同一持久Hermes原生工具循环/);
   const permissions = features.find(row => row.id === 'assistant-permissions');
   assert.match(permissions.note, /OS隔离/); assert.match(permissions.note, /没有权限设置写工具/);
+});
+
+test('native scheduling and shared local tools advertise their real interfaces and remaining dependencies', async t => {
+  const f = application(t), features = f.capabilities.features();
+  const mcp = features.find(row => row.id === 'configured-mcp-tools');
+  assert.equal(mcp.status, 'available'); assert.deepEqual(mcp.roles, ['workflow', 'supervisor']);
+  assert.deepEqual(mcp.tools, ['mcp.servers', 'mcp.call']); assert(mcp.requires.includes('mcpTools'));
+  assert.match(mcp.note, /本机.*私网.*公网/); assert.match(mcp.note, /逐次人工/); assert.match(mcp.note, /不等价OS隔离/);
+  const desktop = features.find(row => row.id === 'local-desktop-tools');
+  assert.equal(desktop.defaultEnabled, false); assert.deepEqual(desktop.tools, ['desktop.status', 'desktop.call']);
+  assert(desktop.requires.includes('human-system-authorization')); assert.match(desktop.note, /desktopApps默认为空/);
+  const connections = features.find(row => row.id === 'hermes-connection-management');
+  assert.deepEqual(connections.roles, ['supervisor']); assert.deepEqual(connections.tools, ['connections.list', 'connections.manage']);
+  assert.match(connections.note, /原生连接/); assert.match(connections.note, /不能.*改变权限/);
+  const schedule = features.find(row => row.id === 'workflow-native-scheduler');
+  assert.equal(schedule.status, 'available'); assert.deepEqual(schedule.tools, []); assert.equal(schedule.channel, 'scheduled-workflow');
+  assert.deepEqual(schedule.requires, ['hermes-native-cron', 'running-workbench', 'awake-host']);
+  assert.match(schedule.note, /非系统开机daemon/); assert.match(schedule.note, /不唤醒电脑/); assert.match(schedule.note, /错过不补跑/);
+  assert.equal(features.find(row => row.id === 'schedules').status, 'ui-only');
+  const permissions = features.find(row => row.id === 'assistant-permissions'); assert.match(permissions.note, /旧缺字段只读投影false/);
+  assert.equal(features.find(row => row.id === 'application-source-editing').status, 'unavailable');
 });
 
 test('real code diagnostics use the assistant dispatcher and keep independent workflow ownership', async t => {
@@ -209,7 +232,7 @@ test('capability tools and internal Skills are discoverable without inventing ex
   const tools = f.assistant.tools();
   assert.equal(new Set(tools.map(row => row.name)).size, tools.length);
   assert.ok(tools.every(row => row.inputSchema.additionalProperties === false));
-  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS.filter(tool => tool.name !== 'assistant.experiment'), ...APPLICATION_MAINTENANCE_TOOLS].map(row => row.name));
+  assert.deepEqual(tools.map(row => row.name), [...APPLICATION_ASSISTANT_TOOLS, ...APPLICATION_SUPERVISOR_TOOLS, ...APPLICATION_CONVERSATION_HUB_TOOLS, ...ASSISTANT_MODEL_TOOLS.filter(tool => tool.name !== 'assistant.experiment'), ...APPLICATION_MAINTENANCE_TOOLS, ...APPLICATION_CONNECTION_TOOLS, ...APPLICATION_RUNTIME_TOOLS].map(row => row.name));
   assert.equal((await f.capabilities.read('assistant.skills.list')).skills.length, 5);
   assert.match((await f.capabilities.read('assistant.skills.read', { name: 'author-code-node' })).instructions, /node.describe/);
 });

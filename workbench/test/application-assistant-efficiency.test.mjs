@@ -140,6 +140,19 @@ test('initial context omits repeated long code and logs with explicit on-demand 
   assert.match(prompt, /FETCH_FAILED/); assert.match(prompt, /按需|省略/);
 });
 
+test('initial capability index retains entries beyond the generic array limit without repeating detailed contracts', async t => {
+  const f = fixture(t, [() => ({ text: '已读取能力。' })]);
+  await f.assistant.plan({ text: '检查当前能力' });
+  const source = JSON.parse(f.prompts[0].split('SOURCE_JSON=')[1].split('\nTOOL_RESULTS_JSON=')[0]);
+  const ids = Object.values(source.capabilities.featureIndex).flat();
+  const expected = f.assistant.capabilities.features().filter(feature => !['application-source-editing', 'maintenance'].includes(feature.id)).map(feature => feature.id);
+  assert(expected.length > 30); assert.deepEqual(new Set(ids), new Set(expected));
+  assert.equal(source.capabilities.features.find(feature => feature.id === 'execution').status, 'ui-only');
+  assert(!ids.includes('maintenance'), 'a detached planning call cannot invent an authorized maintenance task');
+  assert(source.capabilities.loadedSkills.every(skill => /^sha256:/.test(skill.revision)));
+  assert(source.capabilities.skillManifest.every(skill => !Object.hasOwn(skill, 'revision')));
+});
+
 test('whole-turn deadline stops an unresponsive model without starting a late tool', async t => {
   const f = fixture(t, [() => new Promise(() => {})], { maxDurationMs: 25 });
   let checkpoint;

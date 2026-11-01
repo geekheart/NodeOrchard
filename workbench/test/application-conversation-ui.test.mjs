@@ -271,3 +271,32 @@ test('native delivery rendering rejects remote URLs, forged bindings and unsafe 
   const view = ui.nativeArtifactsView(turn); assert.equal(descendants(view, 'img').length, 0); assert.equal(descendants(view, 'figcaption')[0].textContent, '<img src=x onerror=alert(1)>.svg');
   assert.equal(descendants(view, 'a').length, 1);
 });
+
+const nativeConnection = (state = 'pending') => ({ id: 'connection-one', turnId: 'native-turn', method: 'connection', params: { op_id: 'native-operation', seq: 1,
+  targets: [{ name: 'fixture', kind: 'mcp', action: 'install', state, ...(state === 'pending' ? { required_env: [{ name: 'FIXTURE_API_KEY', prompt: 'Fixture API key', secret: true, required: true, default: 'must-never-prefill' }] } : {}) }] } });
+const connectionSnapshot = (id = 'supervisor-a', revision = 1, connection = nativeConnection()) => ({ ...snapshot(id, revision, { turns: [{ id: 'native-turn', status: 'thinking' }] }), nativeRequests: [], connectionRequests: [connection] });
+
+test('native connection cards submit secrets only through their owning human route and remain until native settlement', async t => {
+  const calls = [], ui = fixture(t, async (path, options) => {
+    calls.push({ path, options });
+    return options?.method === 'POST' ? connectionSnapshot('supervisor-a', 2, nativeConnection('initiated')) : connectionSnapshot();
+  }); await flush(); ui.renderNativeRequests();
+  const row = ui.state().nativeRequestRows.get('connection-one'), input = row.controls.find(node => node.tagName === 'input');
+  assert.equal(input.type, 'password'); assert.equal(input.value, ''); input.value = 'human-only-private-value';
+  row.controls.find(node => node.textContent === '确认连接').listeners.click(); await flush();
+  const posts = calls.filter(row => row.options?.method === 'POST'); assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, '/api/app-assistant/conversations/supervisor-a/connections/connection-one');
+  assert.equal(posts[0].options.body.targets[0].env.FIXTURE_API_KEY, 'human-only-private-value');
+  assert.equal(ui.state().nativeRequestSettled.has('connection-one'), false);
+  assert.equal(ui.state().nativeRequests[0].params.targets[0].state, 'initiated');
+  assert(!JSON.stringify(ui.state().conversation).includes('human-only-private-value')); assert.equal(ui.state().draft, '');
+});
+
+test('a connection card from an old topic cannot send credentials into the newly selected conversation', async t => {
+  const calls = [], ui = fixture(t, async (path, options) => { calls.push({ path, options }); return path.endsWith('supervisor-a') ? connectionSnapshot() : { ...snapshot('supervisor-b'), nativeRequests: [], connectionRequests: [] }; });
+  await flush(); ui.renderNativeRequests(); const old = ui.state().nativeRequestRows.get('connection-one');
+  old.controls.find(node => node.tagName === 'input').value = 'secret-for-a'; await ui.selectConversation('supervisor-b');
+  old.controls.find(node => node.textContent === '确认连接').listeners.click(); await flush();
+  assert.equal(calls.filter(row => row.options?.method === 'POST').length, 0); assert.equal(ui.state().nativeRequests.length, 0); assert.equal(ui.state().draft, '');
+  assert(!JSON.stringify(ui.state().conversation).includes('secret-for-a'));
+});

@@ -143,7 +143,7 @@ export class WorkflowConversations {
     const revision = this.db.prepare('SELECT revision FROM workflow_conversations WHERE workflow_id=?').get(workflowId)?.revision || 0;
     const rows = this.db.prepare('SELECT value FROM workflow_conversation_turns WHERE workflow_id=? ORDER BY rowid DESC LIMIT 200').all(workflowId).reverse();
     const turns = projectConversationIssues(rows.map(row => JSON.parse(row.value)), { reviewState: context => this.reviewState(workflowId, context) });
-    return { conversation: { workflowId, revision, turns }, pending: this.pending(workflowId) };
+    return { conversation: { workflowId, revision, turns }, pending: this.pending(workflowId), toolRequests: this.app.toolApprovals?.requests(workflowId) || [] };
   }
   response(workflowId, turn) {
     const snapshot = this.get(workflowId);

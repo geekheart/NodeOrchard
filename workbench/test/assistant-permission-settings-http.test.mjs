@@ -71,7 +71,9 @@ test('permission settings GET declares immutable protections and PUT persists ex
 test('experimental source repair is supervisor-only, disabled by default and persists only after a human versioned save', async t => {
   const f = await fixture(t), before = businessState(f.app), original = (await f.request()).body;
   assert.equal(original.supervisor.sourceRepair, false); assert.equal(Object.hasOwn(original.workflow, 'sourceRepair'), false);
-  for (const [role, keys] of Object.entries(ASSISTANT_PERMISSION_KEYS)) for (const key of keys) assert.equal(original[role][key], !['sourceRead', 'sourceRepair', 'modelExperiment'].includes(key));
+  for (const [role, keys] of Object.entries(ASSISTANT_PERMISSION_KEYS)) for (const key of keys) assert.equal(original[role][key], !['sourceRead', 'sourceRepair', 'modelExperiment', 'desktopControl'].includes(key));
+  assert.equal(original.workflow.mcpTools, true); assert.equal(original.supervisor.mcpTools, true);
+  assert.equal(original.supervisor.connectionManage, true); assert.deepEqual(original.desktopApps, []);
   const enabled = update(original); enabled.supervisor.sourceRepair = true;
   const saved = await f.request('PUT', enabled); assert.equal(saved.status, 200); assert.equal(saved.body.supervisor.sourceRepair, true);
   assert.equal(saved.body.immutable.unrestrictedSourceWrite, false); assert.equal(saved.body.immutable.permissionWrite, false); assert.equal(saved.body.immutable.shell, false);
@@ -81,7 +83,8 @@ test('experimental source repair is supervisor-only, disabled by default and per
 
 test('legacy permission rows project new grants as disabled without migrating settings or business records on read', async t => {
   const f = await fixture(t), legacy = (await f.request()).body, before = businessState(f.app);
-  for (const key of ['sourceRead', 'sourceRepair', 'modelExperiment']) delete legacy.supervisor[key];
+  for (const key of ['sourceRead', 'sourceRepair', 'modelExperiment', 'mcpTools', 'desktopControl', 'connectionManage']) delete legacy.supervisor[key];
+  delete legacy.workflow.mcpTools; delete legacy.workflow.desktopControl;
   const payload = JSON.stringify({ workflow: legacy.workflow, supervisor: legacy.supervisor });
   f.app.store.db.prepare('UPDATE assistant_permission_settings SET revision=17,value=? WHERE id=1').run(payload);
   const stored = () => f.app.store.db.prepare('SELECT revision,value FROM assistant_permission_settings WHERE id=1').get();
@@ -89,10 +92,12 @@ test('legacy permission rows project new grants as disabled without migrating se
   for (let index = 0; index < 2; index++) {
     const result = await f.request(); assert.equal(result.status, 200); assert.equal(result.body.revision, 17); assert.equal(result.body.supervisor.sourceRepair, false);
     assert.equal(result.body.supervisor.sourceRead, false); assert.equal(result.body.supervisor.modelExperiment, false);
-    assert.deepEqual(result.body.workflow, legacy.workflow); assert.deepEqual(stored(), row);
+    assert.equal(result.body.supervisor.mcpTools, false); assert.equal(result.body.supervisor.desktopControl, false); assert.equal(result.body.supervisor.connectionManage, false);
+    assert.deepEqual(result.body.workflow, { ...legacy.workflow, mcpTools: false, desktopControl: false }); assert.deepEqual(result.body.desktopApps, []); assert.deepEqual(stored(), row);
   }
   await f.bridge.close(); await f.open(); const read = (await f.request()).body;
   assert.equal(read.supervisor.sourceRepair, false); assert.equal(read.revision, 17); assert.deepEqual(stored(), row);
+  assert.equal(read.supervisor.mcpTools, false); assert.equal(read.workflow.mcpTools, false); assert.equal(read.supervisor.connectionManage, false);
   assert.equal(f.app.events.filter(event => event.type === 'assistant.permissions.updated').length, events); assert.deepEqual(businessState(f.app), before);
   const oldClient = update(read); delete oldClient.supervisor.sourceRepair;
   assert.equal((await f.request('PUT', oldClient)).status, 400); assert.deepEqual(stored(), row);
@@ -139,6 +144,7 @@ test('HTTP permissions reject unknown fields, role escalation, incomplete scopes
     { ...update(original), workflow: { ...original.workflow, sourceRepair: true } },
     { ...update(original), workflow: { ...original.workflow, sourceRead: true } },
     { ...update(original), workflow: { ...original.workflow, modelExperiment: true } },
+    { ...update(original), workflow: { ...original.workflow, connectionManage: true } },
     { ...update(original), supervisor: { ...original.supervisor, shell: true } },
     { ...update(original), supervisor: { ...original.supervisor, applicationSourceWrite: true } },
     { ...update(original), supervisor: { ...original.supervisor, role: 'root' } },
@@ -147,6 +153,13 @@ test('HTTP permissions reject unknown fields, role escalation, incomplete scopes
     { ...update(original), supervisor: { ...original.supervisor, sourceRepair: 'true' } },
     { ...update(original), supervisor: { ...original.supervisor, sourceRead: 1 } },
     { ...update(original), supervisor: { ...original.supervisor, modelExperiment: 'true' } },
+    { ...update(original), workflow: { ...original.workflow, mcpTools: 'true' } },
+    { ...update(original), workflow: { ...original.workflow, desktopControl: 1 } },
+    { ...update(original), supervisor: { ...original.supervisor, mcpTools: null } },
+    { ...update(original), supervisor: { ...original.supervisor, desktopControl: 'true' } },
+    { ...update(original), supervisor: { ...original.supervisor, connectionManage: 1 } },
+    ...[null, {}, 'org.blenderfoundation.blender', ['file:///Applications/Blender.app'], ['../permissions'], [false],
+      Array.from({ length: 33 }, (_, index) => `com.example.app${index}`)].map(desktopApps => ({ ...update(original), desktopApps })),
     ...[{}, { maxInputCharacters: 999 }, { maxInputCharacters: 100001 }, { maxInputCharacters: 2000.5 }, { maxInputCharacters: '50000' },
       { maxInputCharacters: 50000, maxCallsPerTurn: 3 }, null].map(modelExperimentLimits => ({ ...update(original), modelExperimentLimits })),
     { ...update(original), workflow: { ...original.workflow, workflowRead: null } },
@@ -177,7 +190,8 @@ test('permission PUT enforces CSRF and same-origin checks before any save', asyn
 test('AI tool discovery and dispatcher have no permission-write, arbitrary source or shell capability', async t => {
   const f = await fixture(t), before = (await f.request()).body, business = businessState(f.app);
   const forbidden = ['assistant.permissions.update', 'assistant.permissions.save', 'permissions.write', 'settings.save',
-    'app.permissions', 'source.patch', 'source.write', 'file.write', 'terminal', 'shell', 'exec'];
+    'app.permissions', 'desktopApps.save', 'mcp.permissions.update', 'connections.permissions.update',
+    'source.patch', 'source.write', 'file.write', 'terminal', 'shell', 'exec'];
   const tools = f.app.applicationAssistant.tools(), names = tools.map(tool => tool.name);
   for (const name of forbidden) {
     assert.equal(names.includes(name), false, name);
@@ -186,4 +200,26 @@ test('AI tool discovery and dispatcher have no permission-write, arbitrary sourc
   assert.deepEqual((await f.request()).body, before);
   assert.deepEqual(businessState(f.app), business);
   assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get().count, 0);
+});
+
+test('desktop apps and both role grants persist only after a human versioned save', async t => {
+  const f = await fixture(t), before = businessState(f.app), original = (await f.request()).body;
+  const body = update(original); body.workflow.desktopControl = true; body.supervisor.desktopControl = true;
+  body.desktopApps = ['org.blenderfoundation.blender', 'org.freecad.FreeCAD', 'org.blenderfoundation.blender'];
+  const saved = await f.request('PUT', body, { Origin: f.origin });
+  assert.equal(saved.status, 200); assert.equal(saved.body.revision, original.revision + 1);
+  assert.deepEqual(saved.body.desktopApps, ['org.blenderfoundation.blender', 'org.freecad.FreeCAD']);
+  assert.equal(saved.body.workflow.desktopControl, true); assert.equal(saved.body.supervisor.desktopControl, true);
+  assert.equal(saved.body.supervisor.sourceRepair, false); assert.equal(saved.body.immutable.permissionWrite, false);
+  assert.deepEqual(businessState(f.app), before);
+  await f.bridge.close(); await f.open(); assert.deepEqual((await f.request()).body, saved.body);
+  // A client predating the new fields can change an old flag without enabling
+  // missing capabilities or erasing a manually approved target list.
+  const oldClient = update(saved.body); delete oldClient.workflow.mcpTools; delete oldClient.workflow.desktopControl;
+  delete oldClient.supervisor.mcpTools; delete oldClient.supervisor.desktopControl; delete oldClient.supervisor.connectionManage;
+  oldClient.workflow.capture = false;
+  const preserved = await f.request('PUT', oldClient); assert.equal(preserved.status, 200);
+  assert.deepEqual(preserved.body.desktopApps, saved.body.desktopApps);
+  assert.equal(preserved.body.workflow.desktopControl, true); assert.equal(preserved.body.supervisor.desktopControl, true);
+  assert.equal(preserved.body.supervisor.sourceRepair, false); assert.deepEqual(businessState(f.app), before);
 });

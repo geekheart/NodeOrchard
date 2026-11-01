@@ -13,6 +13,8 @@ import { APPLICATION_SOURCE_TOOLS } from './application-source-tools.mjs';
 import { resolveAssistantAttachments } from './assistant-attachments.mjs';
 import { readConversationHistory } from './workflows/workflow-conversation-context.mjs';
 import { skillOrigin } from './catalog.mjs';
+import { APPLICATION_CONNECTION_TOOLS } from './application-connections.mjs';
+import { APPLICATION_RUNTIME_TOOLS } from './application-runtime-tools.mjs';
 
 const schema = properties => ({ type: 'object', properties, additionalProperties: false });
 const text = { type: 'string', maxLength: 128 };
@@ -61,13 +63,20 @@ const fail = (message, httpStatus = 400) => { throw Object.assign(new Error(mess
 const FEATURES = [
   { id: 'supervisor-native', status: 'available', roles: ['supervisor'], conversationScope: 'ordinary-topic', channel: 'native-session', tools: [],
     requires: ['verified-os-isolation', 'public-only-egress-proxy'], unavailableResult: 'unavailable',
-    note: '普通总控主题使用持久Hermes原生Agent会话，复用工具循环、压缩、私有记忆和Skill；每轮同一原生循环先报告意图，应用工具仍走原权限与dispatcher。只有OS隔离及公网出站代理真实通过后才执行，否则明确unavailable且不降级；独立助手和只读委派仍受限编排。本地daemon、私网、cron和连接管理不因此就绪。' },
+    note: '普通总控主题使用持久Hermes原生Agent会话，复用工具循环、压缩、私有记忆和Skill；每轮同一原生循环先报告意图，应用工具仍走原权限与dispatcher。只有OS隔离及公网出站代理真实通过后才执行，否则明确unavailable且不降级。连接管理、已配置本机/私网MCP和桌面操作使用宿主工具通道，原生直接入口不旁路执行；实际依赖和人工权限另行检查，独立助手及只读委派仍受限编排。' },
   { id: 'workflow-board', status: 'ui-only', inspect: 'workflows.list', tools: [], note: '统一自适应工作流库，状态是属性；支持需处理优先、最近更新/名称排序及状态筛选，待审/待人工归需处理。活动数量不含回收站，零定时隐藏；浏览/筛选/排序不写流程或改写运行，助手仍用workflows.list读真实记录。配置就绪不代表外部依赖已验证。' },
   { id: 'maintenance', status: 'available', roles: ['supervisor'], tools: ['maintenance.task', 'maintenance.experiment'], note: '维护目标与证据持久保存；受控隔离节点复现、源码只读相关测试及日志产物回读不取得源码写权。沙箱不可用明确停止；需要改源码时请求人工开关，原工作流不自动修改或重跑。' },
   { id: 'software-diagnostics', status: 'available', tools: ['runtime.software.inspect', 'runtime.code.check'], note: '按基础PATH与受控macOS应用路径发现Blender/FreeCADCmd/FFmpeg；代码worker按次补私有命令入口，现有PATH优先，不改系统环境或节点代码。版本探测与静态检查不运行业务，不证明转换或渲染成功。' },
   { id: 'workflow-diagnostic-escalation', status: 'available', roles: ['workflow'], tools: ['conversation.escalate', 'conversation.escalation'], note: '独立会话在用户本轮排错请求下按来源轮次升级为总控只读诊断，可在原聊天读取进度与结论。受总控人工读取权限约束；每来源至多启动一次，停止或重启不重放，不转移写权限，不自动修改或运行工作流。' },
   { id: 'conversation-portability', status: 'available', tools: ['workflow.folder', 'workflow.conversation'], note: '每个工作流文件夹永久保存完整conversation.json、可读conversation.md及绑定版本和哈希的context.json；导入新身份后恢复有界历史背景，更早全文按需读取。上下文仅为数据，不恢复旧操作、审核授权或原生模型会话。' },
-  { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
+  { id: 'skill-integrations', status: 'available', tools: ['workbench.inspect', 'node.describe'], note: 'integrations只读投影Hermes图片、浏览器、Computer Use及已配置MCP的依赖和启用状态；节点requiredToolsets只请求真实能力，人工启动后按attempt绑定工具与版本。工作流原生MCP/桌面工具通过当前尝试回调共享宿主通道，媒体按真实文件归集并经过人工审核；未配置不等于可调用。' },
+  { id: 'configured-mcp-tools', status: 'available', roles: ['workflow', 'supervisor'], tools: ['mcp.servers', 'mcp.call'], requires: ['human-configured-mcp', 'mcpTools'],
+    note: '两类助手和工作流共用Hermes已配置的本机、私网、公网MCP；先查真实目录与revision，再按准确server/tool和当前目录调用，写入或执行类操作逐次人工批准。原生直接MCP不绕过宿主；参数路径检查不等价OS隔离，第三方任意代码能力仍依赖服务自身权限。' },
+  { id: 'local-desktop-tools', status: 'available', roles: ['workflow', 'supervisor'], tools: ['desktop.status', 'desktop.call'], experimental: true, defaultEnabled: false,
+    requires: ['compatible-desktop-driver', 'human-system-authorization', 'desktopApps', 'desktopControl'],
+    note: '工作流和两类助手共用本机桌面通道；desktopApps默认为空、桌面修改默认关闭，系统屏幕录制/辅助功能由用户手动授权。观察需capture及应用白名单；先截图绑定captureId，修改动作逐次人工批准，过期或窗口变化重新采集。GUI工具不等价完整OS隔离，目录或协议就绪不代表目标软件验收成功。' },
+  { id: 'hermes-connection-management', status: 'available', roles: ['supervisor'], tools: ['connections.list', 'connections.manage'], requires: ['connectionManage', 'connected-hermes'],
+    note: '总控调用Hermes原生连接目录与管理处理器，发起连接/重连、目录MCP安装、启用或OAuth；用户在当前主题授权卡确认和填写凭据。工作流及独立助手不能修改全局连接，AI不能代批、读取凭据或改变权限设置；未知结果不自动重发。' },
   { id: 'skill-authoring', status: 'ui-only', tools: [], note: 'Skills页或节点选择器由用户新建全局业务Skill，不覆盖已有目录；图片提供商由人工选择并保存到Hermes原配置。该全局资源库及配置写入保留人工入口。普通总控原生skill_manage仅维护专用profile内的私有Skill，不发布或改写工作台业务Skill库；独立助手与只读委派仍无此原生写入口。' },
   { id: 'skill-provenance', status: 'available', tools: ['workbench.inspect'], note: 'skills分区只读发现Hermes自带、工作台内置、后续生成及来源待确认的元数据；内置和未知来源受保护，管理视图中的内部助手指令不作为工作流Skill。' },
   { id: 'generated-skill-removal', status: 'ui-only', tools: [], note: '用户在Skills页确认删除可验证归属的生成Skill；后端复核版本、生成身份及在用引用，普通包受控归档，学习版本保留证据并停止新引用。全局可执行资源删除不向助手或业务Skill开放。' },
@@ -79,7 +88,7 @@ const FEATURES = [
   { id: 'conversation-management', status: 'available', roles: ['supervisor'], tools: ['conversations.list', 'conversation.inspect', 'conversation.delegate'],
     note: '对话管理仅展示正常工作流的独立会话，回收站会话保留且恢复后重现；总控按问题分主题，支持用户选定消息的只读精确引用，按需读取摘要或明确委派只读诊断，不自动运行、应用或合并历史。旧全局聊天及普通任务保留。' },
   { id: 'supervisor-topics', status: 'ui-only', tools: [], note: '用户新建总控会话时可原子归档当前主题，归档只读可恢复；新主题不继承旧上下文。生命周期由人工控制，AI不自迁移或复活来源，只读升级主题恢复后仍只读。' },
-  { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存，AI没有权限设置写工具。独立会话固定当前工作流，升级子诊断始终来源绑定只读；普通总控原生终端仅在专用OS隔离内执行，不能原生读写用户工作流、应用数据库或源码。源码只读与实验修复仍分别由人工开关及宿主受控工具准入。' },
+  { id: 'assistant-permissions', status: 'ui-only', tools: [], note: '权限仅由用户在设置页按版本保存，AI没有权限设置写工具。两类角色分别分配mcpTools/desktopControl，总控另有connectionManage；新安装开放MCP和连接管理、桌面关闭及desktopApps为空，旧缺字段只读投影false不改写原记录。独立会话固定当前工作流，升级子诊断只读；总控原生终端仅在专用OS隔离内执行，不能原生读写用户工作流、数据库或源码。源码修复仍独立默认关闭。' },
   { id: 'supervisor-workflow-management', status: 'available', roles: ['supervisor'], tools: ['workflow.copy', 'workflow.create-test', 'workflow.delete'], note: '总控在人工授权范围内复制、新增测试草稿或移入回收站；不自动运行，无永久删除。' },
   { id: 'workflow-recycle-bin', status: 'ui-only', inspect: 'workflows.list', tools: [], requiresUserConfirmation: true,
     note: '工作流直接移入回收站并暂停定时任务，节点编辑器仅加载活动流程；当前流程移入回收站或删除后卸载至空态，保留本地草稿。恢复后需用户重新打开，定时任务仍停用；永久删除仅在回收站由用户输入完整名称确认，保留运行历史和产物。旧归档记录显示在回收站。' },
@@ -101,7 +110,9 @@ const FEATURES = [
   { id: 'execution', status: 'ui-only', tools: [], note: '界面运行按钮/编辑器中明确的“运行”命令使用现有执行器；后台助手没有自动start/retry工具。workflow.run只读历史。' },
   { id: 'human-review', status: 'ui-only', requiresUserConfirmation: true, tools: [],
     note: '精确版本审核卡由用户通过、修改或停止；人工修改不限次数。Skill节点接收本次反馈；工具节点须由AI重新生成核心代码候选，沿用proposal-only流程编辑入口，后续有Skill也不重跑原工具代替修改；模型不能代批或自动重试。' },
-  { id: 'schedules', status: 'ui-only', inspect: 'workbench.inspect', note: '定时任务可读取；创建、修改、暂停使用已有界面。' },
+  { id: 'schedules', status: 'ui-only', inspect: 'workbench.inspect', note: '定时任务及原生引擎状态可读取；创建、修改、暂停使用已有界面。冻结定义交给Hermes原生cron计算到期与claim，再沿既有工作流准入执行，不调用模型判断时刻。' },
+  { id: 'workflow-native-scheduler', status: 'available', channel: 'scheduled-workflow', tools: [], requires: ['hermes-native-cron', 'running-workbench', 'awake-host'],
+    note: '单次/每日工作流使用Hermes cron原生存储、到期计算、claim及执行账本，实际业务仍由工作流执行器和人工审核决定。服务须运行且电脑可执行；非系统开机daemon，不唤醒电脑，错过不补跑、未知不重放；原生故障不降级为应用到期轮询。' },
   { id: 'models-and-settings', status: 'ui-only', inspect: 'workbench.inspect', note: '可读取当前设置；模型、提供商和认证由Hermes原生入口管理。' },
   { id: 'keyboard-shortcuts', status: 'ui-only', inspect: 'workbench.inspect', tools: [],
     note: '设置中的快捷键操作表由用户录制、禁用、恢复和保存，跨页面生效并检查冲突；工作流、总控和任务对话共用发送组合。助手可读当前偏好，但没有快捷键设置写工具，快捷键不增加执行或审核权限。' },
@@ -159,7 +170,7 @@ export class ApplicationCapabilities {
   tools(scope) {
     const all = [...this.app.diagnostics.tools().map(tool => ({ ...tool, effect: 'read-only', availability: 'available',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } })), ...structuredClone(APPLICATION_ASSISTANT_TOOLS), ...structuredClone(APPLICATION_SUPERVISOR_TOOLS), ...structuredClone(APPLICATION_CONVERSATION_HUB_TOOLS), ...structuredClone(ASSISTANT_MODEL_TOOLS).filter(tool => tool.name !== 'assistant.experiment' || this.modelExperimentEnabled(scope)),
-      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.search', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope)), ...structuredClone(APPLICATION_MAINTENANCE_TOOLS)];
+      ...structuredClone(APPLICATION_SOURCE_TOOLS).filter(tool => ['app.source.list', 'app.source.search', 'app.source.read'].includes(tool.name) ? this.sourceReadEnabled(scope) : this.sourceRepairEnabled(scope)), ...structuredClone(APPLICATION_MAINTENANCE_TOOLS), ...structuredClone(APPLICATION_CONNECTION_TOOLS), ...structuredClone(APPLICATION_RUNTIME_TOOLS)];
     if (new Set(all.map(tool => tool.name)).size !== all.length) fail('应用工具目录存在重复名称。', 500);
     return all;
   }
@@ -245,7 +256,7 @@ export class ApplicationCapabilities {
           enabled: skill.enabled !== false, assignable: skill.assignable === true, usage: skill.usage === 'assistant' ? 'assistant' : 'workflow',
           ...(typeof skill.revision === 'string' ? { revision: skill.revision } : {}) })) };
     }
-    if (section === 'schedules') return { section, schedules: this.app.schedules.list(workflowId).slice(0, 100).map(row =>
+    if (section === 'schedules') return { section, scheduler: this.app.schedules.status?.() || { status: 'unknown' }, schedules: this.app.schedules.list(workflowId).slice(0, 100).map(row =>
       Object.fromEntries(['id', 'name', 'workflowId', 'revision', 'enabled', 'timing', 'nextRunAt', 'lastTrigger', 'lastError', 'createdAt', 'updatedAt']
         .filter(key => row[key] !== undefined).map(key => [key, row[key]]))) };
     if (section === 'node-presets') return { section, presets: this.app.nodePresets.list() };

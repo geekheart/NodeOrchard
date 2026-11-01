@@ -4,6 +4,8 @@ const COMMON = [
   ['customNodes', '派生自定义节点', '业务代码候选'],
   ['workspaceRead', '读取工作文件夹资料', '当前工作文件夹'],
   ['capture', '截图与短录制', '隔离页面'],
+  ['mcpTools', '调用 MCP 工具', '已配置的本机、私网及远端服务；写操作逐次确认'],
+  ['desktopControl', '桌面操作（实验性）', '仅指定应用，操作逐次确认；需要系统授权'],
 ];
 const GROUPS = [
   ['workflow', '独立工作流助手', '范围：当前工作流与工作文件夹', COMMON],
@@ -11,6 +13,7 @@ const GROUPS = [
     ['crossWorkflowRead', '跨工作流读取', '任意工作流的状态与日志'],
     ['manageWorkflows', '管理工作流', '复制、测试草稿、回收站、只读诊断委派'],
     ['appLogs', '读取软件日志', '脱敏诊断日志'],
+    ['connectionManage', '管理工具连接', '发起 Hermes 连接、检查和授权卡；凭据由用户填写'],
     ['sourceRead', '读取诊断源码', '工作台仓库与固定Hermes模块，只读'],
     ['sourceRepair', '源码自修复（实验性）', '修改工作台源码并运行隔离相关测试，保留修复记录和回滚入口；不修改或运行用户工作流'],
     ['modelExperiment', '模型诊断实验（实验性）', '真实模型调用，每轮一次，输出长度为软约束'],
@@ -25,13 +28,14 @@ function configuration(data) {
   for (const [role, , , flags] of GROUPS) {
     result[role] = {};
     for (const [flag] of flags) {
-      if (typeof data[role]?.[flag] !== 'boolean') throw new Error('权限配置不完整，请刷新后重试。');
-      result[role][flag] = data[role][flag];
+      if (typeof data[role]?.[flag] !== 'boolean' && !['mcpTools', 'desktopControl', 'connectionManage'].includes(flag)) throw new Error('权限配置不完整，请刷新后重试。');
+      result[role][flag] = data[role][flag] === true;
     }
   }
   const limits = data.modelExperimentLimits;
   if (!limits || !Number.isSafeInteger(limits.maxInputCharacters) || limits.maxInputCharacters < 1000 || limits.maxInputCharacters > 100000) throw new Error('模型实验额度无效，请刷新后重试。');
   result.modelExperimentLimits = { maxInputCharacters: limits.maxInputCharacters };
+  result.desktopApps = Array.isArray(data.desktopApps) ? data.desktopApps.slice() : [];
   return result;
 }
 
@@ -56,6 +60,11 @@ export class AssistantPermissionsUI {
         this.inputs.set(`${role}.${flag}`, input); row.append(text, input); group.append(row);
       }
       if (role === 'supervisor') {
+        const appRow = document.createElement('label'), appText = document.createElement('span'), apps = document.createElement('input');
+        appRow.className = 'setting-row assistant-permission-row'; appText.textContent = '允许桌面操作的应用（Bundle ID）';
+        apps.type = 'text'; apps.placeholder = 'org.blenderfoundation.blender'; apps.setAttribute('aria-label', '允许桌面操作的应用');
+        apps.addEventListener('input', () => { if (!this.draft || this.loading || this.saving || this.readOnly) return; this.draft.desktopApps = apps.value.split(/[,，\s]+/).filter(Boolean); this.error = ''; this.message = ''; this.render(); });
+        this.desktopAppsInput = apps; appRow.append(appText, apps); group.append(appRow);
         const row = document.createElement('label'), text = document.createElement('span'), input = document.createElement('input');
         row.className = 'setting-row assistant-permission-row'; text.textContent = '模型实验输入上限（字符）';
         input.type = 'number'; input.min = '1000'; input.max = '100000'; input.step = '1'; input.setAttribute('aria-label', '模型实验输入上限（字符）');
@@ -72,7 +81,7 @@ export class AssistantPermissionsUI {
     this.render();
   }
   dirty() { return Boolean(this.data && this.draft && (GROUPS.some(([role]) => JSON.stringify(this.data[role]) !== JSON.stringify(this.draft[role]))
-    || JSON.stringify(this.data.modelExperimentLimits) !== JSON.stringify(this.draft.modelExperimentLimits))); }
+    || JSON.stringify(this.data.modelExperimentLimits) !== JSON.stringify(this.draft.modelExperimentLimits) || JSON.stringify(this.data.desktopApps) !== JSON.stringify(this.draft.desktopApps))); }
   async refresh({ discardDraft = false } = {}) {
     if (this.loading || this.saving || (this.dirty() && !discardDraft)) return;
     this.loading = true; this.error = ''; this.message = ''; this.render();
@@ -88,7 +97,7 @@ export class AssistantPermissionsUI {
       limit = this.data.modelExperimentLimits.maxInputCharacters;
     }
     const body = { expectedRevision: this.data.revision, ...Object.fromEntries(GROUPS.map(([role]) => [role, clone(this.draft[role])])),
-      modelExperimentLimits: { maxInputCharacters: limit } };
+      modelExperimentLimits: { maxInputCharacters: limit }, desktopApps: clone(this.draft.desktopApps) };
     this.saving = true; this.error = ''; this.message = ''; this.render();
     try { const data = configuration(await this.api('/api/assistant-permissions', { method: 'PUT', body })); this.data = data; this.draft = clone(data); this.message = '权限已保存'; }
     catch (error) { this.error = `保存失败：${error.message}`; }
@@ -97,6 +106,7 @@ export class AssistantPermissionsUI {
   render() {
     this.nodes.folder.textContent = this.data?.workspaceRoot || '尚未读取';
     const disabled = this.readOnly || !this.draft || this.loading || this.saving || !this.context().csrfToken;
+    if (this.desktopAppsInput) { this.desktopAppsInput.disabled = disabled; const apps = this.draft?.desktopApps?.join(', ') || ''; if (document.activeElement !== this.desktopAppsInput) this.desktopAppsInput.value = apps; }
     for (const [key, input] of this.inputs) { const [role, flag] = key.split('.'); input.checked = this.draft?.[role]?.[flag] === true; input.disabled = disabled; }
     const limit = this.draft?.modelExperimentLimits?.maxInputCharacters;
     this.experimentInput.value = Number.isFinite(limit) ? String(limit) : '';

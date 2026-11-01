@@ -6,10 +6,10 @@ const fail = (message, httpStatus = 403) => { throw Object.assign(new Error(mess
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
   && !['__proto__', 'prototype', 'constructor'].includes(value);
 const inside = (root, target) => { const part = relative(root, target); return !isAbsolute(part) && part !== '..' && !part.startsWith('..' + sep); };
-const DEFAULT_WORKFLOW = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true };
+const DEFAULT_WORKFLOW = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true, mcpTools: true, desktopControl: false };
 export const DEFAULT_ASSISTANT_PERMISSIONS = Object.freeze({
   workflow: Object.freeze({ ...DEFAULT_WORKFLOW }),
-  supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRead: false, sourceRepair: false, modelExperiment: false }),
+  supervisor: Object.freeze({ ...DEFAULT_WORKFLOW, connectionManage: true, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRead: false, sourceRepair: false, modelExperiment: false }),
 });
 const KNOWLEDGE = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'assistant.skills.list', 'assistant.skills.read', 'environment.probe']);
 const READ = new Set(['app.state', 'workflows.list', 'workflow.inspect', 'workflow.folder', 'workflow.conversation', 'workflow.attachments', 'workflow.attachment.read', 'workflow.run', 'session.history', 'tools.catalog', 'workbench.inspect', 'page.inspect', 'runtime.code.check']);
@@ -18,8 +18,9 @@ const CONVERSATIONS = new Set(['conversations.list', 'conversation.inspect', 'co
 const MAINTENANCE = new Set(['maintenance.task', 'maintenance.experiment']);
 const SOURCE = new Set(['app.source.list', 'app.source.read', 'app.source.search', 'app.source.patch', 'app.source.test', 'app.source.history', 'app.source.rollback']);
 const SOURCE_READ = new Set(['app.source.list', 'app.source.read', 'app.source.search']);
-const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment']);
-const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, ...MAINTENANCE, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.trace', 'assistant.probe', 'assistant.experiment']);
+const DISABLED_DEFAULTS = new Set(['sourceRead', 'sourceRepair', 'modelExperiment', 'mcpTools', 'desktopControl', 'connectionManage']);
+const EXTERNAL = new Set(['connections.list', 'connections.manage', 'mcp.servers', 'mcp.call', 'desktop.status', 'desktop.call']);
+const KNOWN = new Set([...KNOWLEDGE, ...READ, ...MANAGE, ...CONVERSATIONS, ...SOURCE, ...MAINTENANCE, ...EXTERNAL, 'workflow.preflight', 'workflow.propose', 'artifact.inspect', 'browser.capture', 'app.logs', 'assistant.diagnose', 'assistant.trace', 'assistant.probe', 'assistant.experiment']);
 
 // Resolve even a not-yet-created path through its existing parent. A lexical
 // prefix alone admits symlinks and is insufficient for an assistant folder.
@@ -44,7 +45,7 @@ function settingsValue(value) {
   const result = { revision: value.revision };
   for (const role of ['workflow', 'supervisor']) {
     if (!value[role] || Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).some(key => typeof value[role][key] !== 'boolean'
-      && !(role === 'supervisor' && DISABLED_DEFAULTS.has(key) && value[role][key] === undefined))) fail('助手权限配置不完整，已停止调用。', 409);
+      && !(DISABLED_DEFAULTS.has(key) && value[role][key] === undefined))) fail('助手权限配置不完整，已停止调用。', 409);
     result[role] = Object.fromEntries(Object.keys(DEFAULT_ASSISTANT_PERMISSIONS[role]).map(key => [key, DISABLED_DEFAULTS.has(key) ? value[role][key] === true : value[role][key]]));
   }
   return result;
@@ -94,6 +95,11 @@ export class ApplicationAssistantPermissions {
   allowed(name, scope) {
     this.check(scope); const p = scope.permissions;
     if (!KNOWN.has(name)) return false;
+    if (name === 'connections.list') return scope.role === 'supervisor' && !scope.workflowBound;
+    if (name === 'connections.manage') return scope.role === 'supervisor' && !scope.readOnly && p.connectionManage === true;
+    if (['mcp.servers', 'desktop.status'].includes(name)) return p.workflowRead;
+    if (name === 'mcp.call') return !scope.readOnly && p.mcpTools === true;
+    if (name === 'desktop.call') return !scope.readOnly && p.desktopControl === true && p.capture === true;
     if (MAINTENANCE.has(name)) return scope.role === 'supervisor' && p.workflowRead && p.appLogs;
     if (SOURCE_READ.has(name)) return scope.role === 'supervisor' && (p.sourceRead === true || p.sourceRepair === true);
     if (SOURCE.has(name)) return scope.role === 'supervisor' && p.sourceRepair === true && !scope.readOnly;
@@ -295,7 +301,8 @@ export class ApplicationAssistantPermissions {
         if (Array.isArray(result.pendingRequests)) result.pendingRequests = result.pendingRequests.filter(request => ownedSession(request.sessionId));
       }
       if (scoped && Array.isArray(result.hermesTools)) result.hermesTools = [];
-      for (const key of ['tools', 'assistantTools', 'diagnosticTools']) if (Array.isArray(result[key]) && result[key].every(tool => typeof tool?.name === 'string')) result[key] = this.tools(result[key], scope);
+      const nativeMcpCatalog = typeof input.id === 'string' && ['http', 'stdio'].includes(input.transport) && Array.isArray(input.tools) && input.tools.every(tool => tool?.inputSchema && typeof tool.name === 'string');
+      for (const key of ['tools', 'assistantTools', 'diagnosticTools']) if (!(key === 'tools' && nativeMcpCatalog) && Array.isArray(result[key]) && result[key].every(tool => typeof tool?.name === 'string')) result[key] = this.tools(result[key], scope);
       if (Array.isArray(input.tools) && input.tools.length && input.tools.every(tool => typeof tool === 'string')) {
         result.tools = input.tools.filter(name => this.allowed(name, scope));
         if (!result.tools.length && typeof result.status === 'string') { result.status = 'unavailable'; result.note = '当前助手权限未开放此能力。'; delete result.apply; }

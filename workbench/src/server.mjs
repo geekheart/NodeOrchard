@@ -120,6 +120,15 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (path === '/api/app-assistant/conversations' && requestURL.search) return json(res, 400, { error: '总控会话不接受查询参数。' });
       if (req.method === 'GET' && path === '/api/app-assistant/conversations') return json(res, 200, { supervisors: application.applicationAssistant.listConversations() });
       if (req.method === 'POST' && path === '/api/app-assistant/conversations') return json(res, 201, application.applicationAssistant.createConversation(await readJson(req, 4096)));
+      const connectionAnswer = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)\/connections\/([A-Za-z0-9_-]+)$/);
+      if (req.method === 'POST' && connectionAnswer) {
+        const conversationId = connectionAnswer[1];
+        await application.connections.respond(conversationId, connectionAnswer[2], await readJson(req, 65536), { human: true,
+          authorize: async () => { application.applicationAssistant.lifecycle.assertWritable(conversationId); if (!application.assistantPermissionSettings.get().supervisor.connectionManage) throw Object.assign(new Error('连接管理权限未开启。'), { httpStatus: 403 }); } });
+        return json(res, 200, application.applicationAssistant.get(conversationId));
+      }
+      const toolApprovalAnswer = path.match(/^\/api\/tool-approvals\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
+      if (req.method === 'POST' && toolApprovalAnswer) return json(res, 200, await application.toolApprovals.respond(toolApprovalAnswer[1], toolApprovalAnswer[2], await readJson(req, 2048), { human: true }));
       const supervisorArtifact = path.match(/^\/api\/app-assistant\/conversations\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/artifacts\/(artifact-[a-f0-9]{64})$/);
       if (supervisorArtifact && req.method === 'GET') {
         if (requestURL.search) return json(res, 400, { error: '总控产物不接受查询参数。' });
@@ -167,7 +176,7 @@ export function createWorkbenchServer(config, application = new Application(conf
       if (req.method === 'GET' && path === '/api/settings') return json(res, 200, await application.settings());
       if (req.method === 'POST' && path === '/api/settings') return json(res, 200, await application.saveSettings(await readJson(req)));
       if (req.method === 'GET' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.get());
-      if (req.method === 'PUT' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.save(await readJson(req, 4096)));
+      if (req.method === 'PUT' && path === '/api/assistant-permissions') return json(res, 200, application.assistantPermissionSettings.save(await readJson(req, 8192)));
       if (path === '/api/source-repairs') {
         if (requestURL.search) return json(res, 400, { error: '源码修复记录不接受任意查询参数。' });
         if (req.method === 'GET') return json(res, 200, await application.sourceRepairs.history({ limit: 20 }));
@@ -331,7 +340,7 @@ export function createWorkbenchServer(config, application = new Application(conf
         return json(res, 200, { workflow: application.workflowLibrary.get(id) });
       }
       if (req.method === 'GET' && path === '/api/workflow-schedules') {
-        return json(res, 200, { schedules: application.schedules.list(requestURL.searchParams.get('workflowId') || undefined) });
+        return json(res, 200, { scheduler: application.schedules.status(), schedules: application.schedules.list(requestURL.searchParams.get('workflowId') || undefined) });
       }
       if (req.method === 'POST' && path === '/api/workflow-schedules') {
         return json(res, 201, { schedule: application.schedules.create(await readJson(req)) });
@@ -481,6 +490,8 @@ export function createWorkbenchServer(config, application = new Application(conf
         '/maintenance-task-ui.js': ['maintenance-task-ui.js', 'text/javascript'],
         '/conversation-references-ui.js': ['conversation-references-ui.js', 'text/javascript'],
         '/assistant-permissions-ui.js': ['assistant-permissions-ui.js', 'text/javascript'],
+        '/tool-approvals-ui.js': ['tool-approvals-ui.js', 'text/javascript'],
+        '/connection-management-ui.js': ['connection-management-ui.js', 'text/javascript'],
         '/source-repair-ui.js': ['source-repair-ui.js', 'text/javascript'],
         '/shortcut-settings-ui.js': ['shortcut-settings-ui.js', 'text/javascript'],
         '/keyboard-shortcuts.js': ['keyboard-shortcuts.js', 'text/javascript'],

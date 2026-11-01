@@ -10,8 +10,9 @@ class Element {
   change(value) { this.checked = value; this.listeners.get('change')?.(); }
 }
 function config(revision = 1) {
-  const workflow = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true };
-  return { revision, workflow, supervisor: { ...workflow, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRead: false, sourceRepair: false, modelExperiment: false }, modelExperimentLimits: { maxInputCharacters: 50000 } };
+  const workflow = { workflowRead: true, workflowEdit: true, customNodes: true, workspaceRead: true, capture: true, mcpTools: true, desktopControl: false };
+  return { revision, workflow, supervisor: { ...workflow, connectionManage: true, crossWorkflowRead: true, manageWorkflows: true, appLogs: true, sourceRead: false, sourceRepair: false, modelExperiment: false },
+    modelExperimentLimits: { maxInputCharacters: 50000 }, desktopApps: [] };
 }
 function fixture(t, api, { readOnly = false } = {}) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document'), nodes = new Map();
@@ -25,10 +26,12 @@ test('permissions remain disabled until a complete versioned configuration is re
   const calls = [], { ui } = fixture(t, async (path, options) => { calls.push({ path, options }); return config(); });
   assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs.values()].every(input => input.disabled));
   await ui.refresh(); assert.deepEqual(calls, [{ path: '/api/assistant-permissions', options: undefined }]);
-  assert.equal(ui.inputs.size, 16); assert.equal(ui.inputs.has('workflow.manageWorkflows'), false); assert.equal(ui.inputs.has('workflow.sourceRepair'), false);
+  assert.equal(ui.inputs.size, 21); assert.equal(ui.inputs.has('workflow.manageWorkflows'), false); assert.equal(ui.inputs.has('workflow.sourceRepair'), false);
   assert.equal(ui.inputs.has('workflow.sourceRead'), false); assert.equal(ui.inputs.has('workflow.modelExperiment'), false);
-  assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs].every(([key, input]) => input.checked === !['supervisor.sourceRead', 'supervisor.sourceRepair', 'supervisor.modelExperiment'].includes(key) && !input.disabled));
+  assert.equal(ui.inputs.has('workflow.connectionManage'), false);
+  assert.equal(ui.nodes.save.disabled, true); assert.ok([...ui.inputs].every(([key, input]) => input.checked === !['supervisor.sourceRead', 'supervisor.sourceRepair', 'supervisor.modelExperiment', 'workflow.desktopControl', 'supervisor.desktopControl'].includes(key) && !input.disabled));
   assert.equal(ui.experimentInput.disabled, true); assert.equal(ui.experimentInput.value, '50000');
+  assert.equal(ui.desktopAppsInput.disabled, false); assert.equal(ui.desktopAppsInput.value, '');
 });
 
 test('experimental source repair is unchecked until a person explicitly selects it and saves the complete permission payload', async t => {
@@ -52,7 +55,7 @@ test('manual save sends only version and explicitly assigned role flags', async 
   const calls = [], { ui } = fixture(t, async (path, options) => { calls.push({ path, options }); return options ? { revision: 2, workflow: options.body.workflow, supervisor: options.body.supervisor, modelExperimentLimits: options.body.modelExperimentLimits, protection: 'human-only' } : { ...config(), workspaceRoot: '/fixture' }; });
   await ui.refresh(); ui.inputs.get('workflow.customNodes').change(false); ui.inputs.get('supervisor.manageWorkflows').change(false);
   assert.equal(ui.nodes.save.disabled, false); await ui.save();
-  assert.deepEqual(calls[1], { path: '/api/assistant-permissions', options: { method: 'PUT', body: { expectedRevision: 1, workflow: { ...config().workflow, customNodes: false }, supervisor: { ...config().supervisor, manageWorkflows: false }, modelExperimentLimits: { maxInputCharacters: 50000 } } } });
+  assert.deepEqual(calls[1], { path: '/api/assistant-permissions', options: { method: 'PUT', body: { expectedRevision: 1, workflow: { ...config().workflow, customNodes: false }, supervisor: { ...config().supervisor, manageWorkflows: false }, modelExperimentLimits: { maxInputCharacters: 50000 }, desktopApps: [] } } });
   assert.equal(ui.data.revision, 2); assert.equal(ui.nodes.save.disabled, true); assert.match(ui.nodes.status.textContent, /权限已保存/);
 });
 
@@ -122,4 +125,46 @@ test('invalid experiment quotas cannot be saved and disabled experiments retain 
   ui.inputs.get('supervisor.modelExperiment').change(false); await ui.save();
   assert.equal(calls[1].body.supervisor.modelExperiment, false); assert.deepEqual(calls[1].body.modelExperimentLimits, { maxInputCharacters: 50000 });
   assert.equal(ui.experimentInput.disabled, true);
+});
+
+test('legacy responses project new MCP, desktop and connection flags as disabled without an automatic save', async t => {
+  const legacy = config(); delete legacy.workflow.mcpTools; delete legacy.workflow.desktopControl;
+  delete legacy.supervisor.mcpTools; delete legacy.supervisor.desktopControl; delete legacy.supervisor.connectionManage; delete legacy.desktopApps;
+  const calls = [], { ui } = fixture(t, async (_path, options) => { calls.push(options); return legacy; });
+  await ui.refresh(); assert.deepEqual(calls, [undefined]); assert.equal(ui.data.revision, 1);
+  for (const key of ['workflow.mcpTools', 'workflow.desktopControl', 'supervisor.mcpTools', 'supervisor.desktopControl', 'supervisor.connectionManage']) {
+    assert.equal(ui.inputs.get(key).checked, false, key);
+  }
+  assert.deepEqual(ui.data.desktopApps, []); assert.equal(ui.data.supervisor.sourceRepair, false);
+  assert.equal(ui.dirty(), false); assert.equal(ui.nodes.save.disabled, true);
+});
+
+test('desktop target edits remain a local draft until the person saves role grants and app IDs', async t => {
+  const calls = [], { ui } = fixture(t, async (_path, options) => { calls.push(options); return options ? { ...options.body, revision: 2 } : config(); });
+  await ui.refresh(); ui.inputs.get('workflow.desktopControl').change(true); ui.inputs.get('supervisor.desktopControl').change(true);
+  ui.desktopAppsInput.value = 'org.blenderfoundation.blender，org.freecad.FreeCAD'; ui.desktopAppsInput.listeners.get('input')();
+  assert.deepEqual(ui.draft.desktopApps, ['org.blenderfoundation.blender', 'org.freecad.FreeCAD']); assert.deepEqual(calls, [undefined]);
+  assert.equal(ui.data.supervisor.sourceRepair, false); assert.equal(ui.dirty(), true);
+  await ui.save(); assert.deepEqual(calls[1].body.desktopApps, ['org.blenderfoundation.blender', 'org.freecad.FreeCAD']);
+  assert.equal(calls[1].body.workflow.desktopControl, true); assert.equal(calls[1].body.supervisor.desktopControl, true);
+  assert.equal(calls[1].body.supervisor.sourceRepair, false); assert.equal(ui.data.revision, 2); assert.equal(ui.dirty(), false);
+});
+
+test('read-only settings prevent changing desktop targets or MCP and connection grants', async t => {
+  const calls = [], { ui } = fixture(t, async (_path, options) => { calls.push(options); return config(); }, { readOnly: true });
+  await ui.refresh(); assert.equal(ui.desktopAppsInput.disabled, true);
+  ui.desktopAppsInput.value = 'org.blenderfoundation.blender'; ui.desktopAppsInput.listeners.get('input')();
+  ui.inputs.get('workflow.mcpTools').change(false); ui.inputs.get('supervisor.connectionManage').change(false); await ui.save();
+  assert.deepEqual(calls, [undefined]); assert.deepEqual(ui.draft.desktopApps, []);
+  assert.equal(ui.draft.workflow.mcpTools, true); assert.equal(ui.draft.supervisor.connectionManage, true); assert.equal(ui.draft.supervisor.sourceRepair, false);
+});
+
+test('editing only the desktop target list enables the explicit save button', async t => {
+  const calls = [], { ui } = fixture(t, async (_path, options) => { calls.push(options); return options ? { ...options.body, revision: 2 } : config(); });
+  await ui.refresh(); assert.equal(ui.nodes.save.disabled, true);
+  ui.desktopAppsInput.value = 'org.blenderfoundation.blender'; ui.desktopAppsInput.listeners.get('input')();
+  assert.equal(ui.nodes.save.disabled, false); assert.match(ui.nodes.status.textContent, /未保存/);
+  assert.deepEqual(calls, [undefined]); await ui.save();
+  assert.deepEqual(calls[1].body.desktopApps, ['org.blenderfoundation.blender']);
+  assert.equal(ui.data.supervisor.desktopControl, false); assert.equal(ui.data.supervisor.sourceRepair, false);
 });

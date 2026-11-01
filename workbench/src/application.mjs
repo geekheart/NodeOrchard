@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { NativeSupervisor } from './application-supervisor-native.mjs';
+import { ApplicationConnections } from './application-connections.mjs';
+import { LocalToolBroker } from './local-tool-broker.mjs';
+import { ApplicationRuntimeTools } from './application-runtime-tools.mjs';
+import { ApplicationToolApprovals } from './application-tool-approvals.mjs';
 import { mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve, join, dirname } from 'node:path';
 import { HermesAdapter, redact } from './hermes-adapter.mjs';
@@ -82,7 +86,7 @@ function observeAssistantReasoning(adapter) {
 }
 
 export class Application extends EventEmitter {
-  constructor(config, adapter = new HermesAdapter(config), { supervisorRuntimeFactory } = {}) {
+  constructor(config, adapter = new HermesAdapter(config), { supervisorRuntimeFactory, workflowSchedulerFactory } = {}) {
     super();
     this.config = config;
     this.adapter = adapter;
@@ -97,6 +101,7 @@ export class Application extends EventEmitter {
     catch { this.logger = null; /* Log persistence cannot prevent business execution. */ }
     this.logEvents = new ApplicationLogEvents(this.logger);
     this.skillIntegrations = new SkillIntegrations(this);
+    this.workflowSchedulerFactory = workflowSchedulerFactory;
     this.logEvents.write('info', 'application.starting', { component: 'application' });
     try { this.sessionUsage = new SessionUsage(this.store.db); this.store.sessionUsage = this.sessionUsage; }
     catch { this.sessionUsage = null; /* Missing telemetry must not prevent task execution. */ }
@@ -157,6 +162,10 @@ export class Application extends EventEmitter {
     this.diagnostics = new AppDiagnostics(this);
     this.diagnosticBrowser = createAppDiagnosticBrowser({ dataDir: config.dataDir, chromePath: config.diagnosticChromePath, ffmpegPath: config.diagnosticFfmpegPath });
     this.assistantPermissionSettings = new AssistantPermissionSettings(this);
+    this.toolApprovals = new ApplicationToolApprovals(this);
+    this.connections = new ApplicationConnections(this);
+    this.runtimeTools = new ApplicationRuntimeTools(this);
+    this.localTools = new LocalToolBroker(this, { authorize: scope => this.applicationAssistant.permissions.current(scope), readPolicy: () => this.assistantPermissionSettings.get() });
     this.sourceRepairs = new ApplicationSourceRepairs(this);
     this.applicationAssistant = new ApplicationAssistant(this);
     this.conversations = new WorkflowConversations(this);
@@ -645,6 +654,7 @@ export class Application extends EventEmitter {
 
   onRequest(frame, replaying = false) {
     if (this.closed) return;
+    if (frame.method === 'workbench.local-tools.call') { void this.runtimeTools.handle(frame); return; }
     const session = this.store.byRuntime(frame.params?.session_id);
     if (!replaying && frame.params?.session_id && this.resumes.size && (!session
       || [...this.resumes.values()].some(recovery => recovery.id === session.id || recovery.runtimeIds.has(frame.params.session_id)))) {
@@ -688,6 +698,10 @@ export class Application extends EventEmitter {
   async close() {
     if (this.closed) return;
     await this.workflowFoldersReady;
+    this.toolApprovals.close();
+    await this.runtimeTools.close();
+    await this.connections.close();
+    await this.localTools.close();
     this.logEvents.write('info', 'application.stopping', { component: 'application' });
     this.historicalUsage?.close?.();
     await this.conversations.close();

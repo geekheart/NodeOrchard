@@ -1,6 +1,7 @@
 import { WorkflowConversationUI } from './workflow-conversation-ui.js';
 import { projectMaintenanceTask } from './maintenance-task-ui.js';
 import { ConversationReferencesUI } from './conversation-references-ui.js';
+import { connectionRequestView } from './connection-management-ui.js';
 
 const nativeText = value => String(value ?? '').replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[已隐藏密钥]').replace(/\bBearer\s+[^\s"']+/gi, 'Bearer [已隐藏]').replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|authorization)["']?\s*[:=]\s*["']?)([^\s"',;}\]]+)/gi, '$1[已隐藏]').slice(0, 8000);
 const nativeElement = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = nativeText(text); return node; };
@@ -42,7 +43,7 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
     if ((snapshot.conversation?.lifecycleRevision || 0) < Math.max(this.state(id).conversation.lifecycleRevision || 0, this.state(id).expectedLifecycleRevision || 0)) return false;
     const accepted = super.accept(snapshot, id), state = this.state(id);
     if (accepted && Array.isArray(snapshot.nativeRequests) && (snapshot.nativeRequestsRevision === undefined || snapshot.nativeRequestsRevision >= (state.nativeRequestsRevision || 0))) {
-      state.nativeRequests = snapshot.nativeRequests.filter(request => nativeIdentifier(request?.id) && ['approval', 'clarify'].includes(request.method)).slice(0, 16);
+      state.nativeRequests = [...snapshot.nativeRequests, ...(snapshot.connectionRequests || [])].filter(request => nativeIdentifier(request?.id) && ['approval', 'clarify', 'connection'].includes(request.method)).slice(0, 16);
       if (Number.isSafeInteger(snapshot.nativeRequestsRevision)) state.nativeRequestsRevision = snapshot.nativeRequestsRevision;
     }
     if (accepted && id === this.workflowId) { this.editor.libraryReadOnly = snapshot.conversation?.lifecycle === 'archived' || snapshot.conversation?.readOnly === true; this.render(); this.renderNativeRequests(); }
@@ -154,6 +155,7 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
     this.nativeRequestsHost.hidden = cards.length === 0;
   }
   nativeRequestView(request, owner = this.workflowId) {
+    if (request.method === 'connection') return connectionRequestView(request, { submit: body => this.replyNativeRequest(owner, request.id, body) });
     const params = request.params || {}, card = nativeElement('article', 'wf-conversation-pending-item'), controls = [];
     card.setAttribute('aria-label', request.method === 'approval' ? '执行审批' : '需要补充信息');
     card.append(nativeElement('strong', '', request.method === 'approval' ? '执行审批' : '需要补充信息'));
@@ -195,9 +197,10 @@ export class ApplicationConversationUI extends WorkflowConversationUI {
     if (!request || state.nativeRequestSettled.has(requestId) || state.conversation.lifecycle === 'archived' || state.conversation.readOnly === true || !nativeActive(state, request) || this.actionPending.has(key)) return false;
     this.actionPending.add(key); state.error = ''; this.renderNativeRequests();
     try {
-      const result = await this.api(`/api/app-assistant/conversations/${encodeURIComponent(owner)}/requests/${encodeURIComponent(requestId)}`, { method: 'POST', body });
+      const kind = request.method === 'connection' ? 'connections' : 'requests';
+      const result = await this.api(`/api/app-assistant/conversations/${encodeURIComponent(owner)}/${kind}/${encodeURIComponent(requestId)}`, { method: 'POST', body });
       if (!result?.conversation || result.conversation.workflowId !== owner) throw new Error('请求状态未确认，请刷新对话。');
-      state.nativeRequestSettled.add(requestId); this.accept(result, owner); return true;
+      if (request.method !== 'connection') state.nativeRequestSettled.add(requestId); this.accept(result, owner); return true;
     } catch (error) { state.error = nativeText(error.message); if (owner === this.workflowId) this.renderNotice(); return false; }
     finally { this.actionPending.delete(key); if (owner === this.workflowId) this.renderNativeRequests(); }
   }

@@ -25,7 +25,7 @@ class SupervisorPolicyError(ValueError):
     pass
 
 
-DEFAULT_DENIED_TOOLS = frozenset({"cronjob", "cronjob_manage", "manage_connections"})
+DEFAULT_DENIED_TOOLS = frozenset({"cronjob", "cronjob_manage", "manage_connections", "computer_use"})
 PREFIX = "nodeorchard_"
 MAX_TOOLS = 128
 ROUTE_TOOL = "conversation.route"
@@ -110,8 +110,8 @@ def _capture_images(result, original_tool):
     """Move trusted capture bytes across the sandbox without leaking base64 text."""
     if not isinstance(result, dict) or "_nodeorchard_images" not in result:
         return result
-    if original_tool != "browser.capture":
-        raise SupervisorPolicyError("Private capture images are only admitted for browser.capture.")
+    if original_tool not in {"browser.capture", "desktop.call", "mcp.call"}:
+        raise SupervisorPolicyError("Private capture images require a trusted capture or MCP broker tool.")
     checked = _image_bytes(result["_nodeorchard_images"])
     home = os.environ.get("HERMES_HOME")
     if not isinstance(home, str) or not Path(home).is_absolute():
@@ -191,7 +191,7 @@ class NativeSupervisorGateway:
         # loop, memory managers, history and compression engines are untouched.
         native = [row for row in getattr(agent, "tools", [])
                   if not row.get("function", {}).get("name", "").startswith(PREFIX)
-                  and row.get("function", {}).get("name") not in self.denied_tools]
+                  and not self._blocked(row.get("function", {}).get("name", ""), {})]
         agent.tools = native + copy.deepcopy(binding["definitions"])
         agent.valid_tool_names = {row["function"]["name"] for row in agent.tools}
         if getattr(agent, "enabled_toolsets", None) is not None:
@@ -362,7 +362,7 @@ class NativeSupervisorGateway:
         return binding is not None and not binding.get("route_admitted") and name != ROUTE_NAME
 
     def _blocked(self, name, arguments):
-        if name in self.denied_tools:
+        if name in self.denied_tools or isinstance(name, str) and name.startswith("mcp__"):
             return True
         if name == "tool_call" and isinstance(arguments, dict):
             rows = arguments.get("calls", [arguments])

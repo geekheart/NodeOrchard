@@ -134,7 +134,7 @@ export class HermesAdapter extends EventEmitter {
       return;
     }
     if (frame.method && frame.id !== undefined) {
-      if (!['approval', 'clarify'].includes(frame.method)) {
+      if (!['approval', 'clarify', 'workbench.local-tools.call'].includes(frame.method)) {
         this.send({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: '此客户端尚未实现该交互，请使用 Hermes 原生界面。' } });
         return;
       }
@@ -161,7 +161,7 @@ export class HermesAdapter extends EventEmitter {
   request(method, params = {}, timeout = 45000) {
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
-      const timer = setTimeout(() => {
+      const timer = timeout === null ? null : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} 超时；执行结果可能尚未确认，请先恢复会话检查。`));
       }, timeout);

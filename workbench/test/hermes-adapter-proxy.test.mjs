@@ -14,6 +14,8 @@ async function fixture(t, resolveProxyEnvironment) {
     console.log(JSON.stringify({method:'event',params:{type:'gateway.ready'}}));
     for await (const line of createInterface({input:process.stdin})) {
       const frame=JSON.parse(line);
+      if(frame.method==='test.pending')continue;
+      if(frame.method==='test.delayed')await new Promise(resolve=>setTimeout(resolve,40));
       const keys=['HTTP_PROXY','HTTPS_PROXY','HERMES_MODEL','HERMES_INFERENCE_PROVIDER'];
       const result=frame.method==='test.environment' ? Object.fromEntries(keys.filter(key=>Object.hasOwn(process.env,key)).map(key=>[key,process.env[key]])) : {};
       console.log(JSON.stringify({id:frame.id,result}));
@@ -49,6 +51,15 @@ test('each Hermes spawn resolves the merged child environment and emits only saf
   assert.equal((await adapter.request('test.environment')).HTTP_PROXY, 'http://inherited.example.test:8102');
   assert.equal(JSON.stringify(Object.entries(process.env).sort()) === originalEnvironment, true, 'parent environment stays unchanged');
   assert.equal(JSON.stringify(adapter.log).includes('PRIVATE_PROXY'), false);
+});
+
+test('explicit null RPC deadline waits for the native result and still rejects a disconnect', async t => {
+  const { adapter } = await fixture(t, async env => ({ env, diagnostics: { source: 'explicit', status: 'preserved' } }));
+  t.after(() => adapter.stop()); await adapter.start();
+  assert.deepEqual(await adapter.request('test.delayed', {}, null), {});
+  const pending = adapter.request('test.pending', {}, null);
+  const rejected = assert.rejects(pending, /断开/);
+  await adapter.stop(); await rejected; assert.equal(adapter.pending.size, 0);
 });
 
 test('application proxy diagnostics persist only safe metadata and do not create business activity', async t => {

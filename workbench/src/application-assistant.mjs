@@ -108,7 +108,7 @@ export class ApplicationAssistant {
       if (task) turn.assistant.maintenanceTask = this.maintenance.project(task);
       return turn;
     }));
-    return { conversationId, conversation: { ...metadata, workflowId: conversationId, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [], nativeRequests: this.native?.requests(conversationId) || [] };
+    return { conversationId, conversation: { ...metadata, workflowId: conversationId, revision: turns.reduce((value, turn) => value + (Date.parse(turn.updatedAt) || 0), 0), turns }, pending: [], nativeRequests: this.native?.requests(conversationId) || [], connectionRequests: this.app.connections?.requests(conversationId) || [], toolRequests: this.app.toolApprovals?.requests(conversationId) || [] };
   }
   listConversations({ lifecycle = 'active' } = {}) {
     if (!['active', 'archived', 'all'].includes(lifecycle)) fail('总控会话筛选范围无效。');
@@ -261,6 +261,8 @@ export class ApplicationAssistant {
           const result = await this.native.run({ conversationId, turnId: turn.id, text: input.text, context, page: bounded(input.page || {}),
             history: previousTurns, attachments: refs, conversationReferences, signal: controller.signal, ...hooks,
             onArtifacts: artifacts => { if (!this.closed && !controller.signal.aborted) { turn.assistant.nativeArtifacts = structuredClone(artifacts);
+              turn.updatedAt = new Date(Math.max(Date.now(), Date.parse(turn.updatedAt) + 1)).toISOString(); this.save(turn); this.emit(conversationId); } },
+            onEvidence: evidence => { if (!this.closed && !controller.signal.aborted) { turn.assistant.evidence = bounded(evidence);
               turn.updatedAt = new Date(Math.max(Date.now(), Date.parse(turn.updatedAt) + 1)).toISOString(); this.save(turn); this.emit(conversationId); } },
             onIntent: intent => { if (!this.closed) { turn.user.intent = intent; this.save(turn); } } });
           check(controller.signal); if (this.closed) return;
@@ -465,8 +467,10 @@ export class ApplicationAssistant {
       const capabilities = this.permissions.project(await turn.wait(this.capabilities.bootstrap(text, { schemaVersion: document?.schemaVersion || 2, permissionScope, intent: decision?.intent }), activeSignal), permissionScope);
       if (!maintenanceAuthorized) capabilities.features = capabilities.features?.filter(feature => feature.id !== 'maintenance');
       check(activeSignal);
-      const discussionTools = new Set(['app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'conversation.escalation', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.search', 'app.source.read', 'app.source.history']);
+      const discussionTools = new Set(['connections.list', 'mcp.servers', 'mcp.call', 'desktop.status', 'app.capabilities', 'node.describe', 'runtime.inspect', 'runtime.software.inspect', 'runtime.code.check', 'conversation.escalation', 'assistant.skills.list', 'assistant.skills.read', 'workbench.inspect', 'workflow.inspect', 'workflow.conversation', 'workflow.folder', 'workflow.attachments', 'workflow.attachment.read', 'workflows.list', 'app.source.list', 'app.source.search', 'app.source.read', 'app.source.history']);
       const tools = this.tools(permissionScope).filter(tool => (!tool.name.startsWith('maintenance.') || maintenanceAuthorized)
+        && (tool.name !== 'connections.manage' || sourceConversationId && diagnosticTurnId)
+        && (!['mcp.call', 'desktop.call'].includes(tool.name) || diagnosticTurnId || context.runId)
         && (decision?.intent !== 'discuss' || discussionTools.has(tool.name)));
       turn.admitCheckpoint(diagnosticScope({ selection: { ...selection, role, readOnly, workflowBound, sourceConversationId, permissionRevision: permissionScope.revision }, evidence, modelRoute, capabilities, config: this.app.config, tools }), checkpoint, evidence);
       const source = { userMessage: sanitizeDiagnosticText(text), selection: Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'document')),
@@ -481,9 +485,15 @@ export class ApplicationAssistant {
         ...(continuation ? { portableContext: continuation } : {}),
         sourceConversationId,
         ...(maintenanceAuthorized ? { maintenanceTask: this.maintenance.project(maintenanceTask()) } : {}),
-        capabilities: compactDiagnosticContext({ ...capabilities, features: capabilities.features?.map(({ id, status, tools }) => ({ id, status, tools })) }, { initial: true }) };
+        capabilities: { ...compactDiagnosticContext({ ...capabilities, features: undefined,
+          workbench: { ...capabilities.workbench, nodeTypes: capabilities.workbench?.nodeTypes?.map(({ type, label }) => ({ type, label })) },
+          skillManifest: capabilities.skillManifest?.map(({ name, description }) => ({ name, description })),
+          loadedSkills: capabilities.loadedSkills?.map(({ name, revision, instructions }) => ({ name, revision, instructions })) }, { initial: true }),
+          features: capabilities.features?.filter(feature => ['execution', 'human-review', 'assistant-permissions'].includes(feature.id)).map(({ id, status }) => ({ id, status })),
+          featureIndex: Object.fromEntries(['available', 'proposal-only', 'ui-only', 'unavailable'].map(status => [status, capabilities.features?.filter(feature => feature.status === status).map(feature => feature.id) || []])),
+          readWith: 'app.capabilities(section="overview") / node.describe' } };
       const catalog = tools.map(({ name, description, inputSchema, effect, readOnly }) => ({
-        name, description: description?.split('；')[0].slice(0, 64), inputSchema, effect: effect || (readOnly ? 'read-only' : 'restricted'),
+        name, description: description?.split('；')[0].slice(0, 40), inputSchema, effect: effect || (readOnly ? 'read-only' : 'restricted'),
       }));
       const batchExcluded = new Set(['workflow.propose', 'browser.capture', 'environment.probe', 'workflow.preflight', 'artifact.inspect', 'assistant.probe', 'assistant.experiment', 'runtime.software.inspect', 'conversation.escalate']);
       const sourceRepair = role === 'supervisor' && !readOnly && permissionScope.permissions.sourceRepair === true;
@@ -606,7 +616,7 @@ export class ApplicationAssistant {
           try {
             called = await turn.wait(this.call(name, args, { ...selection, page, signal: activeSignal, text, history, portableContext: continuation, onSession, attachments: storedAttachmentRefs(materials),
               permissionScope, sourceConversationId, diagnosticTurnId, deadlineAt,
-              escalationAuthorized: role === 'workflow' && !readOnly && decision?.intent === 'diagnose', maintenanceAuthorized, maintenanceTaskId,
+              escalationAuthorized: role === 'workflow' && !readOnly && decision?.intent === 'diagnose', readOnlyExternal: decision?.intent === 'discuss', maintenanceAuthorized, maintenanceTaskId,
               onProgress: modelProgress, modelRoute, toolEvidence: turn.transcript() }), activeSignal);
             check(activeSignal);
             if (called?.proposal) {
@@ -632,6 +642,10 @@ export class ApplicationAssistant {
               turn.record(name, args, { proposed: true, executed: false }, { key });
               turn.evidence.at(-1).status = 'complete';
               return complete(proposalResult(proposal));
+            }
+            if (called?._nodeorchard_images) {
+              images.push(...await this.app.runtimeTools.stageImages(called));
+              const { _nodeorchard_images, ...publicResult } = called; called = publicResult;
             }
             if (called?.images) images.push(...called.images);
             value = this.permissions.project(called?.value ?? called, permissionScope);
@@ -681,6 +695,9 @@ export class ApplicationAssistant {
   }
   async #dispatch(name, args, context) {
     const permissionScope = context.permissionScope;
+    if (this.app.runtimeTools?.handles(name)) return this.app.runtimeTools.call(name, args, context);
+    if (this.app.connections?.handles(name)) return this.app.connections.call(name, args, { ...context, readOnly: permissionScope.readOnly,
+      authorize: async () => { await this.permissions.current(permissionScope); if (!this.permissions.allowed(name, permissionScope)) fail('连接管理权限未开放。', 403); if (name === 'connections.manage') this.lifecycle.assertWritable(context.sourceConversationId); } });
     if (this.maintenance.handles(name)) return this.maintenance.call(name, args, context);
     if (this.sourceTools.handles(name)) return this.sourceTools.call(name, args, context);
     if (this.modelTools.handles(name)) return this.modelTools.call(name, args, context);
